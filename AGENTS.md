@@ -2,59 +2,35 @@
 
 ## Stack
 
-- **Tauri v2** desktop app (config at `src-tauri/tauri.conf.json`)
-- **Frontend**: Vue 3 + Pinia + Vue Router (hash history) + Reka UI + Lucide icons
-- **Backend**: Rust, Cargo workspace (`resolver = "2"`, edition `"2024"`) with two crates
+- **GPUI** native desktop app (GPU-accelerated, by Zed Industries)
+- **gpui-component** UI library (60+ shadcn/ui-style components)
+- **photo-tool-core** pure Rust domain logic crate
 
 ## Workspace layout
 
 ```
 photo-tool-core/          # Pure Rust library — all domain logic
 ├── Cargo.toml            # Dependencies: rawlib, kamadak-exif, image, trash, ...
-src-tauri/                # Tauri v2 shell — commands/ delegate to photo-tool-core
-├── Cargo.toml            # Package: photo-tool-tauri; depends on photo-tool-core, tauri v2 + plugins
-├── tauri.conf.json       # Tauri app config
-├── capabilities/
-│   └── default.json      # Permission grants (core, dialog, fs, ...)
-src/                      # Vue 3 frontend — @ = ./src
-├── App.vue
-├── main.ts
-├── router/index.ts       # Hash-based routing (createWebHashHistory)
-├── stores/               # Pinia stores (browse, config, ui)
-├── views/                # BrowseView, CompareView
-├── components/           # Layout, Toolbar, DirectoryTree, ThumbnailGrid, dialogs, ...
-├── composables/          # useKeyboard, useThumbnail
-└── types/                # index.ts (domain types), tauri.ts (IPC command types)
+photo-tool-gpui/          # GPUI desktop application
+├── Cargo.toml            # Package: photo-tool-gpui; depends on photo-tool-core, gpui, gpui-component
+├── src/
+│   ├── main.rs           # App entry, state, rendering
+│   └── texture_manager.rs # Thumbnail disk cache + lazy GPU texture loading
 ```
 
 ## Commands
 
 | What | Command |
-| ------ | --------- |
-| Tauri dev (full app) | `pnpm tauri` |
-| Frontend-only dev | `pnpm dev` (Vite on :1420, strict port) |
-| Frontend build | `pnpm build` (vue-tsc --noEmit → vite build) |
+|------|---------|
 | Rust build | `cargo build` |
+| Build GPUI app | `cargo build -p photo-tool-gpui` |
 | Rust tests (core) | `cargo test -p photo-tool-core` |
 | Run single Rust test | `cargo test -p photo-tool-core -- <test_name>` |
 | Rust Clippy (all) | `cargo clippy --all-targets` |
-| Check Tauri Rust code | `cargo check -p photo-tool-tauri` |
-
-## Frontend details
-
-- **Package manager**: `pnpm` — never use npm or yarn.
-- **Tauri dev** (`pnpm tauri`) auto-starts the Vite dev server via `tauri.conf.json` `beforeDevCommand`. Do not run `pnpm dev` and `pnpm tauri` simultaneously — they will fight over port 1420.
-- **Routing**: Hash-based (`createWebHashHistory`), because Tauri loads from `http://localhost:1420`.
-- **Alias**: `@` → `./src`.
-- **Dev server**: port `1420`, strict port (fail if taken).
-- **Build target**: `chrome105` (Windows), `safari14` (other).
-- **Icons**: `lucide-vue-next` for UI icons.
-- **No JS/TS test runner** is configured.
-- **No linter/formatter** is configured for frontend code.
 
 ## Rust details
 
-- **Workspace crates**: `photo-tool-core` (library) and `src-tauri` (binary, package name `photo-tool-tauri`).
+- **Workspace crates**: `photo-tool-core` (library) and `photo-tool-gpui` (binary).
 - **Tests** live inline in `photo-tool-core/src/*.rs` (no `tests/` dir).
 - **No explicit rustfmt.toml or clippy.toml** — use defaults.
 - `libraw.so` is gitignored — the `rawlib` crate requires a system-level libraw installation for RAW image support.
@@ -67,19 +43,21 @@ src/                      # Vue 3 frontend — @ = ./src
   - `walkdir 2` — recursive directory scanning
   - `chrono 0.4` — date/time handling
   - `toml 0.8` — config serialization
-- Key dependencies in `src-tauri`:
-  - `tauri 2` with `devtools` feature
-  - `tauri-plugin-dialog 2` — native open/save/message dialogs
-  - `tauri-plugin-fs 2` — filesystem access
-  - `tauri-plugin-log 2` — logging
-  - `tokio 1` (full features) — async runtime
+- Key dependencies in `photo-tool-gpui`:
+  - `gpui` (git: zed-industries/zed) — GPU-accelerated UI framework
+  - `gpui_platform` (git, features: font-kit) — platform windowing
+  - `gpui-component` (git: longbridge/gpui-component) — UI component library
+  - `gpui-component-assets` (git) — bundled default assets
+  - `rfd 0.17` — native file dialogs
+  - `image 0.25` — image decoding
+  - `dirs 6` — platform directories
 
-## Tauri capabilities
+## GPUI patterns
 
-Permissions are declared in `src-tauri/capabilities/default.json`:
-
-- `core:default` — core Tauri functionality
-- `dialog:allow-open`, `dialog:allow-ask`, `dialog:allow-message` — native dialog prompts
-- `fs:allow-read`, `fs:allow-exists` — filesystem read access
-
-Adding new Tauri plugins or commands may require updating this file.
+- `gpui_component::init(cx)` must be called early in `app.run` closure
+- `Root::new(view, window, cx)` wraps every window's content
+- `gpui_platform::application().with_assets(...)` initializes the app
+- `cx.spawn(async {...}).detach()` wraps `cx.open_window`
+- Background work: `std::thread::spawn` + `mpsc::channel` → poll in `render()`
+- `Render` trait: `fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement`
+- Theme colors: use `Rgba` from `rgb()`, not `Hsla`

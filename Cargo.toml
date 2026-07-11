@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["photo-tool-core", "src-tauri"]
+members = ["photo-tool-core", "photo-tool-gpui"]
 
 [workspace.package]
 version = "0.1.0"
