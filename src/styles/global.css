@@ -1,0 +1,48 @@
+@import './variables.css';
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #app {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  font-family: var(--font-body);
+  font-size: 15px;
+  color: var(--text);
+  background: var(--bg-page);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-heading);
+  font-weight: 600;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+  transition: background var(--transition-fast);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+::selection {
+  background: var(--selection);
+  color: var(--primary);
+}

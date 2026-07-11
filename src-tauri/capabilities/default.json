@@ -1,0 +1,13 @@
+{
+  "identifier": "default",
+  "description": "Capability for the main window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "dialog:allow-ask",
+    "dialog:allow-message",
+    "fs:allow-read",
+    "fs:allow-exists"
+  ]
+}

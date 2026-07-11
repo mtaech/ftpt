@@ -1,0 +1,18 @@
+[package]
+name = "photo-tool-tauri"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+photo-tool-core = { path = "../photo-tool-core" }
+tauri = { version = "2", features = ["devtools"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-log = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+dirs = "6"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

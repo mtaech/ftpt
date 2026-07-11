@@ -1,0 +1,5 @@
+/target
+local-lib/
+libraw.so
+.worktrees/
+node_modules/

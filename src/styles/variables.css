@@ -1,0 +1,71 @@
+:root {
+  /* Indigo primary palette */
+  --primary: #4F46E5;        /* indigo-600 */
+  --primary-hover: #4338CA;  /* indigo-700 */
+  --primary-subtle: rgba(79, 70, 229, 0.08);
+  --primary-light: #E0E7FF;  /* indigo-100 */
+  --secondary: #6366F1;      /* indigo-500 */
+
+  /* Background — warm zinc */
+  --bg-page: #FAFAF9;        /* stone-50 */
+  --bg-surface: #FFFFFF;
+  --bg-hover: #F5F5F4;       /* stone-100 */
+  --bg-elevated: #FFFFFF;
+
+  /* Border — warm stone */
+  --border: #E7E5E4;         /* stone-200 */
+  --border-light: #F5F5F4;   /* stone-100 */
+  --border-focus: var(--primary);
+
+  /* Text — warm stone */
+  --text: #1C1917;           /* stone-900 */
+  --text-secondary: #57534E; /* stone-600 */
+  --text-muted: #A8A29E;     /* stone-400 */
+
+  /* Semantic */
+  --danger: #EF4444;
+  --danger-hover: #DC2626;
+  --danger-subtle: rgba(239, 68, 68, 0.08);
+  --success: #22C55E;
+  --warning: #F59E0B;
+
+  /* Selection */
+  --selection: rgba(79, 70, 229, 0.12);
+  --selection-border: var(--primary);
+
+  /* Special */
+  --star: #F59E0B;
+  --star-active: #EAB308;
+  --flag-pick: #22C55E;
+  --flag-reject: #EF4444;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.07), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -4px rgba(0, 0, 0, 0.04);
+  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.04);
+
+  /* Typography — Inter for Latin/numerals, system CJK fonts for Chinese */
+  --font-heading: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font-body: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+
+  /* Radii */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+
+  /* Ring */
+  --ring-offset: 2px;
+
+  /* Transitions */
+  --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-normal: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Layout */
+  --left-panel-width: 260px;
+  --right-panel-width: 380px;
+  --toolbar-height: 48px;
+  --statusbar-height: 36px;
+}
