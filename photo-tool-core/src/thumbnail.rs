@@ -47,7 +47,10 @@ impl ThumbnailCache {
 
     fn cache_key(&self, source: &SourceFile, size: u32) -> String {
         use std::hash::{Hash, Hasher};
+        // 缓存格式版本：解码逻辑修复（如行宽错位）时递增，旧缓存自动失效
+        const CACHE_VERSION: u8 = 2;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        CACHE_VERSION.hash(&mut hasher);
         source.path.to_string_lossy().hash(&mut hasher);
         size.hash(&mut hasher);
         format!("{:016x}.jpg", hasher.finish())
