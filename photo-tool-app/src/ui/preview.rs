@@ -228,10 +228,12 @@ fn zoom_button(icon: IconName, id: &str, view_handle: WeakEntity<RootView>) -> i
                             crate::action::Action::ZoomOut,
                             root_cx,
                         ),
-                        _ => root_view.dispatch_action(
+                        IconName::Frame => root_view.dispatch_action(
                             crate::action::Action::ZoomToFit,
                             root_cx,
                         ),
+                        // zoom_button 仅由本文件以 Minus/Plus/Frame 调用
+                        _ => unreachable!("zoom_button 不支持的图标"),
                     }
                 });
             }

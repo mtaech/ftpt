@@ -201,11 +201,11 @@ fn render_color_label_section(
             div()
                 .flex()
                 .gap_2()
-                .child(label_dot(*theme::colors::LABEL_RED, Action::LabelRed, "color-label-red", current_label == photo_tool_core::domain::ColorLabel::Red, cx))
-                .child(label_dot(*theme::colors::LABEL_YELLOW, Action::LabelYellow, "color-label-yellow", current_label == photo_tool_core::domain::ColorLabel::Yellow, cx))
-                .child(label_dot(*theme::colors::LABEL_GREEN, Action::LabelGreen, "color-label-green", current_label == photo_tool_core::domain::ColorLabel::Green, cx))
-                .child(label_dot(*theme::colors::LABEL_BLUE, Action::LabelBlue, "color-label-blue", current_label == photo_tool_core::domain::ColorLabel::Blue, cx))
-                .child(label_dot(*theme::colors::LABEL_PURPLE, Action::LabelPurple, "color-label-purple", current_label == photo_tool_core::domain::ColorLabel::Purple, cx)),
+                .child(label_dot(*theme::colors::LABEL_RED, Action::LabelRed, "color-label-red", current_label == ColorLabel::Red, cx))
+                .child(label_dot(*theme::colors::LABEL_YELLOW, Action::LabelYellow, "color-label-yellow", current_label == ColorLabel::Yellow, cx))
+                .child(label_dot(*theme::colors::LABEL_GREEN, Action::LabelGreen, "color-label-green", current_label == ColorLabel::Green, cx))
+                .child(label_dot(*theme::colors::LABEL_BLUE, Action::LabelBlue, "color-label-blue", current_label == ColorLabel::Blue, cx))
+                .child(label_dot(*theme::colors::LABEL_PURPLE, Action::LabelPurple, "color-label-purple", current_label == ColorLabel::Purple, cx)),
         )
         .child(
             h_flex()
