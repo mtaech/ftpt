@@ -112,7 +112,7 @@ pub fn render_toolbar(
 // ── Settings Dialog Overlay ──────────────────────────────────────────
 pub fn render_settings_overlay(view: &RootView, cx: &mut Context<RootView>) -> impl IntoElement {
     let vh = cx.entity().downgrade();
-    let thumb_size = view.config.thumbnail_size;
+    let font = view.config.font_family.clone();
     let delete_mode = view.config.default_delete_mode.clone();
     let import_mode = view.config.import_behavior.clone();
     let cache_size = view.config.max_cache_size_mb;
@@ -120,7 +120,7 @@ pub fn render_settings_overlay(view: &RootView, cx: &mut Context<RootView>) -> i
     let clicked_inside = std::rc::Rc::new(std::cell::Cell::new(false));
     let clicked_inside_card = clicked_inside.clone();
 
-    let click_thumb = vh.clone();
+    let click_font = vh.clone();
     let click_delete = vh.clone();
     let click_import = vh.clone();
     let click_cache = vh.clone();
@@ -181,15 +181,15 @@ pub fn render_settings_overlay(view: &RootView, cx: &mut Context<RootView>) -> i
                 )
                 .child(div().h(px(1.)).w_full().bg(theme::colors().border_variant))
                 .child(section("界面"))
-                .child(setting_toggle("缩略图尺寸", &format!("{}px", thumb_size), {
-                    let vh = click_thumb;
+                .child(setting_toggle("字体", &font, {
+                    let vh = click_font;
                     move |_, _, cx| {
                         if let Some(entity) = vh.upgrade() {
                             cx.update_entity(&entity, |view, cx| {
-                                view.config.thumbnail_size = match view.config.thumbnail_size {
-                                    120 => 220,
-                                    220 => 320,
-                                    _ => 120,
+                                let current = view.config.font_family.clone();
+                                view.config.font_family = match current.as_str() {
+                                    "Microsoft YaHei UI" => "Noto Sans CJK SC".into(),
+                                    _ => "Microsoft YaHei UI".into(),
                                 };
                                 view.save_config();
                                 cx.notify();

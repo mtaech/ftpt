@@ -17,11 +17,13 @@ pub fn render_layout(
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let mut wizard_state = crate::ui::import_wizard::ImportWizardState::default();
+    let font_family = view.config.font_family.clone();
 
         v_flex()
+        .text_color(theme::colors().text)
+        .font_family(font_family)
         .size_full()
         .bg(theme::colors().background)
-        .text_color(theme::colors().text)
         // Keyboard shortcuts
         .on_key_down(cx.listener(
             |view: &mut RootView, event: &KeyDownEvent, _window, cx| {
