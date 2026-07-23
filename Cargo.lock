@@ -4817,6 +4817,7 @@ dependencies = [
  "chrono",
  "gpui",
  "gpui-component",
+ "gpui-component-assets",
  "gpui_platform",
  "oneshot",
  "photo-tool-core",
