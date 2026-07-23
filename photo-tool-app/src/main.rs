@@ -47,7 +47,7 @@ fn main() {
                 ..Default::default()
             },
             move |window, cx| {
-                let view = cx.new(move |cx| RootView::new(cx, cp.clone(), ac.clone()));
+                let view = cx.new(|cx| RootView::new(window, cx, cp.clone(), ac.clone()));
                 cx.new(|cx| gpui_component::Root::new(view, window, cx))
             },
         )

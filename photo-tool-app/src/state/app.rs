@@ -2,6 +2,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use gpui::*;
+use gpui_component::IndexPath;
+use gpui_component::select::{SelectEvent, SelectState};
+use std::sync::LazyLock;
 use photo_tool_core::config::AppConfig;
 use photo_tool_core::domain::{
     CaptureMeta, ColorLabel, DeleteMode, FilterCriteria, Flag, Rating, SortBy, SortDirection,
@@ -10,6 +13,16 @@ use photo_tool_core::thumbnail::ThumbnailCache;
 use photo_tool_core::{scanner, xmp};
 
 use crate::worker::Worker;
+
+/// 系统已安装字体家族（排序去重，LazyLock 只枚举一次）
+pub static SYSTEM_FONTS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    let mut families = font_kit::source::SystemSource::new()
+        .all_families()
+        .unwrap_or_default();
+    families.sort();
+    families.dedup();
+    families
+});
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
@@ -42,13 +55,15 @@ pub struct RootView {
     pub preview_data: HashMap<usize, (ImageFormat, Vec<u8>)>,
     /// preview_data 的 FIFO 淘汰顺序
     preview_order: VecDeque<usize>,
+    /// 字体选择下拉状态（设置弹窗用）
+    pub font_select: Entity<SelectState<Vec<SharedString>>>,
     pub show_import_wizard: bool,
     pub show_settings: bool,
     pub scan_task: Option<Task<()>>,
 }
 
 impl RootView {
-    pub fn new(_cx: &mut Context<Self>, config_path: PathBuf, config: AppConfig) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>, config_path: PathBuf, config: AppConfig) -> Self {
         let cache_dir = config_path
             .parent()
             .unwrap_or(Path::new("."))
@@ -56,6 +71,27 @@ impl RootView {
         let thumbnail_cache = Some(ThumbnailCache::new(cache_dir));
 
         let worker = Worker::new();
+
+        // 字体选择下拉：系统字体列表 + 当前配置项 + 选中后写回配置
+        let font_items: Vec<SharedString> = SYSTEM_FONTS
+            .iter()
+            .map(|f| SharedString::from(f.clone()))
+            .collect();
+        let selected_ix = font_items
+            .iter()
+            .position(|f| f.as_str() == config.font_family.as_str())
+            .map(|row| IndexPath::default().row(row));
+        let font_select = cx.new(|cx| {
+            SelectState::new(font_items, selected_ix, window, cx).searchable(true)
+        });
+        cx.subscribe(&font_select, |view, _state, event, cx| {
+            if let SelectEvent::Confirm(Some(name)) = event {
+                view.config.font_family = name.to_string();
+                view.save_config();
+                cx.notify();
+            }
+        })
+        .detach();
 
         Self {
             config,
@@ -76,6 +112,7 @@ impl RootView {
             thumbnail_data: HashMap::new(),
             preview_data: HashMap::new(),
             preview_order: VecDeque::new(),
+            font_select,
             show_import_wizard: false,
             show_settings: false,
         }

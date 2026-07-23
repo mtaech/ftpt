@@ -1,25 +1,14 @@
-use gpui::{prelude::FluentBuilder, *};
+use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::scroll::ScrollableElement;
+use gpui_component::select::Select;
 use gpui_component::IconName;
-use gpui_component::{h_flex, v_flex};
-use std::sync::LazyLock;
+use gpui_component::h_flex;
 
 use photo_tool_core::domain::SortBy;
 
 use crate::action::Action;
 use crate::state::app::RootView;
 use crate::ui::theme;
-
-/// 系统已安装字体家族（排序去重，LazyLock 只枚举一次）
-static SYSTEM_FONTS: LazyLock<Vec<String>> = LazyLock::new(|| {
-    let mut families = font_kit::source::SystemSource::new()
-        .all_families()
-        .unwrap_or_default();
-    families.sort();
-    families.dedup();
-    families
-});
 
 
 /// Render the top toolbar with import button, view toggle, sort controls, refresh.
@@ -124,7 +113,6 @@ pub fn render_toolbar(
 // ── Settings Dialog Overlay ──────────────────────────────────────────
 pub fn render_settings_overlay(view: &RootView, cx: &mut Context<RootView>) -> impl IntoElement {
     let vh = cx.entity().downgrade();
-    let font = view.config.font_family.clone();
     let delete_mode = view.config.default_delete_mode.clone();
     let import_mode = view.config.import_behavior.clone();
     let cache_size = view.config.max_cache_size_mb;
@@ -132,7 +120,6 @@ pub fn render_settings_overlay(view: &RootView, cx: &mut Context<RootView>) -> i
     let clicked_inside = std::rc::Rc::new(std::cell::Cell::new(false));
     let clicked_inside_card = clicked_inside.clone();
 
-    let click_font = vh.clone();
     let click_delete = vh.clone();
     let click_import = vh.clone();
     let click_cache = vh.clone();
@@ -194,54 +181,18 @@ pub fn render_settings_overlay(view: &RootView, cx: &mut Context<RootView>) -> i
                 .child(div().h(px(1.)).w_full().bg(theme::colors().border_variant))
                 .child(section("界面"))
                 .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
+                    h_flex()
+                        .items_center()
+                        .justify_between()
                         .child(
                             div()
                                 .text_color(theme::colors().text_muted)
-                                .text_xs()
-                                .child(format!("字体（当前：{}）", font)),
+                                .child("字体"),
                         )
                         .child(
                             div()
-                                .h(px(200.))
-                                .border_1()
-                                .border_color(theme::colors().border_variant)
-                                .rounded_md()
-                                .overflow_y_scrollbar()
-                                .child(
-                                    v_flex()
-                                        .p_1()
-                                        .children(SYSTEM_FONTS.iter().map(|name| {
-                                            let selected = *name == font;
-                                            let name_click = name.clone();
-                                            let vh = click_font.clone();
-                                            div()
-                                                .when(selected, |d| {
-                                                    d.bg(theme::colors().element_selected)
-                                                })
-                                                .id(ElementId::Name(format!("font-{name}").into()))
-                                                .px_2()
-                                                .py_1()
-                                                .rounded_sm()
-                                                .cursor_pointer()
-                                                .font_family(name.clone())
-                                                .hover(|s| s.bg(theme::colors().element_hover))
-                                                .child(name.clone())
-                                                .on_click(move |_, _, cx| {
-                                                    if let Some(entity) = vh.upgrade() {
-                                                        let name = name_click.clone();
-                                                        cx.update_entity(&entity, |view, cx| {
-                                                            view.config.font_family = name;
-                                                            view.save_config();
-                                                            cx.notify();
-                                                        });
-                                                    }
-                                                })
-                                        })),
-                                ),
+                                .w(px(320.))
+                                .child(Select::new(&view.font_select).search_placeholder("输入字体名过滤")),
                         ),
                 )
                 .child(div().h(px(1.)).w_full().bg(theme::colors().border_variant))
