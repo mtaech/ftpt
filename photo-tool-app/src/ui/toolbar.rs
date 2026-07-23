@@ -78,7 +78,6 @@ pub fn render_toolbar(
                 .icon(IconName::SortAscending)
                 .ghost()
                 .label(label)
-                .dropdown_caret(true)
                 .on_click({
                     let vh = vh.clone();
                     move |_, _window, cx| {
