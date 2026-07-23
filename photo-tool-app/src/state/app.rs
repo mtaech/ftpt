@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use gpui::*;
@@ -38,6 +38,10 @@ pub struct RootView {
     pub display_order: Vec<usize>,
     /// Thumbnail JPEG bytes keyed by capture index.
     pub thumbnail_data: HashMap<usize, Vec<u8>>,
+    /// 预览图字节（含格式）按 capture 索引缓存：非 RAW 为原图，RAW 为大尺寸内嵌预览
+    pub preview_data: HashMap<usize, (ImageFormat, Vec<u8>)>,
+    /// preview_data 的 FIFO 淘汰顺序
+    preview_order: VecDeque<usize>,
     pub show_import_wizard: bool,
     pub show_settings: bool,
     pub scan_task: Option<Task<()>>,
@@ -70,6 +74,8 @@ impl RootView {
             display_order: Vec::new(),
             scan_task: None,
             thumbnail_data: HashMap::new(),
+            preview_data: HashMap::new(),
+            preview_order: VecDeque::new(),
             show_import_wizard: false,
             show_settings: false,
         }
@@ -123,6 +129,8 @@ impl RootView {
                         this.selected.clear();
                         this.anchor = None;
                         this.thumbnail_data.clear();
+                        this.preview_data.clear();
+                        this.preview_order.clear();
                         this.apply_filter_and_sort();
                         tracing::info!(
                             "扫描完成：{} 找到 {} 个 capture，过滤后 {} 个",
@@ -260,6 +268,80 @@ impl RootView {
         self.display_order = indices;
     }
 
+    /// 预览图缓存上限（张）
+    const PREVIEW_CACHE_LIMIT: usize = 20;
+
+    fn insert_preview(&mut self, idx: usize, format: ImageFormat, bytes: Vec<u8>) {
+        self.preview_order.retain(|&i| i != idx);
+        self.preview_order.push_back(idx);
+        self.preview_data.insert(idx, (format, bytes));
+        while self.preview_order.len() > Self::PREVIEW_CACHE_LIMIT {
+            if let Some(oldest) = self.preview_order.pop_front() {
+                self.preview_data.remove(&oldest);
+            }
+        }
+    }
+
+    /// 确保当前焦点图片的预览数据已加载：非 RAW 读原图（缩略图放大会模糊），
+    /// RAW 无法直接解码，取 1600px 内嵌预览。
+    pub fn ensure_preview_loaded(&mut self, cx: &mut Context<Self>) {
+        use photo_tool_core::domain::{ImageFormat as DomainFormat, SourceFile};
+
+        let Some(focus_idx) = self.focus_index else { return };
+        let Some(&capture_idx) = self.display_order.get(focus_idx) else { return };
+        if self.preview_data.contains_key(&capture_idx) { return; }
+        let Some(meta) = self.captures.get(capture_idx) else { return };
+
+        let path = PathBuf::from(&meta.primary_path);
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let gpui_fmt = match ext.as_str() {
+            "png" => ImageFormat::Png,
+            "webp" => ImageFormat::Webp,
+            "gif" => ImageFormat::Gif,
+            "bmp" => ImageFormat::Bmp,
+            "tif" | "tiff" => ImageFormat::Tiff,
+            _ => ImageFormat::Jpeg,
+        };
+        let is_raw = matches!(DomainFormat::from_extension(&ext), Some(DomainFormat::Raw(_)));
+
+        if is_raw {
+            // RAW：GPUI 无法解码，用大尺寸内嵌预览
+            let Some(cache) = self.thumbnail_cache.clone() else { return };
+            let source = SourceFile {
+                path,
+                format: DomainFormat::from_extension(&ext).unwrap(),
+                is_sidecar: false,
+                file_size: meta.file_size,
+            };
+            self.worker.spawn(cx, move || {
+                cache
+                    .get_or_generate(&source, 1600)
+                    .map_err(|e| tracing::warn!("预览图生成失败: {e}"))
+                    .ok()
+            }, move |this, result, cx| {
+                if let Some(bytes) = result {
+                    this.insert_preview(capture_idx, ImageFormat::Jpeg, bytes);
+                    cx.notify();
+                }
+            });
+        } else {
+            self.worker.spawn(cx, move || {
+                std::fs::read(&path)
+                    .map_err(|e| tracing::warn!("预览原图读取失败 {}: {e}", path.display()))
+                    .ok()
+            }, move |this, result, cx| {
+                if let Some(bytes) = result {
+                    this.insert_preview(capture_idx, gpui_fmt, bytes);
+                    cx.notify();
+                }
+            });
+        }
+    }
+
     /// Spawn background tasks to preload thumbnails for the first N visible items.
     pub fn preload_thumbnails(&mut self, cx: &mut Context<Self>) {
         use photo_tool_core::domain::{ImageFormat, SourceFile};
@@ -305,8 +387,9 @@ impl RootView {
             let ci = capture_idx;
             let path_display = source.path.clone();
             self.worker.spawn(cx, move || {
+                // 2x 生成：高 DPI 下 1x 缩略图拉伸会模糊
                 cache_clone
-                    .get_or_generate(&source, thumbnail_size)
+                    .get_or_generate(&source, thumbnail_size * 2)
                     .map_err(|e| {
                         tracing::warn!("缩略图生成失败 {}: {e}", path_display.display());
                     })
@@ -575,11 +658,14 @@ impl RootView {
         );
     }
 
-    pub fn toggle_view_mode(&mut self) {
+    pub fn toggle_view_mode(&mut self, cx: &mut Context<Self>) {
         self.view_mode = match self.view_mode {
             ViewMode::Grid => ViewMode::Preview,
             ViewMode::Preview => ViewMode::Grid,
         };
+        if self.view_mode == ViewMode::Preview {
+            self.ensure_preview_loaded(cx);
+        }
     }
 
     /// Get the first selected capture (for info panel / preview).
@@ -633,7 +719,7 @@ impl RootView {
             }
             // View
             Action::ToggleGridPreview => {
-                self.toggle_view_mode();
+                self.toggle_view_mode(cx);
                 cx.notify();
             }
             Action::ZoomIn | Action::ZoomOut | Action::ZoomToFit | Action::ZoomTo100 => {
@@ -702,6 +788,9 @@ impl RootView {
                 cx.notify();
             }
         }
+
+        // 导航/切换后确保焦点图的预览数据在加载（已加载则直接返回）
+        self.ensure_preview_loaded(cx);
     }
 
     fn apply_rating(&mut self, rating: Rating, cx: &mut Context<Self>) {

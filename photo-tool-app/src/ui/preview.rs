@@ -15,9 +15,13 @@ pub fn render_preview(view: &RootView, cx: &mut Context<RootView>) -> impl IntoE
         .focus_index
         .map_or(false, |i| i + 1 < view.display_order.len());
 
-    let thumbnail_bytes = focused.and_then(|meta| {
+    // 优先使用预览数据（非 RAW 为原图）；未加载完成时回退缩略图
+    let image_source = focused.and_then(|meta| {
         let idx = meta.index;
-        thumbnail_data.get(&idx).cloned()
+        view.preview_data
+            .get(&idx)
+            .map(|(f, b)| (*f, b.clone()))
+            .or_else(|| thumbnail_data.get(&idx).map(|b| (ImageFormat::Jpeg, b.clone())))
     });
 
     let view_handle = cx.entity().downgrade();
@@ -113,9 +117,9 @@ pub fn render_preview(view: &RootView, cx: &mut Context<RootView>) -> impl IntoE
                         .justify_center()
                         .h_full()
                         .p_4()
-                        .child(match &thumbnail_bytes {
-                            Some(bytes) => {
-                                let img_obj = Image::from_bytes(ImageFormat::Jpeg, bytes.clone());
+                        .child(match &image_source {
+                            Some((fmt, bytes)) => {
+                                let img_obj = Image::from_bytes(*fmt, bytes.clone());
                                 img(Arc::new(img_obj))
                                     .object_fit(ObjectFit::Contain)
                                     .size_full()
