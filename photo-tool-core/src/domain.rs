@@ -249,7 +249,7 @@ impl CaptureMeta {
         if self.file_size.is_none() {
             self.file_size = std::fs::metadata(path).ok().map(|m| m.len());
         }
-        }
+    }
 
     /// 从 XMP 旁车文件填充评分/颜色标签/旗标（轻量调用：只读 sidecar）
     pub fn enrich_with_xmp(&mut self) {
