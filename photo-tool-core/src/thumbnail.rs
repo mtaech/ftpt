@@ -379,4 +379,33 @@ mod tests {
         let result = cache.get_or_generate(&source, 64);
         assert!(result.is_err(), "should error on nonexistent file");
     }
+
+    #[test]
+    fn test_scan_then_generate_thumbnails_pipeline() {
+        // 复现应用主链路：扫描目录 → 取 primary → 生成缩略图
+        let dir = TempDir::new().unwrap();
+        for i in 0..3 {
+            let img = image::RgbImage::from_fn(800, 600, |x, y| {
+                image::Rgb([(x % 256) as u8, (y % 256) as u8, (i * 60) as u8])
+            });
+            img.save(dir.path().join(format!("photo_{i}.jpg"))).unwrap();
+        }
+
+        let captures = crate::scanner::scan_directory(
+            dir.path(),
+            &["xmp".to_string()],
+            &crate::domain::FilterCriteria::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(captures.len(), 3, "扫描应找到 3 个 capture");
+
+        let cache = ThumbnailCache::new(dir.path().join("thumbs"));
+        for capture in &captures {
+            let primary = &capture.source_files[capture.primary_index];
+            let bytes = cache.get_or_generate(primary, 220).unwrap();
+            assert!(bytes.len() > 100, "缩略图字节数异常：{}", bytes.len());
+            assert_eq!(&bytes[..2], &[0xFF, 0xD8], "应为 JPEG 头");
+        }
+    }
 }

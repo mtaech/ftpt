@@ -34,7 +34,8 @@ impl Worker {
         self.pool.spawn(move || {
             let _ = tx.send(f());
         });
-        let _task: Task<()> = cx.spawn(|weak_view: WeakEntity<RootView>, cx: &mut AsyncApp| {
+        // GPUI 的 Task 丢弃即取消，必须 detach 让桥接任务跑完
+        cx.spawn(|weak_view: WeakEntity<RootView>, cx: &mut AsyncApp| {
             let mut cx = cx.clone();
             async move {
                 if let Ok(result) = rx.await {
@@ -45,6 +46,7 @@ impl Worker {
                     }
                 }
             }
-        });
+        })
+        .detach();
     }
 }
