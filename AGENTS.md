@@ -127,6 +127,20 @@ pub enum OpError {
 | `CONTEXT.md` | 领域术语表（Capture/Stack/Rating 等泛在语言） |
 | `.gitignore` | 含 `libraw.so`、`local-lib/`、`nul`（Windows 保留名产物） |
 
+
+## gpui-component 本地源码与文档
+
+gpui-component 项目位于 `D:\Dev\Code\gpui-component`，含完整源码和本地文档：
+
+|路径|内容|
+|---|---|
+|`crates/ui/src/`|组件库 Rust 源码（Button/Select/Input 等）|
+|`crates/ui/src/theme/mod.rs`|`Theme` 结构体与 `font_family` 字段定义|
+|`docs/docs/theme.md`|主题系统文档|
+|`docs/docs/`|更多组件文档|
+|`crates/story/src/stories/`|各组件 Story/示例代码（如 `select_story.rs`）|
+
+所有 gpui-component API 查询都应优先阅读本地源码而非网络文档。
 ---
 
 ## 运行时与工具链偏好
