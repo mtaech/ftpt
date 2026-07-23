@@ -112,13 +112,14 @@ pub fn render_toolbar(
 // ── Settings Dialog Overlay ──────────────────────────────────────────
 pub fn render_settings_overlay(view: &RootView, cx: &mut Context<RootView>) -> impl IntoElement {
     let vh = cx.entity().downgrade();
-    let font = view.config.font_family.clone();
     let thumb_size = view.config.thumbnail_size;
     let delete_mode = view.config.default_delete_mode.clone();
     let import_mode = view.config.import_behavior.clone();
     let cache_size = view.config.max_cache_size_mb;
 
-    let click_font = vh.clone();
+    let clicked_inside = std::rc::Rc::new(std::cell::Cell::new(false));
+    let clicked_inside_card = clicked_inside.clone();
+
     let click_thumb = vh.clone();
     let click_delete = vh.clone();
     let click_import = vh.clone();
@@ -132,9 +133,12 @@ pub fn render_settings_overlay(view: &RootView, cx: &mut Context<RootView>) -> i
         .items_center()
         .justify_center()
         .bg(rgba(0x00000055))
-        .on_mouse_down(MouseButton::Left, cx.listener(|v, _, _w, cx| {
-            v.show_settings = false;
-            cx.notify();
+        .on_mouse_down(MouseButton::Left, cx.listener(move |v, _, _w, cx| {
+            if !clicked_inside.get() {
+                v.show_settings = false;
+                cx.notify();
+            }
+            clicked_inside.set(false);
         }))
         .child(
             div()
@@ -148,7 +152,9 @@ pub fn render_settings_overlay(view: &RootView, cx: &mut Context<RootView>) -> i
                 .gap_3()
                 .flex()
                 .flex_col()
-                .on_mouse_down(MouseButton::Left, |_, _, _| {})
+                .on_mouse_down(MouseButton::Left, move |_, _, _| {
+                    clicked_inside_card.set(true);
+                })
                 .child(
                     div()
                         .flex()
@@ -175,22 +181,6 @@ pub fn render_settings_overlay(view: &RootView, cx: &mut Context<RootView>) -> i
                 )
                 .child(div().h(px(1.)).w_full().bg(theme::colors().border_variant))
                 .child(section("界面"))
-                .child(setting_toggle("字体", &font, {
-                    let vh = click_font;
-                    move |_, _, cx| {
-                        if let Some(entity) = vh.upgrade() {
-                            cx.update_entity(&entity, |view, cx| {
-                                let current = view.config.font_family.clone();
-                                view.config.font_family = match current.as_str() {
-                                    "Microsoft YaHei UI" => "Noto Sans CJK SC".into(),
-                                    _ => "Microsoft YaHei UI".into(),
-                                };
-                                view.save_config();
-                                cx.notify();
-                            });
-                        }
-                    }
-                }))
                 .child(setting_toggle("缩略图尺寸", &format!("{}px", thumb_size), {
                     let vh = click_thumb;
                     move |_, _, cx| {
