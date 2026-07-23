@@ -75,6 +75,21 @@ impl RootView {
         }
     }
 
+    /// 弹出目录选择对话框并扫描选中目录。
+    /// rfd 对话框是阻塞式模态窗口，直接放在事件处理器里会因嵌套消息循环
+    /// 触发 GPUI 的 RefCell 重入借用，所以放到 worker 线程执行。
+    pub fn pick_and_scan_directory(&mut self, cx: &mut Context<Self>) {
+        self.worker.spawn(
+            cx,
+            move || rfd::FileDialog::new().pick_folder(),
+            move |this, result, cx| {
+                if let Some(path) = result {
+                    this.scan_directory(path, cx);
+                }
+            },
+        );
+    }
+
     pub fn scan_directory(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         // Cancel any existing scan
         if let Some(task) = self.scan_task.take() {

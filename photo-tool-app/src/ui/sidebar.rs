@@ -42,9 +42,7 @@ fn render_directory_section(
                 .ghost()
                 .label("打开目录")
                 .on_click(cx.listener(|view, _event: &ClickEvent, _window, cx| {
-                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                        view.scan_directory(path, cx);
-                    }
+                    view.pick_and_scan_directory(cx);
                 })),
         )
         .child(
