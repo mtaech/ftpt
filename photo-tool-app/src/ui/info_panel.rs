@@ -112,7 +112,7 @@ fn render_rating_section(
             .into_any_element();
     }
 
-    let current_rating = DomainRating::None; // TODO: read from XMP metadata
+    let current_rating = focused.map(|m| m.rating).unwrap_or(DomainRating::None);
     let rating_value = current_rating as usize;
 
     let vh = cx.entity().downgrade();
@@ -170,7 +170,7 @@ fn render_color_label_section(
             .into_any_element();
     }
 
-    let current_label = ColorLabel::None; // TODO: read from XMP metadata
+    let current_label = focused.map(|m| m.color_label).unwrap_or(ColorLabel::None);
     let vh = cx.entity().downgrade();
 
     fn label_dot(color: Hsla, action: Action, id: &str, is_selected: bool, cx: &mut Context<RootView>) -> impl IntoElement {
@@ -236,7 +236,7 @@ fn render_flag_section(
             .into_any_element();
     }
 
-    let current_flag: Option<Flag> = None; // TODO: read from XMP metadata
+    let current_flag: Option<Flag> = focused.map(|m| m.flag).unwrap_or(None);
     let vh = cx.entity().downgrade();
 
     div()
