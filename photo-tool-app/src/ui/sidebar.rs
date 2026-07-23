@@ -233,6 +233,7 @@ fn render_rating_filter(
 
     h_flex()
         .items_center()
+        .flex_wrap()
         .gap_1()
         .child(
             div()
@@ -307,6 +308,7 @@ fn render_flag_filter(
 
     h_flex()
         .items_center()
+        .flex_wrap()
         .gap_1()
         .child(
             div()

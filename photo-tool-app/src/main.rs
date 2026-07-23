@@ -27,7 +27,8 @@ fn main() {
         AppConfig::default()
     });
 
-    let app = gpui_platform::application();
+    // 加载 gpui-component 内置 SVG 资源（图标等），缺失时所有 IconName 渲染为空白
+    let app = gpui_platform::application().with_assets(gpui_component_assets::Assets);
     app.run(move |cx| {
         cx.activate(true);
         let cp = config_path.clone();
