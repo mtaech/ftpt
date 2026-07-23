@@ -96,5 +96,5 @@ pub fn render_grid(
     div()
         .size_full()
         .bg(theme::colors().background)
-        .child(list)
+        .child(list.size_full())
 }

@@ -5,3 +5,22 @@ members = ["photo-tool-core", "photo-tool-app"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+
+# 编解码 crate 在 debug 构建下也开优化：否则原图/缩略图解码慢 10-20 倍
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.jpeg-decoder]
+opt-level = 3
+
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+
+[profile.dev.package.zune-core]
+opt-level = 3
+
+[profile.dev.package.png]
+opt-level = 3
+
+[profile.dev.package.rawlib]
+opt-level = 3
