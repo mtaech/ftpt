@@ -13,20 +13,11 @@ pub fn render_sidebar(view: &RootView, cx: &mut Context<RootView>) -> impl IntoE
         .size_full()
         .px_4()
         .py_3()
-        .gap_4()
-        .child(
-            div()
-                .h(px(1.))
-                .my_2()
-                .bg(theme::colors().border_variant)
-        )
+        .gap_2()
+        .child(render_directory_section(view, cx))
+        .child(div().h(px(1.)).my_2().bg(theme::colors().border_variant))
         .child(render_favorites_section(view, cx))
-        .child(
-            div()
-                .h(px(1.))
-                .my_2()
-                .bg(theme::colors().border_variant)
-        )
+        .child(div().h(px(1.)).my_2().bg(theme::colors().border_variant))
         .child(render_filter_section(view, cx))
 }
 
@@ -43,18 +34,6 @@ fn section_header(label: &str) -> Div {
         .pb_1()
         .child(label)
 }
-
-fn clickable_row() -> Div {
-    div()
-        .text_sm()
-        .text_color(theme::colors().text_muted)
-        .px_1()
-        .py_0p5()
-        .rounded_sm()
-        .cursor_pointer()
-        .hover(|style| style.bg(theme::colors().element_hover))
-}
-
 
 // ── Directory Section ────────────────────────────────────────────────────
 
@@ -73,22 +52,22 @@ fn render_directory_section(
         .gap_1()
         .child(section_header("目录"))
         .child(
-            clickable_row()
-                .id(ElementId::Name("dir-btn".into()))
-                .w_full()
-                .overflow_hidden()
-                .child(
-                    div()
-                        .text_xs()
-                        .truncate()
-                        .text_color(theme::colors().text_muted)
-                        .child(path_display),
-                )
+            Button::new("open-dir-btn")
+                .icon(IconName::FolderOpen)
+                .ghost()
+                .label("打开目录")
                 .on_click(cx.listener(|view, _event: &ClickEvent, _window, cx| {
                     if let Some(path) = rfd::FileDialog::new().pick_folder() {
                         view.scan_directory(path, cx);
                     }
                 })),
+        )
+        .child(
+            div()
+                .text_xs()
+                .truncate()
+                .text_color(theme::colors().text_muted)
+                .child(path_display),
         )
 }
 
@@ -109,7 +88,7 @@ fn render_favorites_section(
                 div()
                     .text_sm()
                     .text_color(theme::colors().text_muted)
-                    .child("无")
+                    .child("暂无常用目录")
                     .into_any_element()
             } else {
                 v_flex()
