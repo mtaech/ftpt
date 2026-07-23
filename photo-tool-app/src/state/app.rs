@@ -119,11 +119,17 @@ impl RootView {
                             })
                             .collect();
                         this.captures = metas;
-                        this.dir_path = Some(dir);
+                        this.dir_path = Some(dir.clone());
                         this.selected.clear();
                         this.anchor = None;
                         this.thumbnail_data.clear();
                         this.apply_filter_and_sort();
+                        tracing::info!(
+                            "扫描完成：{} 找到 {} 个 capture，过滤后 {} 个",
+                            dir.display(),
+                            this.captures.len(),
+                            this.display_order.len()
+                        );
                         this.preload_thumbnails(cx);
                         cx.notify();
                     }
@@ -261,7 +267,10 @@ impl RootView {
         let thumbnail_size = self.config.thumbnail_size;
         let cache = match &self.thumbnail_cache {
             Some(c) => c.clone(),
-            None => return,
+            None => {
+                tracing::warn!("缩略图缓存未初始化，跳过预加载");
+                return;
+            }
         };
 
         // Preload first 50 thumbnails (visible range + buffer)
@@ -294,8 +303,14 @@ impl RootView {
 
             let cache_clone = cache.clone();
             let ci = capture_idx;
+            let path_display = source.path.clone();
             self.worker.spawn(cx, move || {
-                cache_clone.get_or_generate(&source, thumbnail_size).ok()
+                cache_clone
+                    .get_or_generate(&source, thumbnail_size)
+                    .map_err(|e| {
+                        tracing::warn!("缩略图生成失败 {}: {e}", path_display.display());
+                    })
+                    .ok()
             }, move |this, result, cx| {
                 if let Some(bytes) = result {
                     this.thumbnail_data.insert(ci, bytes);
