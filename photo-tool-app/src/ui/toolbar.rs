@@ -1,13 +1,25 @@
-use gpui::*;
+use gpui::{prelude::FluentBuilder, *};
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::IconName;
-use gpui_component::h_flex;
+use gpui_component::{h_flex, v_flex};
+use std::sync::LazyLock;
 
 use photo_tool_core::domain::SortBy;
 
 use crate::action::Action;
 use crate::state::app::RootView;
 use crate::ui::theme;
+
+/// 系统已安装字体家族（排序去重，LazyLock 只枚举一次）
+static SYSTEM_FONTS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    let mut families = font_kit::source::SystemSource::new()
+        .all_families()
+        .unwrap_or_default();
+    families.sort();
+    families.dedup();
+    families
+});
 
 
 /// Render the top toolbar with import button, view toggle, sort controls, refresh.
@@ -181,22 +193,57 @@ pub fn render_settings_overlay(view: &RootView, cx: &mut Context<RootView>) -> i
                 )
                 .child(div().h(px(1.)).w_full().bg(theme::colors().border_variant))
                 .child(section("界面"))
-                .child(setting_toggle("字体", &font, {
-                    let vh = click_font;
-                    move |_, _, cx| {
-                        if let Some(entity) = vh.upgrade() {
-                            cx.update_entity(&entity, |view, cx| {
-                                let current = view.config.font_family.clone();
-                                view.config.font_family = match current.as_str() {
-                                    "Microsoft YaHei UI" => "Noto Sans CJK SC".into(),
-                                    _ => "Microsoft YaHei UI".into(),
-                                };
-                                view.save_config();
-                                cx.notify();
-                            });
-                        }
-                    }
-                }))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_color(theme::colors().text_muted)
+                                .text_xs()
+                                .child(format!("字体（当前：{}）", font)),
+                        )
+                        .child(
+                            div()
+                                .h(px(200.))
+                                .border_1()
+                                .border_color(theme::colors().border_variant)
+                                .rounded_md()
+                                .overflow_y_scrollbar()
+                                .child(
+                                    v_flex()
+                                        .p_1()
+                                        .children(SYSTEM_FONTS.iter().map(|name| {
+                                            let selected = *name == font;
+                                            let name_click = name.clone();
+                                            let vh = click_font.clone();
+                                            div()
+                                                .when(selected, |d| {
+                                                    d.bg(theme::colors().element_selected)
+                                                })
+                                                .id(ElementId::Name(format!("font-{name}").into()))
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .cursor_pointer()
+                                                .font_family(name.clone())
+                                                .hover(|s| s.bg(theme::colors().element_hover))
+                                                .child(name.clone())
+                                                .on_click(move |_, _, cx| {
+                                                    if let Some(entity) = vh.upgrade() {
+                                                        let name = name_click.clone();
+                                                        cx.update_entity(&entity, |view, cx| {
+                                                            view.config.font_family = name;
+                                                            view.save_config();
+                                                            cx.notify();
+                                                        });
+                                                    }
+                                                })
+                                        })),
+                                ),
+                        ),
+                )
                 .child(div().h(px(1.)).w_full().bg(theme::colors().border_variant))
                 .child(section("文件操作"))
                 .child(setting_toggle("默认删除模式", if delete_mode == "trash" { "回收站" } else { "永久删除" }, {
