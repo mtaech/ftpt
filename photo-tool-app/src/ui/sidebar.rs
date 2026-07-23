@@ -213,9 +213,8 @@ fn render_text_search(
                         div()
                             .id(ElementId::Name("clear-text-search".into()))
                             .text_xs()
-                            .text_color(theme::colors().error)
                             .cursor_pointer()
-                            .child("\u{2715}")
+                            .child(Icon::new(IconName::Close).xsmall().text_color(theme::colors().error))
                             .on_click(cx.listener(|view, _event: &ClickEvent, _window, cx| {
                                 view.filter.text_search = None;
                                 view.apply_filter_and_sort();
@@ -248,7 +247,6 @@ fn render_rating_filter(
                 .gap_px()
                 .children((0..6).map(move |n| {
                     let active = n <= current_min;
-                    let label = if n == 0 { "\u{2014}" } else { "\u{2605}" };
                     let star_color = if active && n > 0 {
                         theme::colors::RATING[(n - 1) as usize]
                     } else if active {
@@ -269,7 +267,14 @@ fn render_rating_filter(
                         .when(active && n == 0, |this| {
                             this.bg(theme::colors().border_variant)
                         })
-                        .child(label)
+                        .child(if n == 0 {
+                            "任意".into_any_element()
+                        } else {
+                            Icon::new(IconName::StarFill)
+                                .xsmall()
+                                .text_color(star_color)
+                                .into_any_element()
+                        })
                         .on_click(
                             cx.listener(move |view, _event: &ClickEvent, _window, cx| {
                                 view.filter.min_rating = if n == 0 {

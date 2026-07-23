@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use photo_tool_core::domain::{CaptureMeta, ColorLabel, Flag, Rating};
 
+use gpui_component::{Icon, IconName, Sizable};
 use gpui::*;
 
 use crate::ui::theme;
@@ -125,10 +126,9 @@ fn render_rating_stars(rating: Rating) -> impl IntoElement {
             } else {
                 theme::colors().text_muted
             };
-            div()
-                .text_xs()
+            Icon::new(if i < n { IconName::StarFill } else { IconName::Star })
+                .xsmall()
                 .text_color(color)
-                .child(if i < n { "\u{2605}" } else { "\u{2606}" })
         }))
 }
 
