@@ -140,8 +140,9 @@ pub fn render_layout(
                     if view.config.right_panel_visible {
                         v_flex()
                             .h_full()
-                            .bg(theme::colors().surface_background)
+                            .bg(theme::colors().background)
                             .border_color(theme::colors().border_variant)
+                            .border_l_1()
                             .child(crate::ui::info_panel::render_info_panel(view, cx))
                             .into_any_element()
                     } else {
