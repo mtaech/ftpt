@@ -5,5 +5,4 @@ libraw.so
 node_modules/
 dist/
 .pi-subagents/
-photo-tool-gpui/.task-context.md
 nul

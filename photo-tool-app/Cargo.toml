@@ -1,16 +1,17 @@
 [package]
-name = "photo-tool-gpui"
+name = "photo-tool-app"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
+photo-tool-core = { path = "../photo-tool-core" }
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component" }
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
-rfd = "0.17"
-photo-tool-core = { path = "../photo-tool-core" }
-image = "0.25"
-smallvec = "1"
-dirs = "6"
-anyhow = "1.0"
+rayon = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+chrono = "0.4"
+oneshot = "0.1"
+rfd = "0.14"

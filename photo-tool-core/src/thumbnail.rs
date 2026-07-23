@@ -15,6 +15,7 @@ pub enum ThumbnailError {
 }
 
 /// 缩略图缓存管理器
+#[derive(Clone)]
 pub struct ThumbnailCache {
     cache_dir: PathBuf,
 }
@@ -71,15 +72,79 @@ impl ThumbnailCache {
         self.resize_jpeg(&thumb_bytes, size)
     }
 
-    /// 常规图片格式：优先提取 EXIF 内嵌缩略图，失败时回退完整解码
+    /// 常规图片格式：JPEG 走 DCT 降采样快路径，其余全解码
     fn generate_image_thumbnail(&self, path: &Path, size: u32) -> Result<Vec<u8>, ThumbnailError> {
-        // 快路径：EXIF 内嵌缩略图（相机 JPEG 几乎都有，直接提取无需解码）
-        if let Some(thumb) = extract_exif_thumbnail(path) {
-            return self.resize_jpeg(&thumb, size);
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase());
+
+        // JPEG 快路径：DCT 降采样（1/2, 1/4, 1/8），比全解码快 10-20x
+        if matches!(ext.as_deref(), Some("jpg" | "jpeg")) {
+            if let Ok(bytes) = self.decode_jpeg_scaled(path, size) {
+                return Ok(bytes);
+            }
+            // 失败时回退全解码
         }
-        // 慢路径：完整解码
+
         let img = image::open(path)?;
         let resized = img.thumbnail(size, size);
+        let mut buf = Cursor::new(Vec::new());
+        resized.write_to(&mut buf, image::ImageFormat::Jpeg)?;
+        Ok(buf.into_inner())
+    }
+
+    /// JPEG DCT 降采样解码：只解码到约目标尺寸的最近 DCT 缩放比，再精确缩放
+    fn decode_jpeg_scaled(&self, path: &Path, size: u32) -> Result<Vec<u8>, ThumbnailError> {
+        use jpeg_decoder::Decoder;
+
+        let file = std::fs::File::open(path)?;
+        let mut decoder = Decoder::new(std::io::BufReader::new(file));
+
+        // 读取头部获取原始尺寸（不解码像素）
+        let (orig_w, orig_h) = image::ImageReader::open(path)?
+            .into_dimensions()
+            .map_err(|e| ThumbnailError::Image(e))?;
+
+        // 选最大的 DCT 缩放比，使降采样后仍 >= 目标尺寸
+        let max_dim = orig_w.max(orig_h);
+        let scale: u32 = if max_dim / 8 >= size {
+            8
+        } else if max_dim / 4 >= size {
+            4
+        } else if max_dim / 2 >= size {
+            2
+        } else {
+            1
+        };
+
+        let target_w = orig_w / scale;
+        let target_h = orig_h / scale;
+        decoder
+            .scale(target_w as u16, target_h as u16)
+            .map_err(|e| {
+                ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    e,
+                )))
+            })?;
+
+        let pixels = decoder.decode().map_err(|e| {
+            ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                e,
+            )))
+        })?;
+
+        let img = image::RgbImage::from_raw(target_w, target_h, pixels).ok_or_else(|| {
+            ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "JPEG decode produced invalid buffer",
+            )))
+        })?;
+
+        let dynamic = image::DynamicImage::ImageRgb8(img);
+        let resized = dynamic.thumbnail(size, size);
         let mut buf = Cursor::new(Vec::new());
         resized.write_to(&mut buf, image::ImageFormat::Jpeg)?;
         Ok(buf.into_inner())
@@ -165,99 +230,6 @@ impl ThumbnailCache {
             }
         }
         Ok(())
-    }
-}
-
-// ── 模块级辅助函数 ──
-
-/// 从 JPEG 文件中提取 EXIF 内嵌缩略图（零解码开销）
-fn extract_exif_thumbnail(path: &Path) -> Option<Vec<u8>> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut reader = std::io::BufReader::new(file);
-
-    let raw_tiff = exif::get_exif_attr_from_jpeg(&mut reader).ok()?;
-    if raw_tiff.len() < 8 {
-        return None;
-    }
-
-    let tiff = &raw_tiff;
-    let little_endian = tiff[0] == b'I';
-    let read_u32 = |offset: usize| -> u32 {
-        let b = &tiff[offset..offset + 4];
-        if little_endian {
-            u32::from_le_bytes([b[0], b[1], b[2], b[3]])
-        } else {
-            u32::from_be_bytes([b[0], b[1], b[2], b[3]])
-        }
-    };
-    let read_u16 = |offset: usize| -> u16 {
-        let b = &tiff[offset..offset + 2];
-        if little_endian {
-            u16::from_le_bytes([b[0], b[1]])
-        } else {
-            u16::from_be_bytes([b[0], b[1]])
-        }
-    };
-
-    let ifd0_offset = read_u32(4) as usize;
-    let ifd1_offset = read_ifd_next(tiff, ifd0_offset, little_endian)?;
-
-    let mut thumb_offset: Option<u32> = None;
-    let mut thumb_length: Option<u32> = None;
-
-    let entry_count = read_u16(ifd1_offset) as usize;
-    for i in 0..entry_count {
-        let entry_pos = ifd1_offset + 2 + i * 12;
-        if entry_pos + 12 > tiff.len() {
-            break;
-        }
-        let tag = read_u16(entry_pos);
-        let value = read_u32(entry_pos + 8);
-        match tag {
-            0x0201 => thumb_offset = Some(value),
-            0x0202 => thumb_length = Some(value),
-            _ => {}
-        }
-    }
-
-    let offset = thumb_offset? as usize;
-    let length = thumb_length? as usize;
-    if offset + length > tiff.len() {
-        return None;
-    }
-
-    Some(tiff[offset..offset + length].to_vec())
-}
-
-/// 读取 IFD 的 next-IFD 偏移指针
-fn read_ifd_next(tiff: &[u8], ifd_offset: usize, little_endian: bool) -> Option<usize> {
-    let read_u16 = |offset: usize| -> u16 {
-        let b = &tiff[offset..offset + 2];
-        if little_endian {
-            u16::from_le_bytes([b[0], b[1]])
-        } else {
-            u16::from_be_bytes([b[0], b[1]])
-        }
-    };
-    let read_u32 = |offset: usize| -> u32 {
-        let b = &tiff[offset..offset + 4];
-        if little_endian {
-            u32::from_le_bytes([b[0], b[1], b[2], b[3]])
-        } else {
-            u32::from_be_bytes([b[0], b[1], b[2], b[3]])
-        }
-    };
-
-    let count = read_u16(ifd_offset) as usize;
-    let next_offset_pos = ifd_offset + 2 + count * 12;
-    if next_offset_pos + 4 > tiff.len() {
-        return None;
-    }
-    let next = read_u32(next_offset_pos) as usize;
-    if next == 0 {
-        None
-    } else {
-        Some(next)
     }
 }
 

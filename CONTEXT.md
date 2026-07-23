@@ -1,0 +1,138 @@
+# Photo Tool — 泛在语言（Ubiquitous Language）
+
+> 本文档定义领域术语的精确含义。实现层（Rust Core）必须共用此术语表。
+> 不含实现细节 — 配置文件、架构决策、API 签名见 `docs/adr/` 和各模块源码。
+
+---
+
+## 核心实体
+
+### Capture（拍摄）
+
+一次快门产生的拍摄。一个 **stem** 下的所有源文件聚合成一个 Capture。
+
+- 属性：`base_name`（不含扩展名的文件名）、`directory`（所在目录）、`source_files`（至少一个）
+- 示例：`DSC_0001.jpg` + `DSC_0001.NEF` + `DSC_0001.xmp` → 一个 Capture
+
+### SourceFile（源文件）
+
+组成一次拍摄的单个物理文件。
+
+- 属性：路径、格式（ImageFormat）、是否为**旁车文件**、文件大小
+- 一个 Capture 包含 1..n 个 SourceFile
+
+### ImageFormat（图片格式）
+
+文件所属于的图片格式分类。包括 7 种标准格式（JPEG, PNG, TIFF, HEIF, WebP, BMP, GIF）和 RAW 变体（44 种扩展名白名单）。
+
+- 每种格式有 `display_priority`：数字越小越优先。Jpeg(0) > Png(1) > … > Raw(7)
+- **主显示文件**：所有非旁车 SourceFile 中 `display_priority` 最低的那个
+
+### CaptureMeta（拍摄摘要）
+
+发送到 UI 层的轻量摘要，不含完整 SourceFile 列表。
+
+- 包含：base_name, primary_path, primary_format, stack_count, file_size, date_taken, has_xmp, extensions
+- 设计目的：避免 UI 层加载完整文件路径列表（批量展示 5000+ 条目时节省内存和 FFI 开销）
+
+### Stack（堆叠）
+
+一个 Capture 中除主显示文件外的非旁车文件。`stack_count` 表示额外源文件的数量。
+
+- 示例：`DSC_0001.jpg`（主）+ `DSC_0001.NEF` → stack_count = 1
+
+---
+
+## 标记
+
+### Rating（评分）
+
+1-5 星评分，或 None（未评分）。持久化到 XMP 旁车文件的 `pt:Rating` 属性。
+
+### ColorLabel（颜色标签）
+
+5 种颜色标记：Red、Yellow、Green、Blue、Purple，或 None。持久化到 `pt:ColorLabel`。
+
+### Flag（旗标）
+
+Pick（入选）或 Reject（淘汰）。持久化到 `pt:Flag`。
+
+---
+
+## 文件操作
+
+### Sidecar / 旁车文件
+
+与图片文件同 stem、不同扩展名的附属文件（如 `.xmp`）。扫描时与图片文件配对到同一个 Capture。
+
+### DeleteMode（删除模式）
+
+- **Trash**：移到操作系统回收站
+- **Permanent**：永久删除（不可恢复）
+
+### 导入行为
+
+- **Copy**：保留源文件，在目标位置创建副本
+- **Move**：将源文件转移到目标位置
+
+---
+
+## 缩略图
+
+### ThumbnailCache（缩略图缓存）
+
+两级缓存：磁盘（JPEG 文件，hash 命名）+ 内存（UI 框架图片缓存）。
+
+- 策略：先查缓存 → 未命中时生成 → 写入缓存 → 返回
+- 生成策略：RAW 文件提取内嵌 JPEG 预览（不解拜耳），常规文件提取内嵌 EXIF 缩略图或完整解码
+
+### 主预览
+
+用户选中某张照片后，在预览面板中显示的大尺寸预览（区别于缩略图网格中的小缩略图）。通常按长边 2560px 渲染。
+
+---
+
+## 筛选与排序
+
+### FilterCriteria（筛选条件）
+
+组合式筛选器：文件名文本搜索、日期范围、评分下限、颜色标签、旗标、格式过滤、仅显示有配对的。
+
+### SortBy（排序方式）
+
+FileName（文件名）、DateTaken（拍摄日期）、FileSize（文件大小）三种排序方式。
+
+### SortDirection（排序方向）
+
+Ascending（升序）或 Descending（降序）。
+
+---
+
+## 配置
+
+### AppConfig（应用配置）
+
+持久化到 TOML 文件的应用配置。15 个字段：缩略图尺寸、主题、删除模式、导入行为、窗口尺寸/位置、缓存位置等。
+
+- 配置文件路径：便携优先（exe 同目录），回退平台配置目录
+
+### 便携模式
+
+配置文件 `PT.toml` 与可执行文件在同一目录，允许 U 盘携带：应用 + 配置 + 缩略图缓存全部在可移动介质上。
+
+---
+
+## 数据流
+
+```
+文件系统 → Scanner → Vec<Capture>
+                     │
+        ┌────────────┼────────────┐
+        ▼            ▼            ▼
+    Thumbnail     EXIF/导入    文件操作
+   (缩略图缓存)  (元数据+转换) (删除/移动/复制/重命名)
+        │            │            │
+        └────────────┼────────────┘
+                     ▼
+              CaptureMeta → UI 层
+```

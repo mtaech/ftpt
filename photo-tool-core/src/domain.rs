@@ -152,6 +152,16 @@ pub struct CaptureMeta {
     pub date_taken: Option<String>,
     pub has_xmp: bool,
     pub extensions: Vec<String>,
+    // --- EXIF 摘要字段（可延迟填充） ---
+    pub camera_make: Option<String>,
+    pub camera_model: Option<String>,
+    pub lens: Option<String>,
+    pub exposure_time: Option<String>,
+    pub f_number: Option<String>,
+    pub iso: Option<u32>,
+    pub focal_length: Option<String>,
+    pub image_width: Option<u32>,
+    pub image_height: Option<u32>,
 }
 
 impl From<&Capture> for CaptureMeta {
@@ -184,6 +194,53 @@ impl From<&Capture> for CaptureMeta {
             date_taken: None,
             has_xmp: c.source_files.iter().any(|f| f.is_sidecar),
             extensions: ext_list,
+            camera_make: None,
+            camera_model: None,
+            lens: None,
+            exposure_time: None,
+            f_number: None,
+            iso: None,
+            focal_length: None,
+            image_width: None,
+            image_height: None,
+        }
+    }
+}
+
+impl CaptureMeta {
+    /// 从文件提取 EXIF 并填充摘要字段（轻量调用：只读元数据，不解码图片）
+    pub fn enrich_with_exif(&mut self) {
+        let path = std::path::Path::new(&self.primary_path);
+        if !path.exists() {
+            return;
+        }
+        let fmt = ImageFormat::from_extension(
+            &path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or_default()
+                .to_lowercase(),
+        );
+        let format = match fmt {
+            Some(f) => f,
+            None => return,
+        };
+        let exif = crate::exif::extract_exif(path, &format).ok();
+        if let Some(ref exif) = exif {
+            self.camera_make = exif.camera.make.clone();
+            self.camera_model = exif.camera.model.clone();
+            self.lens = exif.camera.lens.clone();
+            self.exposure_time = exif.shooting.exposure_time.clone();
+            self.f_number = exif.shooting.f_number.clone();
+            self.iso = exif.shooting.iso;
+            self.focal_length = exif.shooting.focal_length.clone();
+            self.image_width = exif.image_width;
+            self.image_height = exif.image_height;
+            self.date_taken = exif.date_time_original.clone();
+        }
+        // 如果 EXIF 没有文件大小，回退到 fs::metadata
+        if self.file_size.is_none() {
+            self.file_size = std::fs::metadata(path).ok().map(|m| m.len());
         }
     }
 }
@@ -236,6 +293,8 @@ pub struct FilterCriteria {
     pub color_label: Option<ColorLabel>,
     /// 按旗标过滤（Pick/Reject/None）
     pub flag_filter: Option<Flag>,
+    /// 如果为 true，只显示没有标记旗标的照片
+    pub unflagged_filter: bool,
 }
 
 /// 排序方式
@@ -244,6 +303,8 @@ pub enum SortBy {
     FileName,
     DateTaken,
     FileSize,
+    Rating,
+    Modified,
 }
 
 /// 排序方向

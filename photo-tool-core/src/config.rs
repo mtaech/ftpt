@@ -18,8 +18,41 @@ pub enum Theme {
     Dark,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 缩略图缓存模式
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub enum ThumbnailCacheMode {
+    /// 全局缓存（默认路径：系统缓存目录/PT/thumbnails）
+    Global,
+    /// 全局缓存，用户指定路径
+    GlobalCustom(PathBuf),
+    /// 每个目录下 .PT-thumbnails/（路径不可更改）
+    PerDirectory,
+}
+
+impl Default for ThumbnailCacheMode {
+    fn default() -> Self {
+        Self::Global
+    }
+}
+
+impl ThumbnailCacheMode {
+    /// 解析缓存目录的实际路径
+    ///
+    /// - `Global` → `dirs::cache_dir()/PT/thumbnails`
+    /// - `GlobalCustom(p)` → `p`
+    /// - `PerDirectory` → 调用方自行拼接 `<scan_dir>/.PT-thumbnails`
+    pub fn resolve_path(&self) -> Option<PathBuf> {
+        match self {
+            Self::Global => dirs::cache_dir().map(|p| p.join("PT").join("thumbnails")),
+            Self::GlobalCustom(p) => Some(p.clone()),
+            Self::PerDirectory => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)] // 缺字段一律回退 Default（FFI/旧配置兼容）
 pub struct AppConfig {
     /// 旁车文件扩展名列表（不含点，如 ["xmp"]）
     pub sidecar_extensions: Vec<String>,
@@ -47,10 +80,15 @@ pub struct AppConfig {
     pub left_panel_width: u32,  // 目录树面板宽度
     /// 右侧面板可见
     pub right_panel_visible: bool,
-    /// 缩略图缓存目录（None 则用默认路径）
-    pub thumbnail_cache_dir: Option<PathBuf>,
+    /// 缩略图缓存模式
+    pub thumbnail_cache_mode: ThumbnailCacheMode,
     /// 最大缩略图缓存大小（MB）
     pub max_cache_size_mb: u64,
+    /// 界面字体家族名
+    pub font_family: String,
+}
+fn default_font_family() -> String {
+    "Microsoft YaHei UI".to_string()
 }
 
 impl Default for AppConfig {
@@ -69,8 +107,9 @@ impl Default for AppConfig {
             window_height: 900,
             left_panel_width: 260,
             right_panel_visible: true,
-            thumbnail_cache_dir: None,
+            thumbnail_cache_mode: ThumbnailCacheMode::default(),
             max_cache_size_mb: 500,
+            font_family: default_font_family(),
         }
     }
 }
@@ -145,6 +184,46 @@ mod tests {
         assert_eq!(cfg.default_delete_mode, "trash");
         assert_eq!(cfg.window_width, 1400);
         assert_eq!(cfg.window_height, 900);
+        assert_eq!(cfg.font_family, "Microsoft YaHei UI");
+    }
+
+    #[test]
+    fn test_old_toml_without_font_family() {
+        // 旧版 PT.toml 缺少 fontFamily 字段时应回落到默认值
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("PT.toml");
+
+        // 序列化一份完整配置，然后删掉 fontFamily 行模拟旧文件
+        let full = toml::to_string_pretty(&AppConfig::default()).unwrap();
+        let legacy: String = full
+            .lines()
+            .filter(|l| !l.starts_with("fontFamily"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!legacy.contains("fontFamily"));
+        std::fs::write(&path, legacy).unwrap();
+
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(loaded.font_family, "Microsoft YaHei UI");
+    }
+
+    #[test]
+    fn test_font_family_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("PT.toml");
+
+        let cfg = AppConfig {
+            font_family: "Microsoft YaHei".to_string(),
+            ..Default::default()
+        };
+        save_config(&path, &cfg).unwrap();
+
+        // 确认序列化为 camelCase 键
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("fontFamily"));
+
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(loaded.font_family, "Microsoft YaHei");
     }
 
     #[test]
