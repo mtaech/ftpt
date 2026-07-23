@@ -88,6 +88,8 @@ impl RootView {
             if let SelectEvent::Confirm(Some(name)) = event {
                 view.config.font_family = name.to_string();
                 view.save_config();
+                // gpui-component 组件不从根元素继承字体，必须更新全局 Theme
+                gpui_component::theme::Theme::global_mut(cx).font_family = name.clone();
                 cx.notify();
             }
         })
