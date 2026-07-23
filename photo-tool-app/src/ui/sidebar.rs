@@ -188,13 +188,7 @@ fn render_text_search(
                     h_flex()
                         .gap_1()
                         .items_center()
-                        .child(Icon::new(IconName::Search).small().text_color(theme::colors().text_muted))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme::colors().text_muted)
-                                .child("输入名称..."),
-                        )
+                        .child(Icon::new(IconName::Search).small().text_color(theme::colors().text_muted)),
                 )
                 .child(
                     div()
