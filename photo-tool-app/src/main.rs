@@ -34,6 +34,8 @@ fn main() {
         let cp = config_path.clone();
         gpui_component::init(cx);
         gpui_component::theme::Theme::change(gpui_component::theme::ThemeMode::Light, None, cx);
+        // 从配置文件恢复用户保存的字体
+        gpui_component::theme::Theme::global_mut(cx).font_family = app_config.font_family.clone().into();
         // 初始化 photo-tool 主题系统
         crate::ui::theme::set_mode(crate::ui::theme::ThemeMode::Light);
         let ac = app_config.clone();
