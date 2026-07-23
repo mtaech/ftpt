@@ -99,6 +99,7 @@ impl RootView {
                             .map(|(i, c)| {
                                 let mut meta = CaptureMeta::from(c);
                                 meta.index = i;
+                                meta.enrich_with_xmp();
                                 meta
                             })
                             .collect();
@@ -215,9 +216,9 @@ impl RootView {
                     sa.cmp(&sb)
                 }
                 SortBy::Rating => {
-                    // Stub: rating metadata not yet stored on CaptureMeta
-                    // Sorting by 0 (equal) keeps existing order
-                    0.cmp(&0)
+                    let ra = ma.rating as u8;
+                    let rb = mb.rating as u8;
+                    ra.cmp(&rb)
                 }
                 SortBy::Modified => {
                     let ta = std::fs::metadata(&ma.primary_path)
@@ -372,15 +373,16 @@ impl RootView {
                 }
                 results
             },
-            |_this, results, cx| {
+            move |this, results, cx| {
                 for (path, result) in &results {
                     if let Err(e) = result {
                         tracing::error!("Failed to set rating for {}: {e}", path.display());
+                    } else if let Some(meta) = this.captures.iter_mut().find(|m| Path::new(&m.primary_path) == path) {
+                        meta.rating = rating;
                     }
                 }
-                if !results.is_empty() {
-                    cx.notify();
-                }
+                this.apply_filter_and_sort();
+                cx.notify();
             },
         );
     }
@@ -421,15 +423,16 @@ impl RootView {
                 }
                 results
             },
-            |_this, results, cx| {
+            move |this, results, cx| {
                 for (path, result) in &results {
                     if let Err(e) = result {
                         tracing::error!("Failed to set flag for {}: {e}", path.display());
+                    } else if let Some(meta) = this.captures.iter_mut().find(|m| Path::new(&m.primary_path) == path) {
+                        meta.flag = flag;
                     }
                 }
-                if !results.is_empty() {
-                    cx.notify();
-                }
+                this.apply_filter_and_sort();
+                cx.notify();
             },
         );
     }
@@ -470,18 +473,19 @@ impl RootView {
                 }
                 results
             },
-            |_this, results, cx| {
+            move |this, results, cx| {
                 for (path, result) in &results {
                     if let Err(e) = result {
                         tracing::error!(
                             "Failed to set color label for {}: {e}",
                             path.display()
                         );
+                    } else if let Some(meta) = this.captures.iter_mut().find(|m| Path::new(&m.primary_path) == path) {
+                        meta.color_label = label;
                     }
                 }
-                if !results.is_empty() {
-                    cx.notify();
-                }
+                this.apply_filter_and_sort();
+                cx.notify();
             },
         );
     }

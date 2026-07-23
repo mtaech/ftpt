@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use gpui::*;
 
+use gpui_component::{Icon, IconName, Sizable};
 use crate::state::app::RootView;
 use crate::ui::theme;
 
@@ -87,7 +88,7 @@ pub fn render_preview(view: &RootView, cx: &mut Context<RootView>) -> impl IntoE
                         .hover(|style| {
                             if has_prev { style.bg(theme::colors().element_hover) } else { style }
                         })
-                        .child("\u{25C0}") // ◀
+                        .child(Icon::new(IconName::ChevronLeft).with_size(px(20.)).text_color(if has_prev { theme::colors().text } else { theme::colors().text_muted }))
                         .on_click({
                             let vh = view_handle.clone();
                             move |_event: &ClickEvent, _window, cx| {
@@ -150,7 +151,6 @@ pub fn render_preview(view: &RootView, cx: &mut Context<RootView>) -> impl IntoE
                         .rounded_full()
                         .bg(if has_next { theme::colors().element_background } else { theme::colors().border_variant })
                         .text_color(if has_next { theme::colors().text } else { theme::colors().text_muted })
-                        .text_xl()
                         .cursor(if has_next {
                             CursorStyle::PointingHand
                         } else {
@@ -159,7 +159,7 @@ pub fn render_preview(view: &RootView, cx: &mut Context<RootView>) -> impl IntoE
                         .hover(|style| {
                             if has_next { style.bg(theme::colors().element_hover) } else { style }
                         })
-                        .child("\u{25B6}") // ▶
+                        .child(Icon::new(IconName::ChevronRight).with_size(px(20.)).text_color(if has_next { theme::colors().text } else { theme::colors().text_muted }))
                         .on_click({
                             let vh = view_handle.clone();
                             move |_event: &ClickEvent, _window, cx| {
@@ -188,24 +188,23 @@ pub fn render_preview(view: &RootView, cx: &mut Context<RootView>) -> impl IntoE
                 .bg(theme::colors().surface_background)
                 .border_t_1()
                 .border_color(theme::colors().border_variant)
-                .child(zoom_button("\u{2212}", "缩小", view_handle.clone()))
+                .child(zoom_button(IconName::Minus, "zoom-out", view_handle.clone()))
                 .child(
                     div()
                         .text_sm()
                         .text_color(theme::colors().text_muted)
                         .child("100%"),
                 )
-                .child(zoom_button("\u{002B}", "放大", view_handle.clone()))
-                .child(zoom_button("\u{21C5}", "适应", view_handle)),
+                .child(zoom_button(IconName::Plus, "zoom-in", view_handle.clone()))
+                .child(zoom_button(IconName::Frame, "zoom-fit", view_handle))
         )
 }
 
-fn zoom_button(label: &str, _tooltip: &str, view_handle: WeakEntity<RootView>) -> impl IntoElement {
-    let owned_label = label.to_string();
+fn zoom_button(icon: IconName, id: &str, view_handle: WeakEntity<RootView>) -> impl IntoElement {
     let vh = view_handle.clone();
-    let lbl = owned_label.clone();
+    let owned_id = id.to_string();
     div()
-        .id(ElementId::Name(format!("zoom-{owned_label}").into()))
+        .id(ElementId::Name(format!("zoom-{owned_id}").into()))
         .flex()
         .items_center()
         .justify_center()
@@ -216,25 +215,25 @@ fn zoom_button(label: &str, _tooltip: &str, view_handle: WeakEntity<RootView>) -
         .text_color(theme::colors().text)
         .text_sm()
         .cursor(CursorStyle::PointingHand)
-        .child(owned_label)
+        .child(Icon::new(icon.clone()).small().text_color(theme::colors().text))
         .on_click(move |_event: &ClickEvent, _window, cx| {
             if let Some(view) = vh.upgrade() {
                 let _ = cx.update_entity(&view, |root_view, root_cx| {
-                    if lbl.contains('\u{002B}') {
-                        root_view.dispatch_action(
+                    match icon {
+                        IconName::Plus => root_view.dispatch_action(
                             crate::action::Action::ZoomIn,
                             root_cx,
-                        );
-                    } else if lbl.contains('\u{2212}') {
-                        root_view.dispatch_action(
+                        ),
+                        IconName::Minus => root_view.dispatch_action(
                             crate::action::Action::ZoomOut,
                             root_cx,
-                        );
-                    } else {
-                        root_view.dispatch_action(
+                        ),
+                        IconName::Frame => root_view.dispatch_action(
                             crate::action::Action::ZoomToFit,
                             root_cx,
-                        );
+                        ),
+                        // zoom_button 仅由本文件以 Minus/Plus/Frame 调用
+                        _ => unreachable!("zoom_button 不支持的图标"),
                     }
                 });
             }

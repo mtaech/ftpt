@@ -2,6 +2,7 @@ use gpui_component::{h_flex, v_flex};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{Icon, IconName};
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::scroll::ScrollableElement;
 
 use crate::action::Action;
@@ -100,17 +101,27 @@ pub fn render_layout(
                                 .h_full()
                                 .flex_grow(1.0)
                                 .items_center()
+                                .justify_center()
+                                .gap_3()
                                 .child(
                                     Icon::new(IconName::GalleryVerticalEnd)
-                                        .text_color(theme::colors().text_muted.opacity(0.2))
+                                        .text_color(theme::colors().text_muted.opacity(0.2)),
                                 )
-                                .justify_center()
                                 .child(
                                     div()
                                         .text_color(theme::colors().text_muted)
-                                        .text_center()
-                                        .px_8()
-                                        .child("请点击顶部「导入」按钮，或打开左侧目录开始浏览")
+                                        .child("打开目录开始浏览照片"),
+                                )
+                                .child(
+                                    Button::new("empty-open-dir")
+                                        .icon(IconName::FolderOpen)
+                                        .primary()
+                                        .label("打开目录")
+                                        .on_click(cx.listener(|view, _event: &ClickEvent, _window, cx| {
+                                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                                view.scan_directory(path, cx);
+                                            }
+                                        })),
                                 )
                                 .into_any_element()
                         } else {
@@ -129,8 +140,9 @@ pub fn render_layout(
                     if view.config.right_panel_visible {
                         v_flex()
                             .h_full()
-                            .bg(theme::colors().surface_background)
+                            .bg(theme::colors().background)
                             .border_color(theme::colors().border_variant)
+                            .border_l_1()
                             .child(crate::ui::info_panel::render_info_panel(view, cx))
                             .into_any_element()
                     } else {

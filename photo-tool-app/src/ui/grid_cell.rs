@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use photo_tool_core::domain::{CaptureMeta, ColorLabel, Flag, Rating};
 
+use gpui_component::{Icon, IconName, Sizable};
 use gpui::*;
 
 use crate::ui::theme;
@@ -62,8 +63,8 @@ pub fn render_grid_cell(
                         .flex_row()
                         .items_center()
                         .gap_1()
-                        .child(render_flag_indicator(None))
-                        .child(render_color_label_dot(ColorLabel::None))
+                        .child(render_flag_indicator(capture.flag))
+                        .child(render_color_label_dot(capture.color_label))
                         .child(
                             div()
                                 .text_xs()
@@ -74,7 +75,7 @@ pub fn render_grid_cell(
                 )
                 .child(
                     // Rating stars
-                    render_rating_stars(Rating::None),
+                    render_rating_stars(capture.rating),
                 ),
         )
 }
@@ -125,10 +126,9 @@ fn render_rating_stars(rating: Rating) -> impl IntoElement {
             } else {
                 theme::colors().text_muted
             };
-            div()
-                .text_xs()
+            Icon::new(if i < n { IconName::StarFill } else { IconName::Star })
+                .xsmall()
                 .text_color(color)
-                .child(if i < n { "\u{2605}" } else { "\u{2606}" })
         }))
 }
 

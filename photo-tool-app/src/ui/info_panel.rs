@@ -4,12 +4,11 @@ use photo_tool_core::domain::Rating as DomainRating;
 
 use crate::action::Action;
 use crate::state::app::RootView;
-use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::rating::Rating;
-use gpui_component::Sizable;
 
-use gpui_component::Selectable;
+use crate::ui::controls::{clear_link, section_header, segmented_button};
 use crate::ui::theme;
+use gpui_component::h_flex;
 
 /// Render the right info panel with EXIF info + rating/label/flag controls.
 pub fn render_info_panel(view: &RootView, cx: &mut Context<RootView>) -> impl IntoElement {
@@ -26,38 +25,19 @@ pub fn render_info_panel(view: &RootView, cx: &mut Context<RootView>) -> impl In
         .child(card_section(render_color_label_section(focused, cx)))
         .child(card_section(render_flag_section(focused, cx)))
 }
-
 fn card_section(content: impl IntoElement) -> impl IntoElement {
     div()
         .p_3()
         .rounded_md()
         .border_1()
-        .bg(theme::colors().surface_background)
+        .bg(theme::colors().elevated_surface_background)
         .border_color(theme::colors().border_variant)
+        .shadow(theme::ElevationIndex::Surface.shadow())
         .child(content)
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
-fn section_header(label: &str) -> Div {
-    let label = label.to_string();
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(
-            div()
-                .text_xs()
-                .text_color(theme::colors().text_muted)
-                .child(label),
-        )
-
-        .child(
-            div()
-                .h(px(1.))
-                .bg(theme::colors().border_variant),
-        )
-}
 
 fn info_row(label: &str, value: &str) -> impl IntoElement {
     let label = format!("{}:", label);
@@ -122,7 +102,17 @@ fn render_rating_section(
     focused: Option<&CaptureMeta>,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
-    let current_rating = DomainRating::None; // TODO: read from XMP metadata
+    if focused.is_none() {
+        return div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(section_header("评分"))
+            .child(div().text_xs().text_color(theme::colors().text_muted).child("未选择图片"))
+            .into_any_element();
+    }
+
+    let current_rating = focused.map(|m| m.rating).unwrap_or(DomainRating::None);
     let rating_value = current_rating as usize;
 
     let vh = cx.entity().downgrade();
@@ -152,16 +142,16 @@ fn render_rating_section(
                 }),
         )
         .child(
-            Button::new("clear-rating")
-                .ghost()
-                .label("清除评分")
-                .on_click({
+            h_flex()
+                .justify_end()
+                .child(clear_link("clear-rating", "清除评分", {
                     let vh = vh.clone();
-                    move |_, w, cx| {
+                    move |_, _w, cx| {
                         if let Some(entity) = vh.upgrade() { cx.update_entity(&entity, |view, cx| view.dispatch_action(Action::Rate0, cx)); }
                     }
-                }),
+                })),
         )
+        .into_any_element()
 }
 
 // ── Color Label Section ──────────────────────────────────────────────────
@@ -170,7 +160,17 @@ fn render_color_label_section(
     focused: Option<&CaptureMeta>,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
-    let current_label = ColorLabel::None; // TODO: read from XMP metadata
+    if focused.is_none() {
+        return div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(section_header("颜色标签"))
+            .child(div().text_xs().text_color(theme::colors().text_muted).child("未选择图片"))
+            .into_any_element();
+    }
+
+    let current_label = focused.map(|m| m.color_label).unwrap_or(ColorLabel::None);
     let vh = cx.entity().downgrade();
 
     fn label_dot(color: Hsla, action: Action, id: &str, is_selected: bool, cx: &mut Context<RootView>) -> impl IntoElement {
@@ -200,32 +200,43 @@ fn render_color_label_section(
         .child(
             div()
                 .flex()
-                .child(label_dot(*theme::colors::LABEL_RED, Action::LabelRed, "color-label-red", current_label == photo_tool_core::domain::ColorLabel::Red, cx))
-                .child(label_dot(*theme::colors::LABEL_YELLOW, Action::LabelYellow, "color-label-yellow", current_label == photo_tool_core::domain::ColorLabel::Yellow, cx))
-                .child(label_dot(*theme::colors::LABEL_GREEN, Action::LabelGreen, "color-label-green", current_label == photo_tool_core::domain::ColorLabel::Green, cx))
-                .child(label_dot(*theme::colors::LABEL_BLUE, Action::LabelBlue, "color-label-blue", current_label == photo_tool_core::domain::ColorLabel::Blue, cx))
-                .child(label_dot(*theme::colors::LABEL_PURPLE, Action::LabelPurple, "color-label-purple", current_label == photo_tool_core::domain::ColorLabel::Purple, cx)),
+                .gap_2()
+                .child(label_dot(*theme::colors::LABEL_RED, Action::LabelRed, "color-label-red", current_label == ColorLabel::Red, cx))
+                .child(label_dot(*theme::colors::LABEL_YELLOW, Action::LabelYellow, "color-label-yellow", current_label == ColorLabel::Yellow, cx))
+                .child(label_dot(*theme::colors::LABEL_GREEN, Action::LabelGreen, "color-label-green", current_label == ColorLabel::Green, cx))
+                .child(label_dot(*theme::colors::LABEL_BLUE, Action::LabelBlue, "color-label-blue", current_label == ColorLabel::Blue, cx))
+                .child(label_dot(*theme::colors::LABEL_PURPLE, Action::LabelPurple, "color-label-purple", current_label == ColorLabel::Purple, cx)),
         )
         .child(
-            Button::new("clear-label")
-                .ghost()
-                .label("清除标签")
-                .on_click({
+            h_flex()
+                .justify_end()
+                .child(clear_link("clear-label", "清除标签", {
                     let vh = vh.clone();
-                    move |_, w, cx| {
+                    move |_, _w, cx| {
                         if let Some(entity) = vh.upgrade() { cx.update_entity(&entity, |view, cx| view.dispatch_action(Action::LabelNone, cx)); }
                     }
-                }),
+                })),
         )
+        .into_any_element()
 }
 
 // ── Flag Section ─────────────────────────────────────────────────────────
 
 fn render_flag_section(
-    _focused: Option<&CaptureMeta>,
+    focused: Option<&CaptureMeta>,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
-    let current_flag: Option<Flag> = None; // TODO: read from XMP metadata
+    if focused.is_none() {
+        return div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(section_header("旗标"))
+            .child(div().text_xs().text_color(theme::colors().text_muted).child("未选择图片"))
+            .into_any_element();
+    }
+
+    let current_flag: Option<Flag> = focused.map(|m| m.flag).unwrap_or(None);
     let vh = cx.entity().downgrade();
 
     div()
@@ -238,41 +249,39 @@ fn render_flag_section(
                 .flex()
                 .flex_row()
                 .gap_2()
-                .child(
-                    Button::new("flag-pick")
-                        .ghost()
-                        .selected(current_flag == Some(Flag::Pick))
-                        .label("入选")
-                        .on_click({
-                            let vh = vh.clone();
-                            move |_, _window, cx| {
-                                if let Some(entity) = vh.upgrade() { cx.update_entity(&entity, |view, cx| view.dispatch_action(Action::FlagPick, cx)); }
-                            }
-                        }),
-                )
-                .child(
-                    Button::new("flag-reject")
-                        .ghost()
-                        .selected(current_flag == Some(Flag::Reject))
-                        .label("淘汰")
-                        .on_click({
-                            let vh = vh.clone();
-                            move |_, _window, cx| {
-                                if let Some(entity) = vh.upgrade() { cx.update_entity(&entity, |view, cx| view.dispatch_action(Action::FlagReject, cx)); }
-                            }
-                        }),
-                )
-                .child(
-                    Button::new("flag-none")
-                        .ghost()
-                        .selected(current_flag.is_none())
-                        .label("无")
-                        .on_click({
-                            let vh = vh.clone();
-                            move |_, _window, cx| {
-                                if let Some(entity) = vh.upgrade() { cx.update_entity(&entity, |view, cx| view.dispatch_action(Action::FlagNone, cx)); }
-                            }
-                        }),
-                ),
+                .child(segmented_button(
+                    "flag-pick",
+                    "入选",
+                    current_flag == Some(Flag::Pick),
+                    {
+                        let vh = vh.clone();
+                        move |_, _window, cx| {
+                            if let Some(entity) = vh.upgrade() { cx.update_entity(&entity, |view, cx| view.dispatch_action(Action::FlagPick, cx)); }
+                        }
+                    },
+                ))
+                .child(segmented_button(
+                    "flag-reject",
+                    "淘汰",
+                    current_flag == Some(Flag::Reject),
+                    {
+                        let vh = vh.clone();
+                        move |_, _window, cx| {
+                            if let Some(entity) = vh.upgrade() { cx.update_entity(&entity, |view, cx| view.dispatch_action(Action::FlagReject, cx)); }
+                        }
+                    },
+                ))
+                .child(segmented_button(
+                    "flag-none",
+                    "无",
+                    current_flag.is_none(),
+                    {
+                        let vh = vh.clone();
+                        move |_, _window, cx| {
+                            if let Some(entity) = vh.upgrade() { cx.update_entity(&entity, |view, cx| view.dispatch_action(Action::FlagNone, cx)); }
+                        }
+                    },
+                )),
         )
+        .into_any_element()
 }

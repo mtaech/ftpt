@@ -162,6 +162,10 @@ pub struct CaptureMeta {
     pub focal_length: Option<String>,
     pub image_width: Option<u32>,
     pub image_height: Option<u32>,
+    // --- XMP 元数据字段（从旁车文件填充） ---
+    pub rating: Rating,
+    pub color_label: ColorLabel,
+    pub flag: Option<Flag>,
 }
 
 impl From<&Capture> for CaptureMeta {
@@ -203,6 +207,9 @@ impl From<&Capture> for CaptureMeta {
             focal_length: None,
             image_width: None,
             image_height: None,
+            rating: Rating::None,
+            color_label: ColorLabel::None,
+            flag: None,
         }
     }
 }
@@ -243,7 +250,21 @@ impl CaptureMeta {
             self.file_size = std::fs::metadata(path).ok().map(|m| m.len());
         }
     }
+
+    /// 从 XMP 旁车文件填充评分/颜色标签/旗标（轻量调用：只读 sidecar）
+    pub fn enrich_with_xmp(&mut self) {
+        if !self.has_xmp {
+            return;
+        }
+        let xp = crate::xmp::xmp_path(std::path::Path::new(&self.primary_path));
+        if let Ok(meta) = crate::xmp::read_xmp(&xp) {
+            self.rating = meta.rating();
+            self.color_label = meta.color_label();
+            self.flag = meta.flag();
+        }
+    }
 }
+
 
 /// 评分
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -384,5 +405,77 @@ mod tests {
         assert!(ImageFormat::is_viewable("nef"));
         assert!(!ImageFormat::is_viewable("mp4"));
         assert!(!ImageFormat::is_viewable("txt"));
+    }
+
+    #[test]
+    fn test_enrich_with_xmp_reads_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("IMG_0001.jpg");
+        std::fs::write(&img, b"fake").unwrap();
+        let xp = crate::xmp::xmp_path(&img);
+        let mut meta = crate::xmp::XmpMetadata::default();
+        meta.set_rating(Rating::Three);
+        meta.set_color_label(ColorLabel::Green);
+        meta.set_flag(Some(Flag::Pick));
+        crate::xmp::write_xmp(&xp, &meta).unwrap();
+
+        let mut cm = CaptureMeta {
+            index: 0,
+            base_name: "IMG_0001".into(),
+            primary_path: img.to_string_lossy().to_string(),
+            primary_format: "JPEG".into(),
+            stack_count: 0,
+            file_size: None,
+            date_taken: None,
+            has_xmp: true,
+            extensions: vec![],
+            camera_make: None,
+            camera_model: None,
+            lens: None,
+            exposure_time: None,
+            f_number: None,
+            iso: None,
+            focal_length: None,
+            image_width: None,
+            image_height: None,
+            rating: Rating::None,
+            color_label: ColorLabel::None,
+            flag: None,
+        };
+        cm.enrich_with_xmp();
+        assert_eq!(cm.rating, Rating::Three);
+        assert_eq!(cm.color_label, ColorLabel::Green);
+        assert_eq!(cm.flag, Some(Flag::Pick));
+    }
+
+    #[test]
+    fn test_enrich_with_xmp_no_sidecar_keeps_defaults() {
+        let mut cm = CaptureMeta {
+            index: 0,
+            base_name: "NO_XMP".into(),
+            primary_path: "/nonexistent/NO_XMP.jpg".into(),
+            primary_format: "JPEG".into(),
+            stack_count: 0,
+            file_size: None,
+            date_taken: None,
+            has_xmp: false,
+            extensions: vec![],
+            camera_make: None,
+            camera_model: None,
+            lens: None,
+            exposure_time: None,
+            f_number: None,
+            iso: None,
+            focal_length: None,
+            image_width: None,
+            image_height: None,
+            rating: Rating::None,
+            color_label: ColorLabel::None,
+            flag: None,
+        };
+        cm.enrich_with_xmp();
+        assert_eq!(cm.rating, Rating::None);
+        assert_eq!(cm.color_label, ColorLabel::None);
+        assert_eq!(cm.flag, None);
     }
 }

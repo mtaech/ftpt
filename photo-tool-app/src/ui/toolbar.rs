@@ -78,7 +78,6 @@ pub fn render_toolbar(
                 .icon(IconName::SortAscending)
                 .ghost()
                 .label(label)
-                .dropdown_caret(true)
                 .on_click({
                     let vh = vh.clone();
                     move |_, _window, cx| {
@@ -142,7 +141,9 @@ pub fn render_settings_overlay(view: &RootView, cx: &mut Context<RootView>) -> i
                 .w(px(560.))
                 .bg(theme::colors().surface_background)
                 .rounded_md()
+                .border_1()
                 .border_color(theme::colors().border_variant)
+                .shadow(theme::ElevationIndex::ModalSurface.shadow())
                 .p_4()
                 .gap_3()
                 .flex()
@@ -154,7 +155,23 @@ pub fn render_settings_overlay(view: &RootView, cx: &mut Context<RootView>) -> i
                         .flex_row()
                         .items_center()
                         .justify_between()
-                        .child(div().text_lg().child("设置")),
+                        .child(div().text_lg().child("设置"))
+                        .child(
+                            Button::new("settings-x")
+                                .icon(IconName::Close)
+                                .ghost()
+                                .on_click({
+                                    let vh = click_close.clone();
+                                    move |_, _, cx| {
+                                        if let Some(entity) = vh.upgrade() {
+                                            cx.update_entity(&entity, |view, cx| {
+                                                view.show_settings = false;
+                                                cx.notify();
+                                            });
+                                        }
+                                    }
+                                }),
+                        ),
                 )
                 .child(div().h(px(1.)).w_full().bg(theme::colors().border_variant))
                 .child(section("界面"))
