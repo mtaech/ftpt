@@ -1,6 +1,5 @@
 use gpui::{prelude::FluentBuilder, *};
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::Selectable;
 use gpui_component::{h_flex, v_flex, Icon, IconName, Sizable};
 use photo_tool_core::domain::{Flag, Rating};
 
@@ -21,20 +20,6 @@ pub fn render_sidebar(view: &RootView, cx: &mut Context<RootView>) -> impl IntoE
         .child(render_filter_section(view, cx))
 }
 
-// ── helpers ──────────────────────────────────────────────────────────────
-
-fn section_header(label: &str) -> Div {
-    let label = label.to_string();
-    div()
-        .font_weight(FontWeight::BOLD)
-        .text_xs()
-        .text_color(theme::colors().text_muted)
-        .px_3()
-        .pt_4()
-        .pb_1()
-        .child(label)
-}
-
 // ── Directory Section ────────────────────────────────────────────────────
 
 fn render_directory_section(
@@ -50,7 +35,7 @@ fn render_directory_section(
 
     v_flex()
         .gap_1()
-        .child(section_header("目录"))
+        .child(crate::ui::controls::section_header("目录"))
         .child(
             Button::new("open-dir-btn")
                 .icon(IconName::FolderOpen)
@@ -82,7 +67,7 @@ fn render_favorites_section(
 
     v_flex()
         .gap_1()
-        .child(section_header("常用目录"))
+        .child(crate::ui::controls::section_header("常用目录"))
         .child(
             if favs.is_empty() {
                 div()
@@ -126,7 +111,7 @@ fn render_filter_section(
 ) -> impl IntoElement {
     v_flex()
         .gap_2()
-        .child(section_header("筛选条件"))
+        .child(crate::ui::controls::section_header("筛选条件"))
         .child(render_text_search(view, cx))
         .child(render_rating_filter(view, cx))
         .child(render_flag_filter(view, cx))
@@ -173,13 +158,13 @@ fn render_text_search(
                     div()
                         .id(ElementId::Name("text-search-input".into()))
                         .flex_grow(1.0)
-                        .h(px(24.))
+                        .h(px(28.))
                         .bg(theme::colors().element_background)
                         .rounded_sm()
                         .border_1()
                         .border_color(theme::colors().border_variant)
                         .px_1()
-                        .text_xs()
+                        .text_sm()
                         .text_color(placeholder_color)
                         .cursor_text()
                         .child(placeholder)
@@ -252,7 +237,7 @@ fn render_rating_filter(
         .gap_1()
         .child(
             div()
-                .text_xs()
+                .text_sm()
                 .text_color(theme::colors().text_muted)
                 .child("评分 ≥"),
         )
@@ -274,10 +259,10 @@ fn render_rating_filter(
                     let id = format!("rating-filter-{n}");
                     div()
                         .id(ElementId::Name(id.into()))
-                        .text_xs()
+                        .text_sm()
                         .text_color(if active && n > 0 { star_color } else { theme::colors().text_muted })
-                        .px_1()
-                        .py_0p5()
+                        .px_1p5()
+                        .py_1()
                         .rounded_sm()
                         .cursor_pointer()
                         .hover(|style| style.bg(theme::colors().element_hover))
@@ -327,73 +312,57 @@ fn render_flag_filter(
         .child({
             let active = current.is_none() && !unflagged;
             let vh = vh.clone();
-            Button::new("flag-filter-any")
-                .ghost()
-                .selected(active)
-                .child("任意")
-                .on_click(move |_, _window, cx| {
-                    if let Some(view) = vh.upgrade() {
-                        let _ = cx.update_entity(&view, |root_view, root_cx| {
-                            root_view.filter.flag_filter = None;
-                            root_view.filter.unflagged_filter = false;
-                            root_view.apply_filter_and_sort();
-                            root_cx.notify();
-                        });
-                    }
-                })
+            crate::ui::controls::segmented_button("flag-filter-any", "任意", active, move |_, _window, cx| {
+                if let Some(view) = vh.upgrade() {
+                    let _ = cx.update_entity(&view, |root_view, root_cx| {
+                        root_view.filter.flag_filter = None;
+                        root_view.filter.unflagged_filter = false;
+                        root_view.apply_filter_and_sort();
+                        root_cx.notify();
+                    });
+                }
+            })
         })
         .child({
             let active = current == Some(Flag::Pick);
             let vh = vh.clone();
-            Button::new("flag-filter-pick")
-                .ghost()
-                .selected(active)
-                .child("入选")
-                .on_click(move |_, _window, cx| {
-                    if let Some(view) = vh.upgrade() {
-                        let _ = cx.update_entity(&view, |root_view, root_cx| {
-                            root_view.filter.flag_filter = Some(Flag::Pick);
-                            root_view.filter.unflagged_filter = false;
-                            root_view.apply_filter_and_sort();
-                            root_cx.notify();
-                        });
-                    }
-                })
+            crate::ui::controls::segmented_button("flag-filter-pick", "入选", active, move |_, _window, cx| {
+                if let Some(view) = vh.upgrade() {
+                    let _ = cx.update_entity(&view, |root_view, root_cx| {
+                        root_view.filter.flag_filter = Some(Flag::Pick);
+                        root_view.filter.unflagged_filter = false;
+                        root_view.apply_filter_and_sort();
+                        root_cx.notify();
+                    });
+                }
+            })
         })
         .child({
             let active = current == Some(Flag::Reject);
             let vh = vh.clone();
-            Button::new("flag-filter-reject")
-                .ghost()
-                .selected(active)
-                .child("淘汰")
-                .on_click(move |_, _window, cx| {
-                    if let Some(view) = vh.upgrade() {
-                        let _ = cx.update_entity(&view, |root_view, root_cx| {
-                            root_view.filter.flag_filter = Some(Flag::Reject);
-                            root_view.filter.unflagged_filter = false;
-                            root_view.apply_filter_and_sort();
-                            root_cx.notify();
-                        });
-                    }
-                })
+            crate::ui::controls::segmented_button("flag-filter-reject", "淘汰", active, move |_, _window, cx| {
+                if let Some(view) = vh.upgrade() {
+                    let _ = cx.update_entity(&view, |root_view, root_cx| {
+                        root_view.filter.flag_filter = Some(Flag::Reject);
+                        root_view.filter.unflagged_filter = false;
+                        root_view.apply_filter_and_sort();
+                        root_cx.notify();
+                    });
+                }
+            })
         })
         .child({
             let active = unflagged;
             let vh = vh.clone();
-            Button::new("flag-filter-unflagged")
-                .ghost()
-                .selected(active)
-                .child("未标记")
-                .on_click(move |_, _window, cx| {
-                    if let Some(view) = vh.upgrade() {
-                        let _ = cx.update_entity(&view, |root_view, root_cx| {
-                            root_view.filter.flag_filter = None;
-                            root_view.filter.unflagged_filter = true;
-                            root_view.apply_filter_and_sort();
-                            root_cx.notify();
-                        });
-                    }
-                })
+            crate::ui::controls::segmented_button("flag-filter-unflagged", "未标记", active, move |_, _window, cx| {
+                if let Some(view) = vh.upgrade() {
+                    let _ = cx.update_entity(&view, |root_view, root_cx| {
+                        root_view.filter.flag_filter = None;
+                        root_view.filter.unflagged_filter = true;
+                        root_view.apply_filter_and_sort();
+                        root_cx.notify();
+                    });
+                }
+            })
         })
 }
