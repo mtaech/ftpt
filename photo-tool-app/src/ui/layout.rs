@@ -13,7 +13,7 @@ use crate::ui::theme;
 /// Render the three-panel layout: sidebar | content | info_panel.
 pub fn render_layout(
     view: &RootView,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let mut wizard_state = crate::ui::import_wizard::ImportWizardState::default();
@@ -125,7 +125,7 @@ pub fn render_layout(
                         } else {
                             match view.view_mode {
                                 crate::state::app::ViewMode::Grid => {
-                                    crate::ui::grid::render_grid(view, cx).into_any_element()
+                                    crate::ui::grid::render_grid(view, window, cx).into_any_element()
                                 }
                                 crate::state::app::ViewMode::Preview => {
                                     crate::ui::preview::render_preview(view, cx).into_any_element()

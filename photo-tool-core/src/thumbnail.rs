@@ -136,7 +136,26 @@ impl ThumbnailCache {
             )))
         })?;
 
-        let img = image::RgbImage::from_raw(target_w, target_h, pixels).ok_or_else(|| {
+        // 必须用解码器实际输出尺寸建图：DCT 块取整可能导致与请求的
+        // target_w/target_h 不同；尺寸不匹配时回退全解码（image::open）
+        let info = decoder.info().ok_or_else(|| {
+            ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "missing JPEG info after decode",
+            )))
+        })?;
+        let out_w = info.width as u32;
+        let out_h = info.height as u32;
+        if pixels.len() != (out_w * out_h * 3) as usize {
+            return Err(ThumbnailError::Image(image::ImageError::IoError(
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "JPEG decoded buffer size mismatch",
+                ),
+            )));
+        }
+
+        let img = image::RgbImage::from_raw(out_w, out_h, pixels).ok_or_else(|| {
             ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "JPEG decode produced invalid buffer",
@@ -378,6 +397,40 @@ mod tests {
 
         let result = cache.get_or_generate(&source, 64);
         assert!(result.is_err(), "should error on nonexistent file");
+    }
+
+    #[test]
+    fn test_jpeg_scaled_decode_odd_dimensions_no_shear() {
+        // 回归：原 decode_jpeg_scaled 用请求尺寸而非解码器实际尺寸建图，
+        // 尺寸不整除时行宽错位导致画面沿对角线剪切。用行均匀图检测：
+        // 每行颜色仅由 y 决定，若行宽错位则行内出现巨大色差。
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("odd.jpg");
+        let img = image::RgbImage::from_fn(1001, 667, |_x, y| {
+            let v = (y % 256) as u8;
+            image::Rgb([v, 255 - v, 128])
+        });
+        img.save(&path).unwrap();
+
+        let cache = ThumbnailCache::new(dir.path().join("thumbs"));
+        let source = SourceFile {
+            path,
+            format: ImageFormat::Jpeg,
+            is_sidecar: false,
+            file_size: None,
+        };
+        let bytes = cache.get_or_generate(&source, 128).unwrap();
+        let out = image::load_from_memory(&bytes).unwrap().to_rgb8();
+        for row in out.rows() {
+            let mut row = row;
+            let first = *row.next().unwrap();
+            for p in row {
+                for c in 0..3 {
+                    let diff = (p[c] as i16 - first[c] as i16).abs();
+                    assert!(diff <= 24, "行内色差 {diff} 过大，疑似解码错位");
+                }
+            }
+        }
     }
 
     #[test]
