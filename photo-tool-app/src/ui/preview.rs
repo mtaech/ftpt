@@ -31,7 +31,7 @@ pub fn render_preview(
     // 计算中间区的显式宽度，替代 size_full（GPUI img 配合字节源时 size_full + object_fit 不生效）
     let viewport_w: f32 = window.viewport_size().width.into();
     let viewport_h: f32 = window.viewport_size().height.into();
-    let left_w = view.config.left_panel_width as f32;
+    let left_w = view.config.left_panel_width as f32 + crate::ui::layout::RAIL_WIDTH;
     let right_w = if view.config.right_panel_visible {
         crate::ui::layout::RIGHT_PANEL_WIDTH
     } else {

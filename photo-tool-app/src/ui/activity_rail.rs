@@ -17,7 +17,7 @@ pub fn render_activity_rail(
 
     v_flex()
         .h_full()
-        .w(px(48.))
+        .w(px(crate::ui::layout::RAIL_WIDTH))
         .bg(theme::colors().surface_background)
         .border_r_1()
         .border_color(theme::colors().border_variant)

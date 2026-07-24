@@ -31,7 +31,7 @@ pub fn render_grid(
         0.
     };
     let available_w =
-        (viewport_w - view.config.left_panel_width as f32 - right_w).max(cell_size);
+        (viewport_w - crate::ui::layout::RAIL_WIDTH - view.config.left_panel_width as f32 - right_w).max(cell_size);
     let cols = ((available_w / cell_size) as usize).max(1);
     let cell_w = (available_w / cols as f32).floor();
     let row_count = item_count.div_ceil(cols);
