@@ -5,5 +5,4 @@ pub mod thumbnail;
 pub mod exif;
 pub mod xmp;
 pub mod ops;
-pub mod import;
 pub mod convert;

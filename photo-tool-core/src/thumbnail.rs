@@ -244,31 +244,11 @@ impl ThumbnailCache {
 /// 预期 4-8x 加速，返回 JPEG 字节。在 worker 线程中调用，不会阻塞 UI。
 /// 提取 RAW 内嵌 JPEG 预览（相机已处理降噪/锐化/色彩），
 /// 尺寸不足时放大到 max_size。远快于完整解码，适合挑片预览。
-pub fn decode_raw_preview(path: &Path, max_size: u32) -> Result<Vec<u8>, ThumbnailError> {
-    use std::io::Cursor;
-
-    let thumb_bytes = rawlib::extract_thumbnail(path)
-        .map_err(|e| ThumbnailError::Raw(e.to_string()))?;
-
-    let img = image::load_from_memory(&thumb_bytes)?;
-    let (w, h) = (img.width(), img.height());
-
-    let out = if w.max(h) < max_size {
-        // 内嵌预览太小（少数老机型），放大到 max_size
-        let buf = image::imageops::resize(&img, max_size, max_size, image::imageops::FilterType::Lanczos3);
-        image::DynamicImage::ImageRgba8(buf)
-    } else if w.max(h) > max_size {
-        let ratio = max_size as f64 / w.max(h) as f64;
-        let (nw, nh) = ((w as f64 * ratio) as u32, (h as f64 * ratio) as u32);
-        let buf = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3);
-        image::DynamicImage::ImageRgba8(buf)
-    } else {
-        return Ok(thumb_bytes);
-    };
-
-    let mut buf = Cursor::new(Vec::new());
-    out.write_to(&mut buf, image::ImageFormat::Jpeg)?;
-    Ok(buf.into_inner())
+/// 提取 RAW 内嵌 JPEG 预览（相机已处理降噪/锐化/色彩），原尺寸返回。
+/// 绝大多数现代相机内嵌全分辨率 JPEG，无需缩放。
+pub fn decode_raw_preview(path: &Path, _max_size: u32) -> Result<Vec<u8>, ThumbnailError> {
+    rawlib::extract_thumbnail(path)
+        .map_err(|e| ThumbnailError::Raw(e.to_string()))
 }
 
 

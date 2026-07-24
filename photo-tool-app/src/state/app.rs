@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use gpui::*;
 use gpui_component::IndexPath;
-use gpui_component::select::{SelectEvent, SelectState};
+use gpui_component::select::{SearchableVec, SelectEvent, SelectState};
 use std::sync::LazyLock;
 use photo_tool_core::config::AppConfig;
 use photo_tool_core::domain::{
@@ -56,10 +56,13 @@ pub struct RootView {
     /// preview_data 的 FIFO 淘汰顺序
     preview_order: VecDeque<usize>,
     /// 字体选择下拉状态（设置弹窗用）
-    pub font_select: Entity<SelectState<Vec<SharedString>>>,
-    pub show_import_wizard: bool,
+    pub font_select: Entity<SelectState<SearchableVec<SharedString>>>,
     pub show_settings: bool,
     pub scan_task: Option<Task<()>>,
+    /// 左侧边栏当前显示的侧栏 tab：0=文件树，1=收藏夹，2=筛选
+    pub sidebar_section: usize,
+    /// 左侧边栏显隐（由 Activity Rail 或快捷键切换）
+    pub sidebar_visible: bool,
     /// 正在后台加载中的预览图 capture 索引（防重复 spawn）
     preview_loading: HashSet<usize>,
     /// 预览缩放倍率（1.0 = 适配窗口）
@@ -90,7 +93,7 @@ impl RootView {
             .position(|f| f.as_str() == config.font_family.as_str())
             .map(|row| IndexPath::default().row(row));
         let font_select = cx.new(|cx| {
-            SelectState::new(font_items, selected_ix, window, cx).searchable(true)
+            SelectState::new(SearchableVec::new(font_items), selected_ix, window, cx).searchable(true)
         });
         cx.subscribe(&font_select, |view, _state, event, cx| {
             if let SelectEvent::Confirm(Some(name)) = event {
@@ -103,7 +106,9 @@ impl RootView {
         })
         .detach();
 
-        Self {
+        // 启动后自动扫描上次打开的目录
+        let auto_dir = config.last_directory.clone();
+        let mut this = Self {
             config,
             config_path,
             worker,
@@ -127,9 +132,16 @@ impl RootView {
             preview_data: HashMap::new(),
             preview_order: VecDeque::new(),
             font_select,
-            show_import_wizard: false,
             show_settings: false,
+            sidebar_section: 0,
+            sidebar_visible: true,
+        };
+
+        if let Some(last_dir) = &auto_dir {
+            this.scan_directory(last_dir.clone(), cx);
         }
+
+        this
     }
 
     /// 弹出目录选择对话框并扫描选中目录。
@@ -405,7 +417,7 @@ impl RootView {
         };
 
         // Preload first 50 thumbnails (visible range + buffer)
-        let count = self.display_order.len().min(50);
+        let count = self.display_order.len();
         for di in 0..count {
             let capture_idx = match self.display_order.get(di) {
                 Some(&ci) => ci,
@@ -840,10 +852,6 @@ impl RootView {
                 if let Some(ref dir) = self.dir_path.clone() {
                     self.scan_directory(dir.clone(), cx);
                 }
-            }
-            Action::OpenImport => {
-                self.show_import_wizard = !self.show_import_wizard;
-                cx.notify();
             }
             Action::ToggleLeftPanel => {
                 // Toggle left panel width (show/hide)

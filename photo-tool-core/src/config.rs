@@ -66,12 +66,6 @@ pub struct AppConfig {
     pub theme: Theme,
     /// 默认删除模式："trash" | "permanent"
     pub default_delete_mode: String,
-    /// 导入行为："copy" | "move"
-    pub import_behavior: String,
-    /// 导入日期子目录格式："year_month_day" | "iso_date" | "year_iso"
-    pub import_date_format: String,
-    /// 同名处理策略："skip" | "overwrite" | "rename"
-    pub overwrite_strategy: String,
     /// 窗口宽度
     pub window_width: u32,
     /// 窗口高度
@@ -100,9 +94,6 @@ impl Default for AppConfig {
             last_directory: None,
             theme: Theme::Light,
             default_delete_mode: "trash".to_string(),
-            import_behavior: "copy".to_string(),
-            import_date_format: "year_month_day".to_string(),
-            overwrite_strategy: "skip".to_string(),
             window_width: 1400,
             window_height: 900,
             left_panel_width: 260,

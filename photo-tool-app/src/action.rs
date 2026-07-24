@@ -37,7 +37,6 @@ pub enum Action {
     PermanentDelete,
     // Other
     Refresh,
-    OpenImport,
     ToggleLeftPanel,
     ToggleRightPanel,
     ToggleSettings,

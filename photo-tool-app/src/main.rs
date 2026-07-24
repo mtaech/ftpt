@@ -3,6 +3,8 @@ mod state;
 mod worker;
 mod ui;
 
+use std::sync::Arc;
+
 use gpui::*;
 use photo_tool_core::config::{self, AppConfig};
 
@@ -33,14 +35,22 @@ fn main() {
         cx.activate(true);
         let cp = config_path.clone();
         gpui_component::init(cx);
-        gpui_component::theme::Theme::change(gpui_component::theme::ThemeMode::Light, None, cx);
+        gpui_component::theme::Theme::change(gpui_component::theme::ThemeMode::Dark, None, cx);
         // 从配置文件恢复用户保存的字体
         gpui_component::theme::Theme::global_mut(cx).font_family = app_config.font_family.clone().into();
-        // 初始化 photo-tool 主题系统
-        crate::ui::theme::set_mode(crate::ui::theme::ThemeMode::Light);
+        // 初始化 photo-tool 主题系统（默认暗色，交易终端式近黑底）
+        crate::ui::theme::set_mode(crate::ui::theme::ThemeMode::Dark);
         let ac = app_config.clone();
+
+        // 加载窗口图标（嵌入二进制，不依赖外部文件）
+        let window_icon = include_bytes!("assets/icon.png");
+        let icon = ::image::load_from_memory(window_icon)
+            .ok()
+            .map(|img| Arc::new(img.into_rgba8()));
+
         cx.open_window(
             WindowOptions {
+                icon,
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,
                     size(px(1400.), px(900.)),
