@@ -240,9 +240,6 @@ pub fn decode_raw_preview(path: &Path, max_size: u32) -> Result<Vec<u8>, Thumbna
 
     let opts = rawlib::DecodeOptions {
         half_size: true,
-        demosaic_quality: 3,  // AHD（quality），非 bilinear
-        output_bps: 8,
-        no_auto_bright: false, // 保持自动亮度，避免偏色
         ..rawlib::DecodeOptions::quality()
     };
     let raw_img = rawlib::extract_image_with_options(path, &opts)
