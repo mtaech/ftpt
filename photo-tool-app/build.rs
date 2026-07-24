@@ -7,15 +7,22 @@ fn main() {
         let manifest_dir = Path::new(&manifest_dir);
         let png_path = manifest_dir.join("src/assets/icon.png");
         let ico_path = manifest_dir.join("src/assets/icon.ico");
-        let rc_path = manifest_dir.join("src/assets/app.rc");
 
         if !ico_path.exists() || is_newer(&png_path, &ico_path) {
             generate_ico(&png_path, &ico_path);
         }
 
-        std::fs::write(&rc_path, "MAINICON ICON \"icon.ico\"\n")
+        // Write RC to OUT_DIR with absolute icon path, matching Zed's approach.
+        // rc.exe resolves relative paths against CWD, not the RC file's directory,
+        // so an absolute path is the only reliable option.
+        // 资源 ID 必须是整数 1：gpui_windows 用 LoadImageW(MAKEINTRESOURCE(1)) 加载窗口图标，
+        // 字符串名 MAINICON 会导致加载失败、回退为默认图标。
+        let out_dir = std::env::var("OUT_DIR").unwrap();
+        let rc_path = Path::new(&out_dir).join("app.rc");
+        let icon_abs = ico_path.to_string_lossy().replace('\\', "\\\\");
+        std::fs::write(&rc_path, format!("1 ICON \"{icon_abs}\"\n"))
             .expect("Failed to write app.rc");
-        embed_resource::compile("src/assets/app.rc", &[] as &[&str]);
+        embed_resource::compile(&rc_path, &[] as &[&str]);
     }
 }
 
