@@ -7,4 +7,3 @@ pub mod xmp;
 pub mod ops;
 pub mod convert;
 pub mod cache;
-pub mod migrations;

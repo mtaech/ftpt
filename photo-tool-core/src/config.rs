@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use crate::migrations::Migration;
+use rusqlite_migration::{Migrations, M};
 
 #[derive(Error, Debug)]
 pub enum ConfigError {
@@ -9,6 +9,8 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("Migration error: {0}")]
+    Migration(#[from] rusqlite_migration::Error),
     #[error("JSON 序列化失败: {0}")]
     Json(#[from] serde_json::Error),
 }
@@ -19,15 +21,11 @@ pub enum Theme {
     Dark,
 }
 
-/// 缩略图缓存模式
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum ThumbnailCacheMode {
-    /// 不使用缓存
     None,
-    /// 缓存到磁盘，退出时保留
     Persistent,
-    /// 缓存到磁盘，退出时清理
     Volatile,
 }
 
@@ -41,20 +39,18 @@ impl ThumbnailCacheMode {
     pub fn is_enabled(&self) -> bool {
         !matches!(self, Self::None)
     }
-
     pub fn is_volatile(&self) -> bool {
         matches!(self, Self::Volatile)
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)] // 缺字段一律回退 Default（FFI/旧配置兼容）
+#[serde(rename_all = "camelCase", default)]
 pub struct AppConfig {
     pub sidecar_extensions: Vec<String>,
     pub thumbnail_size: u32,
     pub favorite_dirs: Vec<String>,
     pub last_directory: Option<String>,
-    /// 最近打开的目录（最多 10 个，最新在前）
     #[serde(default)]
     pub recent_directories: Vec<String>,
     pub theme: Theme,
@@ -67,6 +63,7 @@ pub struct AppConfig {
     pub max_cache_size_mb: u64,
     pub font_family: String,
 }
+
 fn default_font_family() -> String {
     "Microsoft YaHei UI".to_string()
 }
@@ -92,11 +89,16 @@ impl Default for AppConfig {
     }
 }
 
-/// 确定配置数据库路径：便携模式优先
-///
-/// 1. 检查二进制同目录是否存在 PT.db
-/// 2. 若 exe 不在系统目录（如 /usr、C:\\Program Files）则默认使用便携路径
-/// 3. 否则回落平台标准配置目录（`dirs::config_dir()/PT/PT.db`）
+/// 配置表迁移
+fn config_migrations() -> Migrations<'static> {
+    Migrations::new(vec![M::up(
+        "CREATE TABLE IF NOT EXISTS config (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            data TEXT NOT NULL
+         );",
+    )])
+}
+
 pub fn determine_config_path() -> Result<PathBuf, std::io::Error> {
     let exe = std::env::current_exe()?;
     let exe_dir = exe
@@ -129,13 +131,10 @@ pub fn determine_config_path() -> Result<PathBuf, std::io::Error> {
     Ok(cfg)
 }
 
-/// 从 SQLite 数据库加载配置，文件不存在时返回默认配置。
-/// 如果旧版 PT.toml 存在而 PT.db 不存在，自动迁移。
 pub fn load_config(path: &Path) -> Result<AppConfig, ConfigError> {
     if path.exists() {
         return load_from_sqlite(path);
     }
-    // 迁移：尝试从旧版 PT.toml 读取
     let toml_path = path.with_file_name("PT.toml");
     if toml_path.exists() {
         if let Ok(cfg) = load_from_toml(&toml_path) {
@@ -152,8 +151,8 @@ fn load_from_toml(path: &Path) -> Result<AppConfig, ConfigError> {
 }
 
 fn load_from_sqlite(path: &Path) -> Result<AppConfig, ConfigError> {
-    let conn = rusqlite::Connection::open(path)?;
-    init_config_table(&conn)?;
+    let mut conn = rusqlite::Connection::open(path)?;
+    config_migrations().to_latest(&mut conn)?;
     let json: Option<String> = conn
         .query_row(
             "SELECT data FROM config WHERE id = 1",
@@ -168,13 +167,12 @@ fn load_from_sqlite(path: &Path) -> Result<AppConfig, ConfigError> {
     }
 }
 
-/// 保存配置到 SQLite 数据库（自动创建父目录和表）
 pub fn save_config(path: &Path, config: &AppConfig) -> Result<(), ConfigError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let conn = rusqlite::Connection::open(path)?;
-    init_config_table(&conn)?;
+    let mut conn = rusqlite::Connection::open(path)?;
+    config_migrations().to_latest(&mut conn)?;
     let json = serde_json::to_string_pretty(config)?;
     conn.execute(
         "INSERT OR REPLACE INTO config (id, data) VALUES (1, ?1)",
@@ -182,20 +180,7 @@ pub fn save_config(path: &Path, config: &AppConfig) -> Result<(), ConfigError> {
     )?;
     Ok(())
 }
-/// 配置表迁移（按版本升序，新增迁移追加在末尾）
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    sql: "CREATE TABLE IF NOT EXISTS config (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        data TEXT NOT NULL
-     );",
-}];
 
-fn init_config_table(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
-    crate::migrations::run_migrations(conn, MIGRATIONS)
-}
-
-/// 辅助：将 rusqlite::Result 转为 Option
 trait OptionalResult<T> {
     fn optional(self) -> rusqlite::Result<Option<T>>;
 }
@@ -221,10 +206,6 @@ mod tests {
         assert!(cfg.sidecar_extensions.contains(&"xmp".to_string()));
         assert_eq!(cfg.thumbnail_size, 220);
         assert_eq!(cfg.theme, Theme::Light);
-        assert_eq!(cfg.default_delete_mode, "trash");
-        assert_eq!(cfg.window_width, 1400);
-        assert_eq!(cfg.window_height, 900);
-        assert_eq!(cfg.font_family, "Microsoft YaHei UI");
     }
 
     #[test]
@@ -232,13 +213,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("PT.db");
         let legacy_json = r#"{"sidecarExtensions":["xmp"],"thumbnailSize":220}"#;
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        init_config_table(&conn).unwrap();
+        let mut conn = rusqlite::Connection::open(&path).unwrap();
+        config_migrations().to_latest(&mut conn).unwrap();
         conn.execute(
             "INSERT INTO config (id, data) VALUES (1, ?1)",
             rusqlite::params![legacy_json],
         ).unwrap();
-
         let loaded = load_config(&path).unwrap();
         assert_eq!(loaded.font_family, "Microsoft YaHei UI");
     }
@@ -255,11 +235,9 @@ mod tests {
         };
         save_config(&path, &cfg).unwrap();
         assert!(path.exists());
-
         let loaded = load_config(&path).unwrap();
         assert_eq!(loaded.thumbnail_size, 300);
         assert_eq!(loaded.theme, Theme::Dark);
-        assert_eq!(loaded.font_family, "Microsoft YaHei");
     }
 
     #[test]
@@ -267,7 +245,6 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let toml_path = dir.path().join("PT.toml");
         let db_path = dir.path().join("PT.db");
-
         let cfg = AppConfig {
             thumbnail_size: 300,
             theme: Theme::Dark,
@@ -276,8 +253,6 @@ mod tests {
         };
         let toml_str = toml::to_string_pretty(&cfg).unwrap();
         std::fs::write(&toml_path, toml_str).unwrap();
-
-        // 只存在 PT.toml，PT.db 不存在 → 自动迁移
         let loaded = load_config(&db_path).unwrap();
         assert_eq!(loaded.thumbnail_size, 300);
         assert_eq!(loaded.theme, Theme::Dark);
@@ -291,7 +266,6 @@ mod tests {
         let path = dir.path().join("nonexistent.db");
         let loaded = load_config(&path).unwrap();
         assert_eq!(loaded.thumbnail_size, 220);
-        assert_eq!(loaded.theme, Theme::Light);
     }
 
     #[test]

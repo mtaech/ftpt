@@ -5,7 +5,8 @@ edition.workspace = true
 
 [dependencies]
 rawlib = "0.7"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite_migration = "2.6"
 kamadak-exif = "0.6"
 zune-jpeg = "0.5"
 zune-core = "0.5"
