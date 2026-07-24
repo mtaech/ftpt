@@ -153,6 +153,9 @@ pub fn render_toolbar(
                             }
                         }),
                 )
+        )
+}
+
 // ── Settings Dialog Overlay ──────────────────────────────────────────
 
 /// 单选组渲染 helper：横排可选按钮，选中态高亮，点击直接写 View config
@@ -313,3 +316,4 @@ fn section(label: &str) -> impl IntoElement {
         .font_weight(FontWeight::MEDIUM)
         .child(label.to_string())
 }
+

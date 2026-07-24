@@ -1,4 +1,4 @@
-use gpui::{AssetSource, Result, SharedString};
+use gpui::{AssetSource, Result};
 use std::borrow::Cow;
 
 /// 照片工具的Asset源。先查自己的assets，找不到时回退到gpui-component的。
@@ -6,12 +6,14 @@ pub struct AppAssets;
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        // 先查自己的 assets
-        if let Ok(Some(data)) = OwnAssets.load(path) {
-            return Ok(Some(data));
+        if let Some(data) = OwnAssets::get(path) {
+            return Ok(Some(Cow::Owned(data.data.to_vec())));
         }
-        // 回退到 gpui-component 的图标
         gpui_component_assets::Assets.load(path)
+    }
+
+    fn list(&self, _path: &str) -> Result<Vec<gpui::SharedString>> {
+        Ok(Vec::new())
     }
 }
 
