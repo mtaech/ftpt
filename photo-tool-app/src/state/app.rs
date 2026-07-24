@@ -876,6 +876,7 @@ impl RootView {
             ViewMode::Grid => ViewMode::Preview,
             ViewMode::Preview => ViewMode::Grid,
         };
+        tracing::info!("toggle_view_mode: focus_index={:?}, view_mode={:?}", self.focus_index, self.view_mode);
         if self.view_mode == ViewMode::Preview {
             self.ensure_preview_loaded(cx);
         }
