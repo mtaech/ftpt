@@ -13,6 +13,9 @@ pub fn render_preview(
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let focused = view.get_focused_capture();
+    if let Some(meta) = focused {
+        tracing::info!("render_preview: focus_index={:?}, base_name={}", view.focus_index, meta.base_name);
+    }
     let thumbnail_data = view.thumbnail_data.clone();
     let has_prev = view.focus_index.map_or(false, |i| i > 0);
     let has_next = view
