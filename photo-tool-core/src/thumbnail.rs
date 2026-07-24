@@ -238,7 +238,14 @@ impl ThumbnailCache {
 pub fn decode_raw_preview(path: &Path, max_size: u32) -> Result<Vec<u8>, ThumbnailError> {
     use std::io::Cursor;
 
-    let raw_img = rawlib::extract_image_with_options(path, &rawlib::DecodeOptions::preview())
+    let opts = rawlib::DecodeOptions {
+        half_size: true,
+        demosaic_quality: 3,  // AHD（quality），非 bilinear
+        output_bps: 8,
+        no_auto_bright: false, // 保持自动亮度，避免偏色
+        ..rawlib::DecodeOptions::quality()
+    };
+    let raw_img = rawlib::extract_image_with_options(path, &opts)
         .map_err(|e| ThumbnailError::Raw(e.to_string()))?;
     let orig_w = raw_img.width as u32;
     let orig_h = raw_img.height as u32;
