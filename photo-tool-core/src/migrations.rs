@@ -48,7 +48,6 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v, 2);
-        // 表和列都存在
         conn.execute("INSERT INTO t1 (id, name) VALUES (1, 'a')", [])
             .unwrap();
     }
@@ -56,13 +55,11 @@ mod tests {
     #[test]
     fn test_only_newer_migrations_run() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
-        // 手动推进到版本 1 并建表
         conn.execute_batch(
             "CREATE TABLE t1 (id INTEGER PRIMARY KEY);
              PRAGMA user_version = 1;",
         )
         .unwrap();
-        // 只有 version=2 的 ALTER 会执行
         run_migrations(&conn, TEST_MIGRATIONS).unwrap();
         let v: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
