@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use crate::migrations::Migration;
 
 #[derive(Error, Debug)]
 pub enum ConfigError {
@@ -181,14 +182,17 @@ pub fn save_config(path: &Path, config: &AppConfig) -> Result<(), ConfigError> {
     )?;
     Ok(())
 }
+/// 配置表迁移（按版本升序，新增迁移追加在末尾）
+const MIGRATIONS: &[Migration] = &[Migration {
+    version: 1,
+    sql: "CREATE TABLE IF NOT EXISTS config (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        data TEXT NOT NULL
+     );",
+}];
 
 fn init_config_table(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS config (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            data TEXT NOT NULL
-         );",
-    )
+    crate::migrations::run_migrations(conn, MIGRATIONS)
 }
 
 /// 辅助：将 rusqlite::Result 转为 Option

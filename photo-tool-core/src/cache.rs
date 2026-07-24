@@ -5,6 +5,39 @@ use thiserror::Error;
 
 use crate::domain::ImageFormat;
 use crate::exif::ExifMetadata;
+use crate::migrations::Migration;
+
+/// EXIF 缓存表迁移（按版本升序，新增迁移追加在末尾）
+const MIGRATIONS: &[Migration] = &[Migration {
+    version: 1,
+    sql: "CREATE TABLE IF NOT EXISTS exif_cache (
+        path        TEXT PRIMARY KEY,
+        file_size   INTEGER NOT NULL,
+        mtime_ns    INTEGER NOT NULL,
+        make        TEXT,
+        model       TEXT,
+        lens        TEXT,
+        exposure_time TEXT,
+        f_number    TEXT,
+        iso         INTEGER,
+        focal_length TEXT,
+        exposure_compensation TEXT,
+        white_balance TEXT,
+        date_time_original TEXT,
+        image_width  INTEGER,
+        image_height INTEGER,
+        file_size_cache INTEGER,
+        color_space  TEXT,
+        orientation  INTEGER,
+        gps_lat_deg  REAL,
+        gps_lat_min  REAL,
+        gps_lat_sec  REAL,
+        gps_lon_deg  REAL,
+        gps_lon_min  REAL,
+        gps_lon_sec  REAL,
+        gps_altitude REAL
+    );",
+}];
 
 #[derive(Error, Debug)]
 pub enum CacheError {
@@ -24,41 +57,12 @@ pub struct ExifCache {
 }
 
 impl ExifCache {
-    /// 在指定目录中打开或创建 `.pt-cache.db`，自动初始化表结构。
+    /// 在指定目录中打开或创建 `.pt-cache.db`，自动迁移表结构。
     pub fn open_in_dir(dir: &Path) -> Result<Self, CacheError> {
         let db_path = dir.join(".pt-cache.db");
         let conn = rusqlite::Connection::open(&db_path)?;
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA synchronous=NORMAL;
-             CREATE TABLE IF NOT EXISTS exif_cache (
-                 path        TEXT PRIMARY KEY,
-                 file_size   INTEGER NOT NULL,
-                 mtime_ns    INTEGER NOT NULL,
-                 make        TEXT,
-                 model       TEXT,
-                 lens        TEXT,
-                 exposure_time TEXT,
-                 f_number    TEXT,
-                 iso         INTEGER,
-                 focal_length TEXT,
-                 exposure_compensation TEXT,
-                 white_balance TEXT,
-                 date_time_original TEXT,
-                 image_width  INTEGER,
-                 image_height INTEGER,
-                 file_size_cache INTEGER,
-                 color_space  TEXT,
-                 orientation  INTEGER,
-                 gps_lat_deg  REAL,
-                 gps_lat_min  REAL,
-                 gps_lat_sec  REAL,
-                 gps_lon_deg  REAL,
-                 gps_lon_min  REAL,
-                 gps_lon_sec  REAL,
-                 gps_altitude REAL
-             );",
-        )?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        crate::migrations::run_migrations(&conn, MIGRATIONS)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
