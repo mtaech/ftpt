@@ -60,6 +60,14 @@ pub struct RootView {
     pub show_import_wizard: bool,
     pub show_settings: bool,
     pub scan_task: Option<Task<()>>,
+    /// 正在后台加载中的预览图 capture 索引（防重复 spawn）
+    preview_loading: HashSet<usize>,
+    /// 预览缩放倍率（1.0 = 适配窗口）
+    pub preview_zoom: f32,
+    /// 预览平移偏移（像素），缩放后拖拽移动图片
+    pub preview_pan: (f32, f32),
+    /// 拖拽起始状态：(鼠标x, 鼠标y, 起始pan_x, 起始pan_y)
+    pub preview_drag: Option<(f32, f32, f32, f32)>,
 }
 
 impl RootView {
@@ -111,6 +119,10 @@ impl RootView {
             focus_index: None,
             display_order: Vec::new(),
             scan_task: None,
+            preview_loading: HashSet::new(),
+            preview_zoom: 1.0,
+            preview_pan: (0.0, 0.0),
+            preview_drag: None,
             thumbnail_data: HashMap::new(),
             preview_data: HashMap::new(),
             preview_order: VecDeque::new(),
@@ -321,14 +333,27 @@ impl RootView {
         }
     }
 
-    /// 确保当前焦点图片的预览数据已加载：非 RAW 读原图（缩略图放大会模糊），
-    /// RAW 无法直接解码，取 1600px 内嵌预览。
+    /// 确保当前焦点图片的预览数据已加载：全部格式经 worker 线程缩放到 1600px。
+    /// 同时预取前后各一张，快速切换时无感。
     pub fn ensure_preview_loaded(&mut self, cx: &mut Context<Self>) {
+        let Some(focus_idx) = self.focus_index else { return };
+        self.spawn_preview_load(focus_idx, cx);
+        // 相邻预取：前后各一张
+        if focus_idx > 0 {
+            self.spawn_preview_load(focus_idx - 1, cx);
+        }
+        if focus_idx + 1 < self.display_order.len() {
+            self.spawn_preview_load(focus_idx + 1, cx);
+        }
+    }
+
+    /// 为指定 display_order 索引 spawn 预览图加载任务（已缓存或已在加载则跳过）
+    fn spawn_preview_load(&mut self, display_idx: usize, cx: &mut Context<Self>) {
         use photo_tool_core::domain::{ImageFormat as DomainFormat, SourceFile};
 
-        let Some(focus_idx) = self.focus_index else { return };
-        let Some(&capture_idx) = self.display_order.get(focus_idx) else { return };
+        let Some(&capture_idx) = self.display_order.get(display_idx) else { return };
         if self.preview_data.contains_key(&capture_idx) { return; }
+        if !self.preview_loading.insert(capture_idx) { return; } // 已在加载
         let Some(meta) = self.captures.get(capture_idx) else { return };
 
         let path = PathBuf::from(&meta.primary_path);
@@ -337,49 +362,58 @@ impl RootView {
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-        let gpui_fmt = match ext.as_str() {
-            "png" => ImageFormat::Png,
-            "webp" => ImageFormat::Webp,
-            "gif" => ImageFormat::Gif,
-            "bmp" => ImageFormat::Bmp,
-            "tif" | "tiff" => ImageFormat::Tiff,
-            _ => ImageFormat::Jpeg,
-        };
-        let is_raw = matches!(DomainFormat::from_extension(&ext), Some(DomainFormat::Raw(_)));
+        let is_raw = matches!(
+            DomainFormat::from_extension(&ext),
+            Some(DomainFormat::Raw(_))
+        );
 
         if is_raw {
-            // RAW：GPUI 无法解码，用大尺寸内嵌预览
+            // RAW：完整解码（half_size 去马赛克，4x 加速），品质远好于内嵌 JPEG
+            let path_clone = path.clone();
+            self.worker.spawn(
+                cx,
+                move || {
+                    photo_tool_core::thumbnail::decode_raw_preview(&path_clone, 1600)
+                        .inspect_err(|e| tracing::warn!("RAW 预览图解码失败: {e}"))
+                        .ok()
+                },
+                move |this, result, cx| {
+                    this.preview_loading.remove(&capture_idx);
+                    if let Some(bytes) = result {
+                        this.insert_preview(capture_idx, ImageFormat::Jpeg, bytes);
+                        cx.notify();
+                    }
+                },
+            );
+        } else {
+            // 常规图：缩略图缓存路径
             let Some(cache) = self.thumbnail_cache.clone() else { return };
             let source = SourceFile {
                 path,
-                format: DomainFormat::from_extension(&ext).unwrap(),
+                format: DomainFormat::from_extension(&ext).unwrap_or(DomainFormat::Jpeg),
                 is_sidecar: false,
                 file_size: meta.file_size,
             };
-            self.worker.spawn(cx, move || {
-                cache
-                    .get_or_generate(&source, 1600)
-                    .map_err(|e| tracing::warn!("预览图生成失败: {e}"))
-                    .ok()
-            }, move |this, result, cx| {
-                if let Some(bytes) = result {
-                    this.insert_preview(capture_idx, ImageFormat::Jpeg, bytes);
-                    cx.notify();
-                }
-            });
-        } else {
-            self.worker.spawn(cx, move || {
-                std::fs::read(&path)
-                    .map_err(|e| tracing::warn!("预览原图读取失败 {}: {e}", path.display()))
-                    .ok()
-            }, move |this, result, cx| {
-                if let Some(bytes) = result {
-                    this.insert_preview(capture_idx, gpui_fmt, bytes);
-                    cx.notify();
-                }
-            });
+            self.worker.spawn(
+                cx,
+                move || {
+                    cache
+                        .get_or_generate(&source, 1600)
+                        .map_err(|e| tracing::warn!("预览图生成失败: {e}"))
+                        .ok()
+                },
+                move |this, result, cx| {
+                    this.preview_loading.remove(&capture_idx);
+                    if let Some(bytes) = result {
+                        this.insert_preview(capture_idx, ImageFormat::Jpeg, bytes);
+                        cx.notify();
+                    }
+                },
+            );
         }
     }
+
+
 
     /// Spawn background tasks to preload thumbnails for the first N visible items.
     pub fn preload_thumbnails(&mut self, cx: &mut Context<Self>) {
@@ -450,6 +484,8 @@ impl RootView {
             return;
         }
         let capture_idx = self.display_order[index];
+        // 鼠标点击即移动焦点，预览/信息面板/双击进入预览都依赖 focus_index
+        self.focus_index = Some(index);
 
         if range {
             if let Some(anchor) = self.anchor {
@@ -723,7 +759,7 @@ impl RootView {
     pub fn dispatch_action(&mut self, action: crate::action::Action, cx: &mut Context<Self>) {
         use crate::action::Action;
         match action {
-            // Navigation
+            // Navigation（切换图片时重置缩放和平移）
             Action::Next => {
                 if let Some(idx) = self.focus_index {
                     if idx + 1 < self.display_order.len() {
@@ -732,6 +768,8 @@ impl RootView {
                 } else if !self.display_order.is_empty() {
                     self.focus_index = Some(0);
                 }
+                self.preview_zoom = 1.0;
+                self.preview_pan = (0.0, 0.0);
                 cx.notify();
             }
             Action::Prev => {
@@ -742,18 +780,24 @@ impl RootView {
                 } else if !self.display_order.is_empty() {
                     self.focus_index = Some(0);
                 }
+                self.preview_zoom = 1.0;
+                self.preview_pan = (0.0, 0.0);
                 cx.notify();
             }
             Action::First => {
                 if !self.display_order.is_empty() {
                     self.focus_index = Some(0);
                 }
+                self.preview_zoom = 1.0;
+                self.preview_pan = (0.0, 0.0);
                 cx.notify();
             }
             Action::Last => {
                 if !self.display_order.is_empty() {
                     self.focus_index = Some(self.display_order.len() - 1);
                 }
+                self.preview_zoom = 1.0;
+                self.preview_pan = (0.0, 0.0);
                 cx.notify();
             }
             // View
@@ -761,9 +805,25 @@ impl RootView {
                 self.toggle_view_mode(cx);
                 cx.notify();
             }
-            Action::ZoomIn | Action::ZoomOut | Action::ZoomToFit | Action::ZoomTo100 => {
-                // Preview zoom — stub for now
-                tracing::debug!("Zoom action: {:?}", action);
+            Action::ZoomIn => {
+                self.preview_zoom = (self.preview_zoom * 1.25).min(10.0);
+                cx.notify();
+            }
+            Action::ZoomOut => {
+                self.preview_zoom = (self.preview_zoom / 1.25).max(0.1);
+                if self.preview_zoom <= 1.0 {
+                    self.preview_pan = (0.0, 0.0);
+                }
+                cx.notify();
+            }
+            Action::ZoomToFit => {
+                self.preview_zoom = 1.0;
+                self.preview_pan = (0.0, 0.0);
+                cx.notify();
+            }
+            Action::ZoomTo100 => {
+                self.preview_zoom = 0.0; // 特殊值，渲染时按原始尺寸计算
+                cx.notify();
             }
             // Rating
             Action::Rate0 => self.apply_rating(Rating::None, cx),

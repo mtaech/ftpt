@@ -4,9 +4,10 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-rawlib = "0.3"
+rawlib = "0.5.1"
 kamadak-exif = "0.6"
-jpeg-decoder = "0.3"
+zune-jpeg = "0.5"
+zune-core = "0.5"
 image = { version = "0.25", default-features = false, features = [
   "jpeg",
   "png",

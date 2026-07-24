@@ -3422,15 +3422,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jpeg-decoder"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
-dependencies = [
- "rayon",
-]
-
-[[package]]
 name = "js-sys"
 version = "0.3.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4836,7 +4827,6 @@ dependencies = [
  "chrono",
  "dirs",
  "image",
- "jpeg-decoder",
  "kamadak-exif",
  "log",
  "parking_lot",
@@ -4850,6 +4840,8 @@ dependencies = [
  "trash",
  "walkdir",
  "winreg 0.52.0",
+ "zune-core 0.5.1",
+ "zune-jpeg 0.5.15",
 ]
 
 [[package]]
@@ -5431,9 +5423,9 @@ dependencies = [
 
 [[package]]
 name = "rawlib"
-version = "0.3.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61ffd6171a261bbe624097f21e8c92b0d9382a832f9d26f563140c33c7f52328"
+checksum = "d4dc749c99b30835cd10698191c8f9f584591cab74d3b14e803a4ebd0d141578"
 dependencies = [
  "cc",
  "clap",
@@ -5444,6 +5436,8 @@ dependencies = [
  "log",
  "num_cpus",
  "rayon",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "walkdir",
 ]

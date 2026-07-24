@@ -97,63 +97,40 @@ impl ThumbnailCache {
         Ok(buf.into_inner())
     }
 
-    /// JPEG DCT 降采样解码：只解码到约目标尺寸的最近 DCT 缩放比，再精确缩放
+    /// JPEG DCT 降采样解码：zune-jpeg SIMD 加速 + max_width/max_height 自动 DCT 缩放
     fn decode_jpeg_scaled(&self, path: &Path, size: u32) -> Result<Vec<u8>, ThumbnailError> {
-        use jpeg_decoder::Decoder;
+        use zune_core::colorspace::ColorSpace;
+        use zune_core::options::DecoderOptions;
+        use zune_jpeg::JpegDecoder;
+
+        let options = DecoderOptions::new_fast()
+            .jpeg_set_out_colorspace(ColorSpace::RGB)
+            .set_max_width(size as usize)
+            .set_max_height(size as usize);
 
         let file = std::fs::File::open(path)?;
-        let mut decoder = Decoder::new(std::io::BufReader::new(file));
-
-        // 读取头部获取原始尺寸（不解码像素）
-        let (orig_w, orig_h) = image::ImageReader::open(path)?
-            .into_dimensions()
-            .map_err(|e| ThumbnailError::Image(e))?;
-
-        // 选最大的 DCT 缩放比，使降采样后仍 >= 目标尺寸
-        let max_dim = orig_w.max(orig_h);
-        let scale: u32 = if max_dim / 8 >= size {
-            8
-        } else if max_dim / 4 >= size {
-            4
-        } else if max_dim / 2 >= size {
-            2
-        } else {
-            1
-        };
-
-        let target_w = orig_w / scale;
-        let target_h = orig_h / scale;
-        decoder
-            .scale(target_w as u16, target_h as u16)
-            .map_err(|e| {
-                ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    e,
-                )))
-            })?;
-
+        let mut decoder =
+            JpegDecoder::new_with_options(std::io::BufReader::new(file), options);
         let pixels = decoder.decode().map_err(|e| {
             ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                e,
+                e.to_string(),
             )))
         })?;
 
-        // 必须用解码器实际输出尺寸建图：DCT 块取整可能导致与请求的
-        // target_w/target_h 不同；尺寸不匹配时回退全解码（image::open）
         let info = decoder.info().ok_or_else(|| {
             ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "missing JPEG info after decode",
             )))
         })?;
-        let out_w = info.width as u32;
-        let out_h = info.height as u32;
-        if pixels.len() != (out_w * out_h * 3) as usize {
+        let (out_w, out_h) = (info.width as u32, info.height as u32);
+        let expected = (out_w * out_h * 3) as usize;
+        if pixels.len() != expected {
             return Err(ThumbnailError::Image(image::ImageError::IoError(
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "JPEG decoded buffer size mismatch",
+                    format!("JPEG buffer size mismatch: {} != {}", pixels.len(), expected),
                 ),
             )));
         }
@@ -253,6 +230,64 @@ impl ThumbnailCache {
         }
         Ok(())
     }
+}
+
+/// 通过 rawlib 完整解码 RAW 文件（half_size 去马赛克，速度约 4x），
+/// 返回 JPEG 字节。在 worker 线程中调用，不会阻塞 UI。
+///
+/// half_size 将输出分辨率减半 —— 对高像素 RAW 预览足够清晰，远好于内嵌 JPEG。
+pub fn decode_raw_preview(path: &Path, max_size: u32) -> Result<Vec<u8>, ThumbnailError> {
+    use std::io::Cursor;
+
+    let raw_img = rawlib::extract_image_half_size(path, true).map_err(|e| {
+        ThumbnailError::Raw(e.to_string())
+    })?;
+    let orig_w = raw_img.width as u32;
+    let orig_h = raw_img.height as u32;
+    let colors = raw_img.colors as usize;
+    let bits = raw_img.bits;
+
+    // 16-bit -> 8-bit 降采样
+    let rgb8: Vec<u8> = if bits >= 16 {
+        let channel_bytes = (bits / 8) as usize;
+        raw_img
+            .data
+            .chunks_exact(colors * channel_bytes)
+            .flat_map(|pixel| {
+                (0..colors.min(3)).map(|i| pixel[i * channel_bytes + (channel_bytes - 1)])
+            })
+            .collect()
+    } else {
+        raw_img
+            .data
+            .chunks_exact(colors)
+            .flat_map(|pixel| {
+                let r = pixel[0];
+                let g = if colors > 1 { pixel[1] } else { r };
+                let b = if colors > 2 { pixel[2] } else { r };
+                [r, g, b]
+            })
+            .collect()
+    };
+
+    let img = image::RgbImage::from_raw(orig_w, orig_h, rgb8)
+        .ok_or_else(|| {
+            ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "RAW decode produced invalid buffer",
+            )))
+        })?;
+    let dynamic = image::DynamicImage::ImageRgb8(img);
+
+    let resized = if orig_w.max(orig_h) > max_size {
+        dynamic.thumbnail(max_size, max_size)
+    } else {
+        dynamic
+    };
+
+    let mut buf = Cursor::new(Vec::new());
+    resized.write_to(&mut buf, image::ImageFormat::Jpeg)?;
+    Ok(buf.into_inner())
 }
 
 #[cfg(test)]
