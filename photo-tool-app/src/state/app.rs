@@ -34,7 +34,6 @@ pub struct RootView {
     pub config: AppConfig,
     pub config_path: PathBuf,
     pub worker: Worker,
-    pub exif_cache: photo_tool_core::cache::ExifCache,
     pub thumbnail_cache: Option<ThumbnailCache>,
     pub dir_path: Option<PathBuf>,
     pub captures: Vec<CaptureMeta>,
@@ -85,15 +84,6 @@ impl RootView {
             .unwrap_or(Path::new("."))
             .join("thumbnails");
         let thumbnail_cache = Some(ThumbnailCache::new(cache_dir));
-        let exif_db = config_path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join("exif_cache.db");
-        let exif_cache = photo_tool_core::cache::ExifCache::open(&exif_db)
-            .unwrap_or_else(|e| {
-                tracing::error!("无法打开 EXIF 缓存: {}", e);
-                panic!("EXIF 缓存初始化失败: {}", e);
-            });
 
         let worker = Worker::new();
 
@@ -125,7 +115,6 @@ impl RootView {
         let mut this = Self {
             config,
             config_path,
-            exif_cache,
             worker,
             thumbnail_cache,
             dir_path: None,
@@ -155,7 +144,7 @@ impl RootView {
         };
 
         if let Some(last_dir) = &auto_dir {
-            this.scan_directory(last_dir.clone(), cx);
+            this.scan_directory(PathBuf::from(last_dir), cx);
         }
 
         this
@@ -181,7 +170,9 @@ impl RootView {
         if let Some(task) = self.scan_task.take() {
             drop(task);
         }
-        let exif_cache = self.exif_cache.clone();
+        // 在照片目录中打开 EXIF 缓存（.pt-cache.db）
+        let exif_cache = photo_tool_core::cache::ExifCache::open_in_dir(&path)
+            .ok();
         let sidecar_exts = self.config.sidecar_extensions.clone();
         let filter = self.filter.clone();
 
@@ -198,11 +189,13 @@ impl RootView {
                                 meta.index = i;
                                 meta.enrich_with_xmp(); // 快：只读 sidecar
                                 // 从缓存获取 EXIF（未命中则提取并写入缓存）
-                                let primary = &c.source_files[c.primary_index];
-                                let exif = exif_cache
-                                    .get_or_extract(&primary.path, &primary.format)
-                                    .unwrap_or_default();
-                                meta.enrich_with_exif(&exif);
+                                if let Some(ref cache) = exif_cache {
+                                    let primary = &c.source_files[c.primary_index];
+                                    let exif = cache
+                                        .get_or_extract(&primary.path, &primary.format)
+                                        .unwrap_or_default();
+                                    meta.enrich_with_exif(&exif);
+                                }
                                 meta
                             })
                             .collect();
@@ -211,7 +204,7 @@ impl RootView {
             },
             |this, result, cx| {
                 match result {
-                    Ok((dir, metas)) => {
+                    Ok((dir, _metas)) => {
                         this.dir_path = Some(dir.clone());
                         // 记住最后打开的目录，下次启动自动恢复
                         this.config.last_directory = Some(dir.to_string_lossy().to_string());

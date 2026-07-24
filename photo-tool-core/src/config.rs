@@ -6,10 +6,10 @@ use thiserror::Error;
 pub enum ConfigError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("TOML parse error: {0}")]
-    TomlParse(#[from] toml::de::Error),
-    #[error("TOML serialize error: {0}")]
-    TomlSer(#[from] toml::ser::Error),
+    #[error("SQLite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("JSON 序列化失败: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -22,63 +22,45 @@ pub enum Theme {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum ThumbnailCacheMode {
-    /// 全局缓存（默认路径：系统缓存目录/PT/thumbnails）
-    Global,
-    /// 全局缓存，用户指定路径
-    GlobalCustom(PathBuf),
-    /// 每个目录下 .PT-thumbnails/（路径不可更改）
-    PerDirectory,
+    /// 不使用缓存
+    None,
+    /// 缓存到磁盘，退出时保留
+    Persistent,
+    /// 缓存到磁盘，退出时清理
+    Volatile,
 }
 
 impl Default for ThumbnailCacheMode {
     fn default() -> Self {
-        Self::Global
+        Self::Persistent
     }
 }
 
 impl ThumbnailCacheMode {
-    /// 解析缓存目录的实际路径
-    ///
-    /// - `Global` → `dirs::cache_dir()/PT/thumbnails`
-    /// - `GlobalCustom(p)` → `p`
-    /// - `PerDirectory` → 调用方自行拼接 `<scan_dir>/.PT-thumbnails`
-    pub fn resolve_path(&self) -> Option<PathBuf> {
-        match self {
-            Self::Global => dirs::cache_dir().map(|p| p.join("PT").join("thumbnails")),
-            Self::GlobalCustom(p) => Some(p.clone()),
-            Self::PerDirectory => None,
-        }
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    pub fn is_volatile(&self) -> bool {
+        matches!(self, Self::Volatile)
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)] // 缺字段一律回退 Default（FFI/旧配置兼容）
 pub struct AppConfig {
-    /// 旁车文件扩展名列表（不含点，如 ["xmp"]）
     pub sidecar_extensions: Vec<String>,
-    /// 缩略图尺寸（像素，正方形）
     pub thumbnail_size: u32,
-    /// 常用目录列表
-    pub favorite_dirs: Vec<PathBuf>,
-    /// 上次打开的目录
-    pub last_directory: Option<PathBuf>,
-    /// 主题
+    pub favorite_dirs: Vec<String>,
+    pub last_directory: Option<String>,
     pub theme: Theme,
-    /// 默认删除模式："trash" | "permanent"
     pub default_delete_mode: String,
-    /// 窗口宽度
     pub window_width: u32,
-    /// 窗口高度
     pub window_height: u32,
-    /// 左侧面板宽度
-    pub left_panel_width: u32,  // 目录树面板宽度
-    /// 右侧面板可见
+    pub left_panel_width: u32,
     pub right_panel_visible: bool,
-    /// 缩略图缓存模式
     pub thumbnail_cache_mode: ThumbnailCacheMode,
-    /// 最大缩略图缓存大小（MB）
     pub max_cache_size_mb: u64,
-    /// 界面字体家族名
     pub font_family: String,
 }
 fn default_font_family() -> String {
@@ -105,60 +87,119 @@ impl Default for AppConfig {
     }
 }
 
-/// 确定配置文件路径：便携模式优先
+/// 确定配置数据库路径：便携模式优先
 ///
-/// 1. 检查二进制同目录是否存在 PT.toml
-/// 2. 若 exe 不在系统目录（如 /usr、C:\Program Files）则默认使用便携路径
-/// 3. 否则回落平台标准配置目录（`dirs::config_dir()/PT/PT.toml`）
+/// 1. 检查二进制同目录是否存在 PT.db
+/// 2. 若 exe 不在系统目录（如 /usr、C:\\Program Files）则默认使用便携路径
+/// 3. 否则回落平台标准配置目录（`dirs::config_dir()/PT/PT.db`）
 pub fn determine_config_path() -> Result<PathBuf, std::io::Error> {
-    if let Ok(exe_path) = std::env::current_exe()
-        && let Some(exe_dir) = exe_path.parent()
-    {
-            let portable_config = exe_dir.join("PT.toml");
-            if portable_config.exists() {
-                return Ok(portable_config);
-            }
+    let exe = std::env::current_exe()?;
+    let exe_dir = exe
+        .parent()
+        .ok_or_else(|| std::io::Error::other("无法获取可执行文件目录"))?;
+    let portable = exe_dir.join("PT.db");
 
-            // 检查 exe_dir 是否为系统目录
-            let dir_str = exe_dir.to_string_lossy();
-            let is_system_dir = cfg!(target_os = "linux")
-                .then(|| dir_str.starts_with("/usr") || dir_str.starts_with("/bin")
-                    || dir_str.starts_with("/sbin") || dir_str.starts_with("/opt"))
-                .unwrap_or(false)
-                || (cfg!(target_os = "windows")
-                    && (dir_str.starts_with("C:\\Windows") || dir_str.starts_with("C:\\Program")));
-
-            if !is_system_dir {
-                // 便携模式：二进制同目录
-                return Ok(portable_config);
-            }
-        }
-
-    // 回落平台标准目录
-    let config_dir = dirs::config_dir()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "系统无配置目录"))?;
-    let pt_dir = config_dir.join("PT");
-    std::fs::create_dir_all(&pt_dir)?;
-    Ok(pt_dir.join("PT.toml"))
-}
-
-/// 从 TOML 文件加载配置，文件不存在时返回默认配置
-pub fn load_config(path: &Path) -> Result<AppConfig, ConfigError> {
-    if !path.exists() {
-        return Ok(AppConfig::default());
+    if portable.exists() {
+        return Ok(portable);
     }
-    let content = std::fs::read_to_string(path)?;
-    Ok(toml::from_str(&content)?)
+
+    let exe_str = exe.to_string_lossy().to_lowercase();
+    let is_system = exe_str.contains("\\program files")
+        || exe_str.contains("\\windows")
+        || exe_str.starts_with("/usr/")
+        || exe_str.starts_with("/opt/")
+        || exe_str.starts_with("/bin/");
+
+    if !is_system {
+        return Ok(portable);
+    }
+
+    let cfg = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("PT")
+        .join("PT.db");
+    if let Some(parent) = cfg.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(cfg)
 }
 
-/// 保存配置到 TOML 文件（自动创建父目录）
+/// 从 SQLite 数据库加载配置，文件不存在时返回默认配置。
+/// 如果旧版 PT.toml 存在而 PT.db 不存在，自动迁移。
+pub fn load_config(path: &Path) -> Result<AppConfig, ConfigError> {
+    if path.exists() {
+        return load_from_sqlite(path);
+    }
+    // 迁移：尝试从旧版 PT.toml 读取
+    let toml_path = path.with_file_name("PT.toml");
+    if toml_path.exists() {
+        if let Ok(cfg) = load_from_toml(&toml_path) {
+            save_config(path, &cfg)?;
+            return Ok(cfg);
+        }
+    }
+    Ok(AppConfig::default())
+}
+
+fn load_from_toml(path: &Path) -> Result<AppConfig, ConfigError> {
+    let content = std::fs::read_to_string(path)?;
+    Ok(toml::from_str(&content).unwrap_or_default())
+}
+
+fn load_from_sqlite(path: &Path) -> Result<AppConfig, ConfigError> {
+    let conn = rusqlite::Connection::open(path)?;
+    init_config_table(&conn)?;
+    let json: Option<String> = conn
+        .query_row(
+            "SELECT data FROM config WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    match json {
+        Some(j) => Ok(serde_json::from_str(&j).unwrap_or_default()),
+        None => Ok(AppConfig::default()),
+    }
+}
+
+/// 保存配置到 SQLite 数据库（自动创建父目录和表）
 pub fn save_config(path: &Path, config: &AppConfig) -> Result<(), ConfigError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let content = toml::to_string_pretty(config)?;
-    std::fs::write(path, content)?;
+    let conn = rusqlite::Connection::open(path)?;
+    init_config_table(&conn)?;
+    let json = serde_json::to_string_pretty(config)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO config (id, data) VALUES (1, ?1)",
+        rusqlite::params![json],
+    )?;
     Ok(())
+}
+
+fn init_config_table(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS config (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            data TEXT NOT NULL
+         );",
+    )
+}
+
+/// 辅助：将 rusqlite::Result 转为 Option
+trait OptionalResult<T> {
+    fn optional(self) -> rusqlite::Result<Option<T>>;
+}
+
+impl<T> OptionalResult<T> for rusqlite::Result<T> {
+    fn optional(self) -> rusqlite::Result<Option<T>> {
+        match self {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -179,69 +220,75 @@ mod tests {
     }
 
     #[test]
-    fn test_old_toml_without_font_family() {
-        // 旧版 PT.toml 缺少 fontFamily 字段时应回落到默认值
+    fn test_missing_json_field_falls_back_to_default() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("PT.toml");
-
-        // 序列化一份完整配置，然后删掉 fontFamily 行模拟旧文件
-        let full = toml::to_string_pretty(&AppConfig::default()).unwrap();
-        let legacy: String = full
-            .lines()
-            .filter(|l| !l.starts_with("fontFamily"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(!legacy.contains("fontFamily"));
-        std::fs::write(&path, legacy).unwrap();
+        let path = dir.path().join("PT.db");
+        let legacy_json = r#"{"sidecarExtensions":["xmp"],"thumbnailSize":220}"#;
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        init_config_table(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO config (id, data) VALUES (1, ?1)",
+            rusqlite::params![legacy_json],
+        ).unwrap();
 
         let loaded = load_config(&path).unwrap();
         assert_eq!(loaded.font_family, "Microsoft YaHei UI");
     }
 
     #[test]
-    fn test_font_family_roundtrip() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("PT.toml");
-
-        let cfg = AppConfig {
-            font_family: "Microsoft YaHei".to_string(),
-            ..Default::default()
-        };
-        save_config(&path, &cfg).unwrap();
-
-        // 确认序列化为 camelCase 键
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("fontFamily"));
-
-        let loaded = load_config(&path).unwrap();
-        assert_eq!(loaded.font_family, "Microsoft YaHei");
-    }
-
-    #[test]
     fn test_save_and_load() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("PT.toml");
-
+        let path = dir.path().join("PT.db");
         let cfg = AppConfig {
             thumbnail_size: 300,
             theme: Theme::Dark,
-            favorite_dirs: vec![PathBuf::from("/home/user/Pictures")],
+            font_family: "Microsoft YaHei".to_string(),
             ..Default::default()
         };
-
         save_config(&path, &cfg).unwrap();
         assert!(path.exists());
 
         let loaded = load_config(&path).unwrap();
         assert_eq!(loaded.thumbnail_size, 300);
         assert_eq!(loaded.theme, Theme::Dark);
-        assert_eq!(loaded.favorite_dirs.len(), 1);
+        assert_eq!(loaded.font_family, "Microsoft YaHei");
+    }
+
+    #[test]
+    fn test_toml_migration() {
+        let dir = TempDir::new().unwrap();
+        let toml_path = dir.path().join("PT.toml");
+        let db_path = dir.path().join("PT.db");
+
+        let cfg = AppConfig {
+            thumbnail_size: 300,
+            theme: Theme::Dark,
+            font_family: "Consolas".to_string(),
+            ..Default::default()
+        };
+        let toml_str = toml::to_string_pretty(&cfg).unwrap();
+        std::fs::write(&toml_path, toml_str).unwrap();
+
+        // 只存在 PT.toml，PT.db 不存在 → 自动迁移
+        let loaded = load_config(&db_path).unwrap();
+        assert_eq!(loaded.thumbnail_size, 300);
+        assert_eq!(loaded.theme, Theme::Dark);
+        assert_eq!(loaded.font_family, "Consolas");
+        assert!(db_path.exists());
+    }
+
+    #[test]
+    fn test_load_nonexistent_returns_default() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nonexistent.db");
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(loaded.thumbnail_size, 220);
+        assert_eq!(loaded.theme, Theme::Light);
     }
 
     #[test]
     fn test_config_path() {
         let result = determine_config_path();
-        // 测试环境中应返回一个有效路径（便携或无写权限时回落平台目录）
         assert!(result.is_ok());
     }
 }

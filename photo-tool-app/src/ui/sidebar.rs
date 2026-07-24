@@ -1,4 +1,5 @@
 use gpui::{prelude::FluentBuilder, *};
+use std::path::PathBuf;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{h_flex, v_flex, Icon, IconName, Sizable};
 use photo_tool_core::domain::{Flag, Rating};
@@ -174,7 +175,7 @@ fn render_favorites_section(
                 v_flex()
                     .gap_0p5()
                     .children(favs.iter().enumerate().map(|(i, dir)| {
-                        let display = dir
+                        let display = std::path::Path::new(dir)
                             .file_name()
                             .and_then(|n| n.to_str())
                             .unwrap_or("?")
@@ -231,7 +232,7 @@ fn render_favorites_section(
                                 if let Some(view) = vh_open.upgrade() {
                                     let path = dir_open.clone();
                                     let _ = cx.update_entity(&view, |root_view, root_cx| {
-                                        root_view.scan_directory(path, root_cx);
+                                        root_view.scan_directory(PathBuf::from(&path), root_cx);
                                     });
                                 }
                             })

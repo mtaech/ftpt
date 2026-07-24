@@ -24,9 +24,10 @@ pub struct ExifCache {
 }
 
 impl ExifCache {
-    /// 打开或创建缓存数据库，自动初始化表结构。
-    pub fn open(db_path: &Path) -> Result<Self, CacheError> {
-        let conn = rusqlite::Connection::open(db_path)?;
+    /// 在指定目录中打开或创建 `.pt-cache.db`，自动初始化表结构。
+    pub fn open_in_dir(dir: &Path) -> Result<Self, CacheError> {
+        let db_path = dir.join(".pt-cache.db");
+        let conn = rusqlite::Connection::open(&db_path)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
@@ -271,13 +272,11 @@ mod tests {
     #[test]
     fn test_cache_put_get_roundtrip() {
         let tmp = TempDir::new().unwrap();
-        let db = tmp.path().join("test.db");
-
         // 创建临时 JPEG 文件（让 file_fingerprint 能读到 mtime）
         let jpg = tmp.path().join("test.jpg");
         std::fs::write(&jpg, b"fake jpeg data").unwrap();
 
-        let cache = ExifCache::open(&db).unwrap();
+        let cache = ExifCache::open_in_dir(tmp.path()).unwrap();
         let exif = make_exif();
 
         // 未写入前不应命中
@@ -296,11 +295,10 @@ mod tests {
     #[test]
     fn test_cache_stale_on_size_change() {
         let tmp = TempDir::new().unwrap();
-        let db = tmp.path().join("test.db");
         let jpg = tmp.path().join("test.jpg");
         std::fs::write(&jpg, b"original").unwrap();
 
-        let cache = ExifCache::open(&db).unwrap();
+        let cache = ExifCache::open_in_dir(tmp.path()).unwrap();
         cache.put(&jpg, &make_exif()).unwrap();
 
         // 改变文件内容 → size 变化 → 缓存失效
@@ -311,19 +309,17 @@ mod tests {
     #[test]
     fn test_cache_nonexistent_file() {
         let tmp = TempDir::new().unwrap();
-        let db = tmp.path().join("test.db");
-        let cache = ExifCache::open(&db).unwrap();
+        let cache = ExifCache::open_in_dir(tmp.path()).unwrap();
         assert!(cache.get(Path::new("/nonexistent/file.orf")).unwrap().is_none());
     }
 
     #[test]
     fn test_cache_upsert() {
         let tmp = TempDir::new().unwrap();
-        let db = tmp.path().join("test.db");
         let jpg = tmp.path().join("test.jpg");
         std::fs::write(&jpg, b"fake jpeg").unwrap();
 
-        let cache = ExifCache::open(&db).unwrap();
+        let cache = ExifCache::open_in_dir(tmp.path()).unwrap();
 
         let mut exif1 = make_exif();
         exif1.shooting.iso = Some(100);
