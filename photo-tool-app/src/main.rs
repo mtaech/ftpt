@@ -3,8 +3,6 @@ mod state;
 mod worker;
 mod ui;
 
-use std::sync::Arc;
-
 use gpui::*;
 use photo_tool_core::config::{self, AppConfig};
 
@@ -42,15 +40,11 @@ fn main() {
         crate::ui::theme::set_mode(crate::ui::theme::ThemeMode::Dark);
         let ac = app_config.clone();
 
-        // 加载窗口图标（嵌入二进制，不依赖外部文件）
-        let window_icon = include_bytes!("assets/icon.png");
-        let icon = ::image::load_from_memory(window_icon)
-            .ok()
-            .map(|img| Arc::new(img.into_rgba8()));
+        // 窗口图标通过 build.rs 嵌入 Windows .ico 资源，不在此处设置
+        // （GPUI WindowOptions::icon 仅 X11 有效）
 
         cx.open_window(
             WindowOptions {
-                icon,
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,
                     size(px(1400.), px(900.)),
