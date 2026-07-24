@@ -19,6 +19,7 @@ pub enum ThemeMode {
 // ═══════════════════════════════════════════════════════════════
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct ThemeColors {
     pub border: Hsla,
     pub border_variant: Hsla,
@@ -63,6 +64,7 @@ pub struct ThemeColors {
 // ═══════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ElevationIndex {
     Background,
     Surface,
@@ -97,7 +99,7 @@ impl ElevationIndex {
             }],
         }
     }
-
+    #[allow(dead_code)]
     pub fn bg(self, colors: &ThemeColors) -> Hsla {
         match self {
             ElevationIndex::Background => colors.background,
@@ -112,12 +114,15 @@ impl ElevationIndex {
 //  Spacing
 // ═══════════════════════════════════════════════════════════════
 
+#[allow(dead_code)]
 pub const SPACING: [f32; 8] = [4.0, 8.0, 12.0, 16.0, 24.0, 32.0, 40.0, 48.0];
 
+#[allow(dead_code)]
 pub fn spacing(level: usize) -> Pixels {
     px(SPACING[level.min(7)])
 }
 
+#[allow(dead_code)]
 pub mod sp {
     pub const XS: usize = 0;
     pub const SM: usize = 1;
@@ -133,15 +138,20 @@ pub mod sp {
 //  Border Radius
 // ═══════════════════════════════════════════════════════════════
 
+#[allow(dead_code)]
 pub const BORDER_RADIUS: f32 = 6.0;
+#[allow(dead_code)]
 pub const BORDER_RADIUS_LG: f32 = 10.0;
+#[allow(dead_code)]
 pub const BORDER_RADIUS_SM: f32 = 4.0;
+#[allow(dead_code)]
 pub const FOCUS_RING_WIDTH: f32 = 2.0;
 
 // ═══════════════════════════════════════════════════════════════
 //  Font
 // ═══════════════════════════════════════════════════════════════
 
+#[allow(dead_code)]
 pub const DEFAULT_FONT_FAMILY: &str = "Microsoft YaHei UI";
 
 /// 等宽字体：EXIF 数值、文件大小、状态栏计数等数字场景统一使用。

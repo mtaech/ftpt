@@ -1,7 +1,7 @@
 use std::path::Path;
 use thiserror::Error;
-
 use crate::domain::ImageFormat;
+
 
 /// 相机制造商信息
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -126,7 +126,7 @@ pub fn extractor_for(format: &ImageFormat) -> Box<dyn ExifExtractor> {
 pub fn extract_exif(path: &Path, format: &ImageFormat) -> Result<ExifMetadata, ExifError> {
     let result = extractor_for(format).extract(path);
     if let Err(ref e) = result {
-        log::warn!("EXIF 提取失败 {} (格式 {:?}): {e}", path.display(), format);
+        tracing::warn!("EXIF 提取失败 {} (格式 {:?}): {e}", path.display(), format);
     }
     result
 }
@@ -200,12 +200,19 @@ fn extract_exif_regular(path: &Path) -> Result<ExifMetadata, ExifError> {
     Ok(meta)
 }
 
-/// 从 RAW 文件读取 EXIF（通过 rawlib）
+/// 从 RAW 文件读取 EXIF（通过 rawlib 0.7+ 的 LibRaw C API）
+///
+/// rawlib 0.7.0 改用 LibRaw 直接读取 EXIF 结构体，不再依赖 kamadak-exif，
+/// 因此能正确支持 Panasonic RW2 等非标准 TIFF 魔数的 RAW 格式。
 fn extract_exif_raw(path: &Path) -> Result<ExifMetadata, ExifError> {
     let path_str = path.to_string_lossy();
-    let raw_exif =
-        rawlib::exif::extract_exif(path_str.as_ref()).map_err(|e| ExifError::Raw(e.to_string()))?;
+    let raw_exif = rawlib::exif::extract_exif(path_str.as_ref())
+        .map_err(|e| ExifError::Raw(e.to_string()))?;
+    Ok(raw_exif_to_meta(raw_exif, path))
+}
 
+/// 从 rawlib::ExifData 转为 ExifMetadata，共用逻辑
+fn raw_exif_to_meta(raw_exif: rawlib::ExifData, path: &Path) -> ExifMetadata {
     let mut meta = ExifMetadata::default();
     meta.camera.make = raw_exif.make;
     meta.camera.model = raw_exif.model;
@@ -218,8 +225,6 @@ fn extract_exif_raw(path: &Path) -> Result<ExifMetadata, ExifError> {
     meta.image_width = raw_exif.image_width;
     meta.image_height = raw_exif.image_height;
     meta.orientation = raw_exif.orientation;
-
-    // GPS
     if let Some(lat) = raw_exif.gps_latitude {
         meta.gps.latitude = Some(lat);
     }
@@ -227,13 +232,10 @@ fn extract_exif_raw(path: &Path) -> Result<ExifMetadata, ExifError> {
         meta.gps.longitude = Some(lon);
     }
     meta.gps.altitude = raw_exif.gps_altitude;
-
-    // 文件大小
     if let Ok(fs) = std::fs::metadata(path) {
         meta.file_size = Some(fs.len());
     }
-
-    Ok(meta)
+    meta
 }
 
 

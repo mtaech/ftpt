@@ -6,3 +6,4 @@ pub mod exif;
 pub mod xmp;
 pub mod ops;
 pub mod convert;
+pub mod cache;

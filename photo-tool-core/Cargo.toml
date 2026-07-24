@@ -4,7 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-rawlib = "0.6.1"
+rawlib = "0.7"
+rusqlite = { version = "0.32", features = ["bundled"] }
 kamadak-exif = "0.6"
 zune-jpeg = "0.5"
 zune-core = "0.5"
@@ -25,7 +26,7 @@ quick-xml = { version = "0.37", features = ["serialize"] }
 
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
-log = "0.4"
+tracing = "0.1"
 regex-lite = "0.1"
 parking_lot = "0.12"
 

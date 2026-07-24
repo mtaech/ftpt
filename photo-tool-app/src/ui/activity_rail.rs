@@ -94,7 +94,15 @@ pub fn render_activity_rail(
                         };
                         gpui_component::theme::Theme::change(gc_mode, None, cx);
                         if let Some(entity) = vh.upgrade() {
-                            cx.update_entity(&entity, |_, cx| cx.notify());
+                            cx.update_entity(&entity, |view, cx| {
+                                // 持久化主题选择
+                                view.config.theme = match theme::current_mode() {
+                                    theme::ThemeMode::Light => photo_tool_core::config::Theme::Light,
+                                    theme::ThemeMode::Dark => photo_tool_core::config::Theme::Dark,
+                                };
+                                view.save_config();
+                                cx.notify();
+                            });
                         }
                     }
                 }),

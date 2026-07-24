@@ -24,3 +24,5 @@ opt-level = 3
 
 [profile.dev.package.rawlib]
 opt-level = 3
+[profile.dev.package.rusqlite]
+opt-level = 3

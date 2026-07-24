@@ -3,14 +3,11 @@ pub enum Action {
     // Navigation
     Next,
     Prev,
-    First,
-    Last,
     // View
     ToggleGridPreview,
     ZoomIn,
     ZoomOut,
     ZoomToFit,
-    ZoomTo100,
     // Rating
     Rate0,
     Rate1,

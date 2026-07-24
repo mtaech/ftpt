@@ -215,39 +215,23 @@ impl From<&Capture> for CaptureMeta {
 }
 
 impl CaptureMeta {
-    /// 从文件提取 EXIF 并填充摘要字段（轻量调用：只读元数据，不解码图片）
-    pub fn enrich_with_exif(&mut self) {
-        let path = std::path::Path::new(&self.primary_path);
-        if !path.exists() {
-            return;
-        }
-        let fmt = ImageFormat::from_extension(
-            &path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or_default()
-                .to_lowercase(),
-        );
-        let format = match fmt {
-            Some(f) => f,
-            None => return,
-        };
-        let exif = crate::exif::extract_exif(path, &format).ok();
-        if let Some(ref exif) = exif {
-            self.camera_make = exif.camera.make.clone();
-            self.camera_model = exif.camera.model.clone();
-            self.lens = exif.camera.lens.clone();
-            self.exposure_time = exif.shooting.exposure_time.clone();
-            self.f_number = exif.shooting.f_number.clone();
-            self.iso = exif.shooting.iso;
-            self.focal_length = exif.shooting.focal_length.clone();
-            self.image_width = exif.image_width;
-            self.image_height = exif.image_height;
-            self.date_taken = exif.date_time_original.clone();
-        }
+    /// 填充 EXIF 摘要字段（由调用方负责提取 ExifMetadata，本方法只做字段拷贝）
+    pub fn enrich_with_exif(&mut self, exif: &crate::exif::ExifMetadata) {
+        self.camera_make = exif.camera.make.clone();
+        self.camera_model = exif.camera.model.clone();
+        self.lens = exif.camera.lens.clone();
+        self.exposure_time = exif.shooting.exposure_time.clone();
+        self.f_number = exif.shooting.f_number.clone();
+        self.iso = exif.shooting.iso;
+        self.focal_length = exif.shooting.focal_length.clone();
+        self.image_width = exif.image_width;
+        self.image_height = exif.image_height;
+        self.date_taken = exif.date_time_original.clone();
         // 如果 EXIF 没有文件大小，回退到 fs::metadata
         if self.file_size.is_none() {
-            self.file_size = std::fs::metadata(path).ok().map(|m| m.len());
+            self.file_size = std::fs::metadata(std::path::Path::new(&self.primary_path))
+                .ok()
+                .map(|m| m.len());
         }
     }
 

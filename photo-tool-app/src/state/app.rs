@@ -34,6 +34,7 @@ pub struct RootView {
     pub config: AppConfig,
     pub config_path: PathBuf,
     pub worker: Worker,
+    pub exif_cache: photo_tool_core::cache::ExifCache,
     pub thumbnail_cache: Option<ThumbnailCache>,
     pub dir_path: Option<PathBuf>,
     pub captures: Vec<CaptureMeta>,
@@ -55,6 +56,8 @@ pub struct RootView {
     pub preview_data: HashMap<usize, (ImageFormat, Vec<u8>)>,
     /// preview_data 的 FIFO 淘汰顺序
     preview_order: VecDeque<usize>,
+    /// 网格虚拟列表滚动句柄（uniform_list 滚动条用）
+    pub grid_scroll_handle: UniformListScrollHandle,
     /// 字体选择下拉状态（设置弹窗用）
     pub font_select: Entity<SelectState<SearchableVec<SharedString>>>,
     pub show_settings: bool,
@@ -65,6 +68,8 @@ pub struct RootView {
     pub sidebar_visible: bool,
     /// 正在后台加载中的预览图 capture 索引（防重复 spawn）
     preview_loading: HashSet<usize>,
+    /// 正在后台加载中的网格缩略图 capture 索引（防重复 spawn）
+    grid_loading: HashSet<usize>,
     /// 预览缩放倍率（1.0 = 适配窗口）
     pub preview_zoom: f32,
     /// 预览平移偏移（像素），缩放后拖拽移动图片
@@ -80,6 +85,15 @@ impl RootView {
             .unwrap_or(Path::new("."))
             .join("thumbnails");
         let thumbnail_cache = Some(ThumbnailCache::new(cache_dir));
+        let exif_db = config_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("exif_cache.db");
+        let exif_cache = photo_tool_core::cache::ExifCache::open(&exif_db)
+            .unwrap_or_else(|e| {
+                tracing::error!("无法打开 EXIF 缓存: {}", e);
+                panic!("EXIF 缓存初始化失败: {}", e);
+            });
 
         let worker = Worker::new();
 
@@ -111,6 +125,7 @@ impl RootView {
         let mut this = Self {
             config,
             config_path,
+            exif_cache,
             worker,
             thumbnail_cache,
             dir_path: None,
@@ -125,6 +140,7 @@ impl RootView {
             display_order: Vec::new(),
             scan_task: None,
             preview_loading: HashSet::new(),
+            grid_loading: HashSet::new(),
             preview_zoom: 1.0,
             preview_pan: (0.0, 0.0),
             preview_drag: None,
@@ -135,6 +151,7 @@ impl RootView {
             show_settings: false,
             sidebar_section: 0,
             sidebar_visible: true,
+            grid_scroll_handle: UniformListScrollHandle::new(),
         };
 
         if let Some(last_dir) = &auto_dir {
@@ -164,7 +181,7 @@ impl RootView {
         if let Some(task) = self.scan_task.take() {
             drop(task);
         }
-
+        let exif_cache = self.exif_cache.clone();
         let sidecar_exts = self.config.sidecar_extensions.clone();
         let filter = self.filter.clone();
 
@@ -172,22 +189,29 @@ impl RootView {
             cx,
             move || {
                 scanner::scan_directory(&path, &sidecar_exts, &filter, None)
-                    .map(|captures| (path, captures))
-            },
-            |this, result, cx| {
-                match result {
-                    Ok((dir, captures)) => {
+                    .map(|captures| {
                         let metas: Vec<CaptureMeta> = captures
                             .iter()
                             .enumerate()
                             .map(|(i, c)| {
                                 let mut meta = CaptureMeta::from(c);
                                 meta.index = i;
-                                meta.enrich_with_exif();
-                                meta.enrich_with_xmp();
+                                meta.enrich_with_xmp(); // 快：只读 sidecar
+                                // 从缓存获取 EXIF（未命中则提取并写入缓存）
+                                let primary = &c.source_files[c.primary_index];
+                                let exif = exif_cache
+                                    .get_or_extract(&primary.path, &primary.format)
+                                    .unwrap_or_default();
+                                meta.enrich_with_exif(&exif);
                                 meta
                             })
                             .collect();
+                        (path, metas)
+                    })
+            },
+            |this, result, cx| {
+                match result {
+                    Ok((dir, metas)) => {
                         this.captures = metas;
                         this.dir_path = Some(dir.clone());
                         this.selected.clear();
@@ -202,6 +226,8 @@ impl RootView {
                             this.captures.len(),
                             this.display_order.len()
                         );
+                        // 后台逐步提取 EXIF（RAW 文件的 LibRaw unpack 较慢）
+                        this.spawn_enrich_tasks(cx);
                         this.preload_thumbnails(cx);
                         cx.notify();
                     }
@@ -211,6 +237,62 @@ impl RootView {
                 }
             },
         );
+    }
+
+    /// 后台逐个提取 EXIF，完成后更新 CaptureMeta 并通知重绘。
+    /// RAW 文件通过 rawlib 0.7+ 的 LibRaw 读取，可能较慢，不阻塞主线程。
+    fn spawn_enrich_tasks(&mut self, cx: &mut Context<Self>) {
+        // 收集所有需要提取 EXIF 的 capture 路径
+        let paths: Vec<(usize, PathBuf)> = self
+            .captures
+            .iter()
+            .filter_map(|meta| {
+                if meta.camera_make.is_some() || meta.iso.is_some() || meta.image_width.is_some() {
+                    return None;
+                }
+                Some((meta.index, PathBuf::from(&meta.primary_path)))
+            })
+            .collect();
+
+        for (idx, path) in paths {
+            let path_for_worker = path.clone();
+            self.worker.spawn(
+                cx,
+                move || {
+                    let ext = path_for_worker
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    let fmt = photo_tool_core::domain::ImageFormat::from_extension(&ext);
+                    let format = match fmt {
+                        Some(f) => f,
+                        None => return None,
+                    };
+                    photo_tool_core::exif::extract_exif(&path_for_worker, &format).ok()
+                },
+                move |this, exif, cx| {
+                    if let Some(ref exif) = exif {
+                        if let Some(meta) = this.captures.iter_mut().find(|m| m.index == idx) {
+                            meta.camera_make = exif.camera.make.clone();
+                            meta.camera_model = exif.camera.model.clone();
+                            meta.lens = exif.camera.lens.clone();
+                            meta.exposure_time = exif.shooting.exposure_time.clone();
+                            meta.f_number = exif.shooting.f_number.clone();
+                            meta.iso = exif.shooting.iso;
+                            meta.focal_length = exif.shooting.focal_length.clone();
+                            meta.image_width = exif.image_width;
+                            meta.image_height = exif.image_height;
+                            meta.date_taken = exif.date_time_original.clone();
+                            if meta.file_size.is_none() {
+                                meta.file_size = std::fs::metadata(&path).ok().map(|m| m.len());
+                            }
+                        }
+                    }
+                    cx.notify();
+                },
+            );
+        }
     }
 
     pub fn apply_filter_and_sort(&mut self) {
@@ -404,6 +486,51 @@ impl RootView {
 
 
 
+    /// 为单个 capture 生成网格缩略图（懒加载：滚动时按需触发）
+    pub fn ensure_thumbnail_loaded(&mut self, capture_idx: usize, cx: &mut Context<Self>) {
+        if self.thumbnail_data.contains_key(&capture_idx) { return; }
+        if !self.grid_loading.insert(capture_idx) { return; } // 已在加载
+
+        let thumbnail_size = self.config.thumbnail_size;
+        let Some(cache) = self.thumbnail_cache.clone() else { return };
+        let Some(meta) = self.captures.get(capture_idx) else { return };
+
+        let path = PathBuf::from(&meta.primary_path);
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let format = photo_tool_core::domain::ImageFormat::from_extension(&ext)
+            .unwrap_or(photo_tool_core::domain::ImageFormat::Jpeg);
+
+        let source = photo_tool_core::domain::SourceFile {
+            path,
+            format,
+            is_sidecar: false,
+            file_size: meta.file_size,
+        };
+
+        self.worker.spawn(
+            cx,
+            move || {
+                cache
+                    .get_or_generate(&source, thumbnail_size * 2)
+                    .map_err(|e| {
+                        tracing::warn!("懒加载缩略图失败 {}: {e}", source.path.display());
+                    })
+                    .ok()
+            },
+            move |this, result, cx| {
+                this.grid_loading.remove(&capture_idx);
+                if let Some(bytes) = result {
+                    this.thumbnail_data.insert(capture_idx, bytes);
+                    cx.notify();
+                }
+            },
+        );
+    }
+
     /// Spawn background tasks to preload thumbnails for the first N visible items.
     pub fn preload_thumbnails(&mut self, cx: &mut Context<Self>) {
         use photo_tool_core::domain::{ImageFormat, SourceFile};
@@ -417,8 +544,11 @@ impl RootView {
             }
         };
 
-        // Preload first 50 thumbnails (visible range + buffer)
-        let count = self.display_order.len();
+        // 限制预加载数量：只加载可见区域 + 缓冲行（50 个），
+        // 避免为整个目录（可能上千）同时生成缩略图导致线程池饱和。
+        const PRELOAD_LIMIT: usize = 50;
+        let count = self.display_order.len().min(PRELOAD_LIMIT);
+
         for di in 0..count {
             let capture_idx = match self.display_order.get(di) {
                 Some(&ci) => ci,
@@ -456,14 +586,14 @@ impl RootView {
                         tracing::warn!("缩略图生成失败 {}: {e}", path_display.display());
                     })
                     .ok()
-            }, move |this, result, cx| {
+            }, move |this, result, _cx| {
                 if let Some(bytes) = result {
                     this.thumbnail_data.insert(ci, bytes);
-                    cx.notify();
+                    _cx.notify();
                 }
             });
         }
-    }
+}
 
     /// Select an item in display_order by its display index.
     /// `additive`: Ctrl-click — toggle this item.
@@ -520,21 +650,29 @@ impl RootView {
         rating: Rating,
         cx: &mut Context<Self>,
     ) {
-        let paths: Vec<PathBuf> = indices
+        let paths: Vec<(PathBuf, Rating)> = indices
             .iter()
-            .filter_map(|&i| self.captures.get(i))
-            .map(|meta| PathBuf::from(&meta.primary_path))
+            .filter_map(|&i| {
+                let meta = self.captures.get_mut(i)?;
+                let old = meta.rating;
+                // 乐观更新：立即显示新评分，XMP 异步写入
+                meta.rating = rating;
+                Some((PathBuf::from(&meta.primary_path), old))
+            })
             .collect();
 
         if paths.is_empty() {
             return;
         }
 
+        self.apply_filter_and_sort();
+        cx.notify();
+
         self.worker.spawn(
             cx,
             move || {
                 let mut results = Vec::new();
-                for path in &paths {
+                for (path, _old) in &paths {
                     let xp = xmp::xmp_path(path);
                     let result = (|| -> Result<(), xmp::XmpError> {
                         let mut meta = if xp.exists() {
@@ -550,41 +688,44 @@ impl RootView {
                 }
                 results
             },
-            move |this, results, cx| {
+            move |_this, results, _cx| {
                 for (path, result) in &results {
                     if let Err(e) = result {
-                        tracing::error!("Failed to set rating for {}: {e}", path.display());
-                    } else if let Some(meta) = this.captures.iter_mut().find(|m| Path::new(&m.primary_path) == path) {
-                        meta.rating = rating;
+                        tracing::error!("Failed to persist rating for {}: {e}", path.display());
                     }
                 }
-                this.apply_filter_and_sort();
-                cx.notify();
             },
         );
     }
-
     pub fn set_flag(
         &mut self,
         indices: &[usize],
         flag: Option<Flag>,
         cx: &mut Context<Self>,
     ) {
-        let paths: Vec<PathBuf> = indices
+        let paths: Vec<(PathBuf, Option<Flag>)> = indices
             .iter()
-            .filter_map(|&i| self.captures.get(i))
-            .map(|meta| PathBuf::from(&meta.primary_path))
+            .filter_map(|&i| {
+                let meta = self.captures.get_mut(i)?;
+                let old = meta.flag;
+                // 乐观更新：立即显示新旗标，XMP 异步写入
+                meta.flag = flag;
+                Some((PathBuf::from(&meta.primary_path), old))
+            })
             .collect();
 
         if paths.is_empty() {
             return;
         }
 
+        self.apply_filter_and_sort();
+        cx.notify();
+
         self.worker.spawn(
             cx,
             move || {
                 let mut results = Vec::new();
-                for path in &paths {
+                for (path, _old) in &paths {
                     let xp = xmp::xmp_path(path);
                     let result = (|| -> Result<(), xmp::XmpError> {
                         let mut meta = if xp.exists() {
@@ -600,16 +741,12 @@ impl RootView {
                 }
                 results
             },
-            move |this, results, cx| {
+            move |_this, results, _cx| {
                 for (path, result) in &results {
                     if let Err(e) = result {
-                        tracing::error!("Failed to set flag for {}: {e}", path.display());
-                    } else if let Some(meta) = this.captures.iter_mut().find(|m| Path::new(&m.primary_path) == path) {
-                        meta.flag = flag;
+                        tracing::error!("Failed to persist flag for {}: {e}", path.display());
                     }
                 }
-                this.apply_filter_and_sort();
-                cx.notify();
             },
         );
     }
@@ -620,21 +757,29 @@ impl RootView {
         label: ColorLabel,
         cx: &mut Context<Self>,
     ) {
-        let paths: Vec<PathBuf> = indices
+        let paths: Vec<(PathBuf, ColorLabel)> = indices
             .iter()
-            .filter_map(|&i| self.captures.get(i))
-            .map(|meta| PathBuf::from(&meta.primary_path))
+            .filter_map(|&i| {
+                let meta = self.captures.get_mut(i)?;
+                let old = meta.color_label;
+                // 乐观更新：立即显示新标签，XMP 异步写入
+                meta.color_label = label;
+                Some((PathBuf::from(&meta.primary_path), old))
+            })
             .collect();
 
         if paths.is_empty() {
             return;
         }
 
+        self.apply_filter_and_sort();
+        cx.notify();
+
         self.worker.spawn(
             cx,
             move || {
                 let mut results = Vec::new();
-                for path in &paths {
+                for (path, _old) in &paths {
                     let xp = xmp::xmp_path(path);
                     let result = (|| -> Result<(), xmp::XmpError> {
                         let mut meta = if xp.exists() {
@@ -650,22 +795,16 @@ impl RootView {
                 }
                 results
             },
-            move |this, results, cx| {
+            move |_this, results, _cx| {
                 for (path, result) in &results {
                     if let Err(e) = result {
-                        tracing::error!(
-                            "Failed to set color label for {}: {e}",
-                            path.display()
-                        );
-                    } else if let Some(meta) = this.captures.iter_mut().find(|m| Path::new(&m.primary_path) == path) {
-                        meta.color_label = label;
+                        tracing::error!("Failed to persist color label for {}: {e}", path.display());
                     }
                 }
-                this.apply_filter_and_sort();
-                cx.notify();
             },
         );
     }
+
 
     pub fn delete_selected(&mut self, mode: DeleteMode, cx: &mut Context<Self>) {
         let capture_indices: Vec<usize> = self.selected.drain().collect();
@@ -739,11 +878,6 @@ impl RootView {
             .and_then(|&ci| self.captures.get(ci))
     }
 
-    /// Get all selected capture indices (into captures vec).
-    pub fn get_selected_indices(&self) -> Vec<usize> {
-        self.selected.iter().copied().collect()
-    }
-
     /// Dispatch an action. Returns true if the view should be re-rendered.
     pub fn dispatch_action(&mut self, action: crate::action::Action, cx: &mut Context<Self>) {
         use crate::action::Action;
@@ -773,22 +907,6 @@ impl RootView {
                 self.preview_pan = (0.0, 0.0);
                 cx.notify();
             }
-            Action::First => {
-                if !self.display_order.is_empty() {
-                    self.focus_index = Some(0);
-                }
-                self.preview_zoom = 1.0;
-                self.preview_pan = (0.0, 0.0);
-                cx.notify();
-            }
-            Action::Last => {
-                if !self.display_order.is_empty() {
-                    self.focus_index = Some(self.display_order.len() - 1);
-                }
-                self.preview_zoom = 1.0;
-                self.preview_pan = (0.0, 0.0);
-                cx.notify();
-            }
             // View
             Action::ToggleGridPreview => {
                 self.toggle_view_mode(cx);
@@ -808,10 +926,6 @@ impl RootView {
             Action::ZoomToFit => {
                 self.preview_zoom = 1.0;
                 self.preview_pan = (0.0, 0.0);
-                cx.notify();
-            }
-            Action::ZoomTo100 => {
-                self.preview_zoom = 0.0; // 特殊值，渲染时按原始尺寸计算
                 cx.notify();
             }
             // Rating
@@ -919,12 +1033,7 @@ impl RootView {
         }
     }
 
-    /// Update the font family and persist to disk.
-    pub fn set_font_family(&mut self, family: String, cx: &mut Context<Self>) {
-        self.config.font_family = family;
-        self.save_config_to_disk();
-        cx.notify();
-    }
+
 
     /// Save config to disk (public, for use by UI components).
     pub fn save_config(&self) {
@@ -937,6 +1046,7 @@ impl RootView {
         }
     }
 }
+
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

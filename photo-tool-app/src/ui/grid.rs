@@ -2,6 +2,8 @@ use std::ops::Range;
 
 use gpui::*;
 use gpui_component::InteractiveElementExt;
+use gpui_component::scroll::ScrollableElement;
+
 
 
 use crate::state::app::RootView;
@@ -22,6 +24,7 @@ pub fn render_grid(
     let thumbnail_size = view.config.thumbnail_size;
     let cell_size = thumbnail_size as f32 + 56.; // thumbnail + 两行信息区
     let thumbnail_data = view.thumbnail_data.clone();
+    let scroll_handle = &view.grid_scroll_handle;
 
     // 按可用宽度精确计算列数与卡宽：行内卡片为固定像素尺寸
     let viewport_w: f32 = window.viewport_size().width.into();
@@ -42,7 +45,8 @@ pub fn render_grid(
         "photo-grid",
         row_count,
         move |range: Range<usize>, _window: &mut Window, _app: &mut App| {
-            range
+            let mut missing: Vec<usize> = Vec::new();
+            let rows: Vec<AnyElement> = range
                 .map(|row| {
                     let start = row * cols;
                     let end = (start + cols).min(item_count);
@@ -52,6 +56,9 @@ pub fn render_grid(
                             let capture = captures.get(*capture_idx)?;
                             let is_selected = selected.contains(capture_idx);
                             let thumb = thumbnail_data.get(capture_idx);
+                            if thumb.is_none() {
+                                missing.push(*capture_idx);
+                            }
 
                             let vh = view_handle.clone();
                             let idx = i;
@@ -101,12 +108,29 @@ pub fn render_grid(
                         .children(cells)
                         .into_any_element()
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+
+            // 触发懒加载：可见区域内缺少缩略图的 capture
+            if !missing.is_empty() {
+                if let Some(view) = view_handle.upgrade() {
+                    let _ = _app.update_entity(&view, |root_view, cx| {
+                        for ci in missing {
+                            root_view.ensure_thumbnail_loaded(ci, cx);
+                        }
+                    });
+                }
+            }
+
+            rows
         },
-    );
+    )
+    .track_scroll(scroll_handle);
 
     div()
+        .relative()
         .size_full()
         .bg(theme::colors().background)
+        .pr_4() // 给滚动条留出空间，避免内容被遮挡
+        .vertical_scrollbar(scroll_handle)
         .child(list.size_full())
 }

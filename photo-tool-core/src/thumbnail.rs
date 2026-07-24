@@ -67,12 +67,28 @@ impl ThumbnailCache {
         }
     }
 
-    /// RAW 格式：通过 rawlib 提取内嵌缩略图
+    /// RAW 格式：优先内嵌 JPEG，失败时回落完整解码
     fn generate_raw_thumbnail(&self, path: &Path, size: u32) -> Result<Vec<u8>, ThumbnailError> {
         let path_str = path.to_string_lossy();
-        let thumb_bytes = rawlib::extract_thumbnail(path_str.as_ref())
-            .map_err(|e| ThumbnailError::Raw(e.to_string()))?;
-        self.resize_jpeg(&thumb_bytes, size)
+        // 首选：提取相机内嵌 JPEG 预览（最快，已含降噪/锐化/色彩）
+        match rawlib::extract_thumbnail(path_str.as_ref()) {
+            Ok(jpeg_bytes) => return self.resize_jpeg(&jpeg_bytes, size),
+            Err(e) => {
+                tracing::warn!(
+                    "内嵌缩略图提取失败，回退完整解码: {} — {e}",
+                    path.display()
+                );
+            }
+        }
+        // 回落：完整 RAW 解码（preview 预设：half_size + bilinear + 8bit）
+        let img = rawlib::extract_image_with_options(
+            path_str.as_ref(),
+            &rawlib::DecodeOptions::preview(),
+        )
+        .map_err(|e| ThumbnailError::Raw(e.to_string()))?;
+        tracing::info!("完整解码成功: {} ({}×{})", path.display(), img.width, img.height);
+        // 将 bitmap 编码为 JPEG 并缩放到目标尺寸
+        encode_bitmap_to_jpeg(&img, size)
     }
 
     /// 常规图片格式：JPEG 走 DCT 降采样快路径，其余全解码
@@ -240,15 +256,51 @@ impl ThumbnailCache {
 }
 
 
-/// 通过 rawlib 完整解码 RAW（preview 预设：half_size + bilinear + 8bit），
-/// 预期 4-8x 加速，返回 JPEG 字节。在 worker 线程中调用，不会阻塞 UI。
-/// 提取 RAW 内嵌 JPEG 预览（相机已处理降噪/锐化/色彩），
-/// 尺寸不足时放大到 max_size。远快于完整解码，适合挑片预览。
-/// 提取 RAW 内嵌 JPEG 预览（相机已处理降噪/锐化/色彩），原尺寸返回。
-/// 绝大多数现代相机内嵌全分辨率 JPEG，无需缩放。
+/// 从 RAW 提取用于预览的图像（优先内嵌 JPEG，失败时回落完整解码）。
+/// 始终返回 JPEG 字节。在 worker 线程中调用。
 pub fn decode_raw_preview(path: &Path, _max_size: u32) -> Result<Vec<u8>, ThumbnailError> {
-    rawlib::extract_thumbnail(path)
-        .map_err(|e| ThumbnailError::Raw(e.to_string()))
+    let path_str = path.to_string_lossy();
+    match rawlib::extract_thumbnail(path_str.as_ref()) {
+        Ok(jpeg) => return Ok(jpeg),
+        Err(e) => {
+            tracing::warn!(
+                "预览内嵌缩略图提取失败，回退完整解码: {} — {e}",
+                path.display()
+            );
+        }
+    }
+    let img = rawlib::extract_image_with_options(
+        path_str.as_ref(),
+        &rawlib::DecodeOptions::preview(),
+    )
+    .map_err(|e| {
+        tracing::error!("预览完整解码失败: {} — {e}", path.display());
+        ThumbnailError::Raw(e.to_string())
+    })?;
+    tracing::info!("预览完整解码成功: {} ({}×{})", path.display(), img.width, img.height);
+    // 预览用全分辨率，不缩放
+    encode_bitmap_to_jpeg(&img, img.width.max(img.height) as u32)
+}
+
+/// 将 rawlib 解码出的 RGB bitmap 编码为 JPEG，缩放到目标尺寸。
+fn encode_bitmap_to_jpeg(img: &rawlib::ThumbnailData, size: u32) -> Result<Vec<u8>, ThumbnailError> {
+    let rgb = image::RgbImage::from_raw(img.width as u32, img.height as u32, img.data.clone())
+        .ok_or_else(|| {
+            tracing::error!(
+                "bitmap buffer size mismatch: expected {} bytes, got {}",
+                img.width as usize * img.height as usize * 3,
+                img.data.len()
+            );
+            ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "bitmap buffer size mismatch",
+            )))
+        })?;
+    let dynamic = image::DynamicImage::ImageRgb8(rgb);
+    let resized = dynamic.thumbnail(size, size);
+    let mut buf = Cursor::new(Vec::new());
+    resized.write_to(&mut buf, image::ImageFormat::Jpeg)?;
+    Ok(buf.into_inner())
 }
 
 
