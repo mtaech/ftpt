@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-rawlib = "0.6"
+rawlib = "0.6.1"
 kamadak-exif = "0.6"
 zune-jpeg = "0.5"
 zune-core = "0.5"

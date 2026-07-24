@@ -5423,9 +5423,9 @@ dependencies = [
 
 [[package]]
 name = "rawlib"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35a1d5536c427e6c1a05de45afba5f339051f1b5a57becf923991d73557f9a6b"
+checksum = "7549ecabaff554ad6bfe7cf6b148851e0b2cab202cb00b6b9e8bc2ab8270a057"
 dependencies = [
  "cc",
  "clap",
