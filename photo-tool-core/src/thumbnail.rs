@@ -152,10 +152,17 @@ impl ThumbnailCache {
     /// 将 JPEG 字节缩放到目标尺寸
     fn resize_jpeg(&self, jpeg_bytes: &[u8], size: u32) -> Result<Vec<u8>, ThumbnailError> {
         let img = image::load_from_memory(jpeg_bytes)?;
-        let resized = img.thumbnail(size, size);
-        let mut buf = Cursor::new(Vec::new());
-        resized.write_to(&mut buf, image::ImageFormat::Jpeg)?;
-        Ok(buf.into_inner())
+        if img.width().max(img.height()) <= size {
+            return Ok(jpeg_bytes.to_vec());
+        }
+        let ratio = size as f64 / img.width().max(img.height()) as f64;
+        let nw = (img.width() as f64 * ratio) as u32;
+        let nh = (img.height() as f64 * ratio) as u32;
+        let buf = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3);
+        let out = image::DynamicImage::ImageRgba8(buf);
+        let mut cursor = Cursor::new(Vec::new());
+        out.write_to(&mut cursor, image::ImageFormat::Jpeg)?;
+        Ok(cursor.into_inner())
     }
 
     /// 获取缓存总大小（字节）
@@ -235,54 +242,32 @@ impl ThumbnailCache {
 
 /// 通过 rawlib 完整解码 RAW（preview 预设：half_size + bilinear + 8bit），
 /// 预期 4-8x 加速，返回 JPEG 字节。在 worker 线程中调用，不会阻塞 UI。
+/// 提取 RAW 内嵌 JPEG 预览（相机已处理降噪/锐化/色彩），
+/// 尺寸不足时放大到 max_size。远快于完整解码，适合挑片预览。
 pub fn decode_raw_preview(path: &Path, max_size: u32) -> Result<Vec<u8>, ThumbnailError> {
     use std::io::Cursor;
 
-    let opts = rawlib::DecodeOptions::quality();
-    let raw_img = rawlib::extract_image_with_options(path, &opts)
+    let thumb_bytes = rawlib::extract_thumbnail(path)
         .map_err(|e| ThumbnailError::Raw(e.to_string()))?;
-    let orig_w = raw_img.width as u32;
-    let orig_h = raw_img.height as u32;
-    let colors = raw_img.colors as usize;
 
-    // preview 预设 output_bps=8，LibRaw 直接输出 8-bit RGB
-    let rgb8: Vec<u8> = if raw_img.bits >= 16 {
-        let cb = (raw_img.bits / 8) as usize;
-        raw_img.data.chunks_exact(colors * cb)
-            .flat_map(|p| (0..colors.min(3)).map(move |i| p[i * cb + (cb - 1)]))
-            .collect()
-    } else {
-        raw_img.data.chunks_exact(colors)
-            .flat_map(|p| {
-                let r = p[0];
-                let g = if colors > 1 { p[1] } else { r };
-                let b = if colors > 2 { p[2] } else { r };
-                [r, g, b]
-            })
-            .collect()
-    };
+    let img = image::load_from_memory(&thumb_bytes)?;
+    let (w, h) = (img.width(), img.height());
 
-    let img = image::RgbImage::from_raw(orig_w, orig_h, rgb8)
-        .ok_or_else(|| {
-            ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "RAW decode produced invalid buffer",
-            )))
-        })?;
-
-    let resized = if orig_w.max(orig_h) > max_size {
-        let (nw, nh) = {
-            let ratio = max_size as f64 / orig_w.max(orig_h) as f64;
-            ((orig_w as f64 * ratio) as u32, (orig_h as f64 * ratio) as u32)
-        };
+    let out = if w.max(h) < max_size {
+        // 内嵌预览太小（少数老机型），放大到 max_size
+        let buf = image::imageops::resize(&img, max_size, max_size, image::imageops::FilterType::Lanczos3);
+        image::DynamicImage::ImageRgba8(buf)
+    } else if w.max(h) > max_size {
+        let ratio = max_size as f64 / w.max(h) as f64;
+        let (nw, nh) = ((w as f64 * ratio) as u32, (h as f64 * ratio) as u32);
         let buf = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3);
-        image::DynamicImage::ImageRgb8(buf)
+        image::DynamicImage::ImageRgba8(buf)
     } else {
-        image::DynamicImage::ImageRgb8(img)
+        return Ok(thumb_bytes);
     };
 
     let mut buf = Cursor::new(Vec::new());
-    resized.write_to(&mut buf, image::ImageFormat::Jpeg)?;
+    out.write_to(&mut buf, image::ImageFormat::Jpeg)?;
     Ok(buf.into_inner())
 }
 

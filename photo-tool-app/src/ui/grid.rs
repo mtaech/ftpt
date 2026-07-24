@@ -20,12 +20,20 @@ pub fn render_grid(
     let display_order = view.display_order.clone();
     let selected = view.selected.clone();
     let thumbnail_size = view.config.thumbnail_size;
-    let cell_size = thumbnail_size as f32 + 40.; // thumbnail + info bar
+    let cell_size = thumbnail_size as f32 + 56.; // thumbnail + 两行信息区
     let thumbnail_data = view.thumbnail_data.clone();
 
-    // 按视口宽度计算列数（至少 1 列）
+    // 按可用宽度精确计算列数与卡宽：行内卡片为固定像素尺寸
     let viewport_w: f32 = window.viewport_size().width.into();
-    let cols = ((viewport_w / cell_size) as usize).max(1);
+    let right_w = if view.config.right_panel_visible {
+        crate::ui::layout::RIGHT_PANEL_WIDTH
+    } else {
+        0.
+    };
+    let available_w =
+        (viewport_w - view.config.left_panel_width as f32 - right_w).max(cell_size);
+    let cols = ((available_w / cell_size) as usize).max(1);
+    let cell_w = (available_w / cols as f32).floor();
     let row_count = item_count.div_ceil(cols);
 
     let view_handle = cx.entity().downgrade();
@@ -51,8 +59,10 @@ pub fn render_grid(
                             Some(
                                 div()
                                     .id(ElementId::Name(format!("cell-{i}").into()))
-                                    .w(px(cell_size))
+                                    // 固定像素尺寸，行列严格对齐
+                                    .w(px(cell_w))
                                     .h(px(cell_size))
+                                    .flex_shrink_0()
                                     .p_1()
                                     .child(render_grid_cell(capture, *capture_idx, is_selected, thumb))
                                     .on_click({
@@ -86,6 +96,8 @@ pub fn render_grid(
                     div()
                         .flex()
                         .flex_row()
+                        .w_full()
+                        .h(px(cell_size))
                         .children(cells)
                         .into_any_element()
                 })

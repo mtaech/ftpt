@@ -7,7 +7,11 @@ use crate::state::app::RootView;
 use crate::ui::theme;
 
 /// Render the full-size preview for the selected image.
-pub fn render_preview(view: &RootView, cx: &mut Context<RootView>) -> impl IntoElement {
+pub fn render_preview(
+    view: &RootView,
+    window: &Window,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
     let focused = view.get_focused_capture();
     let thumbnail_data = view.thumbnail_data.clone();
     let has_prev = view.focus_index.map_or(false, |i| i > 0);
@@ -23,6 +27,52 @@ pub fn render_preview(view: &RootView, cx: &mut Context<RootView>) -> impl IntoE
             .map(|(f, b)| (*f, b.clone()))
             .or_else(|| thumbnail_data.get(&idx).map(|b| (ImageFormat::Jpeg, b.clone())))
     });
+
+    // 计算中间区的显式宽度，替代 size_full（GPUI img 配合字节源时 size_full + object_fit 不生效）
+    let viewport_w: f32 = window.viewport_size().width.into();
+    let viewport_h: f32 = window.viewport_size().height.into();
+    let left_w = view.config.left_panel_width as f32;
+    let right_w = if view.config.right_panel_visible {
+        crate::ui::layout::RIGHT_PANEL_WIDTH
+    } else {
+        0.
+    };
+    let center_w = viewport_w - left_w - right_w - 56. * 2. - 16. * 2. - 2.;
+    let center_w = center_w.max(100.);
+    // 可用高度 = 视口 − 工具栏(~40) − 状态栏(~24) − 导航栏(~32) − 缩放栏(~28) − 图片padding(32)
+    let center_h = (viewport_h - 40. - 24. - 32. - 28. - 32.).max(100.);
+    // 按原始比例计算适配尺寸：同时约束宽度和高度，竖图也能顶满
+    let (img_w, img_h) = focused
+        .and_then(|m| Some((m.image_width?, m.image_height?)))
+        .map(|(w, h)| {
+            let scale = (center_w / w as f32).min(center_h / h as f32).min(1.0);
+            (w as f32 * scale, h as f32 * scale)
+        })
+        .unwrap_or((center_w, center_h * 0.75));
+
+    // 应用缩放倍率
+    let zoom = view.preview_zoom;
+    let (disp_w, disp_h) = if zoom == 0.0 {
+        focused
+            .and_then(|m| Some((m.image_width?, m.image_height?)))
+            .map(|(w, h)| (w as f32, h as f32))
+            .unwrap_or((img_w, img_h))
+    } else {
+        (img_w * zoom, img_h * zoom)
+    };
+    let zoom_label = if zoom == 0.0 {
+        "100%".to_string()
+    } else {
+        format!("{:.0}%", zoom * 100.)
+    };
+
+    // 手动计算居中偏移（替代 flex items_center/justify_center），缩放时从中心展开
+    let pad_px = 16.0;
+    let container_w = (center_w - pad_px * 2.).max(1.);
+    let container_h = (center_h - pad_px * 2.).max(1.);
+    let img_x = ((container_w - disp_w) / 2.).max(-disp_w).min(0.) + view.preview_pan.0;
+    let img_y = ((container_h - disp_h) / 2.).max(-disp_h).min(0.) + view.preview_pan.1;
+
 
     let view_handle = cx.entity().downgrade();
 
@@ -70,6 +120,8 @@ pub fn render_preview(view: &RootView, cx: &mut Context<RootView>) -> impl IntoE
                 .flex()
                 .flex_row()
                 .flex_grow(1.0)
+                .min_h(px(0.))
+                .overflow_hidden()
                 .items_center()
                 .justify_center()
                 .child(
@@ -81,6 +133,7 @@ pub fn render_preview(view: &RootView, cx: &mut Context<RootView>) -> impl IntoE
                         .justify_center()
                         .w(px(56.))
                         .h(px(56.))
+                        .flex_shrink_0()
                         .rounded_full()
                         .bg(if has_prev { theme::colors().element_background } else { theme::colors().border_variant })
                         .text_color(if has_prev { theme::colors().text } else { theme::colors().text_muted })
@@ -109,20 +162,85 @@ pub fn render_preview(view: &RootView, cx: &mut Context<RootView>) -> impl IntoE
                         }),
                 )
                 .child(
-                    // Center image area
+                    // Center image area（淡灰背景 + 滚轮缩放 + 拖拽平移）
                     div()
                         .flex()
                         .flex_grow(1.0)
-                        .items_center()
-                        .justify_center()
+                        .flex_shrink_1()
+                        .min_w(px(0.))
+                        .overflow_hidden()
                         .h_full()
                         .p_4()
+                        .bg(theme::colors().element_background)
+                        .on_scroll_wheel({
+                            let vh = view_handle.clone();
+                            move |event: &ScrollWheelEvent, _window, cx| {
+                                let delta_y: f32 = match event.delta {
+                                    ScrollDelta::Pixels(p) => p.y.into(),
+                                    ScrollDelta::Lines(l) => l.y * 20.,
+                                };
+                                if let Some(view) = vh.upgrade() {
+                                    let _ = cx.update_entity(&view, |root_view, root_cx| {
+                                        if delta_y > 0. {
+                                            root_view.dispatch_action(crate::action::Action::ZoomIn, root_cx);
+                                        } else {
+                                            root_view.dispatch_action(crate::action::Action::ZoomOut, root_cx);
+                                        }
+                                    });
+                                }
+                            }
+                        })
+                        .on_mouse_down(MouseButton::Left, {
+                            let vh = view_handle.clone();
+                            move |event: &MouseDownEvent, _window, cx| {
+                                if let Some(view) = vh.upgrade() {
+                                    let pos = event.position;
+                                    let _ = cx.update_entity(&view, |root_view, _cx| {
+                                        let x: f32 = pos.x.into();
+                                        let y: f32 = pos.y.into();
+                                        root_view.preview_drag = Some((x, y, root_view.preview_pan.0, root_view.preview_pan.1));
+                                    });
+                                }
+                            }
+                        })
+                        .on_mouse_move({
+                            let vh = view_handle.clone();
+                            move |event: &MouseMoveEvent, _window, cx| {
+                                if event.pressed_button != Some(MouseButton::Left) { return; }
+                                if let Some(view) = vh.upgrade() {
+                                    let pos = event.position;
+                                    let _ = cx.update_entity(&view, |root_view, root_cx| {
+                                        if let Some((sx, sy, spx, spy)) = root_view.preview_drag {
+                                            let cx_pos: f32 = pos.x.into();
+                                            let cy_pos: f32 = pos.y.into();
+                                            root_view.preview_pan = (spx + (cx_pos - sx), spy + (cy_pos - sy));
+                                            root_cx.notify();
+                                        }
+                                    });
+                                }
+                            }
+                        })
+                        .on_mouse_up(MouseButton::Left, {
+                            let vh = view_handle.clone();
+                            move |_event: &MouseUpEvent, _window, cx| {
+                                if let Some(view) = vh.upgrade() {
+                                    let _ = cx.update_entity(&view, |root_view, _cx| {
+                                        root_view.preview_drag = None;
+                                    });
+                                }
+                            }
+                        })
                         .child(match &image_source {
                             Some((fmt, bytes)) => {
                                 let img_obj = Image::from_bytes(*fmt, bytes.clone());
-                                img(Arc::new(img_obj))
-                                    .object_fit(ObjectFit::Contain)
-                                    .size_full()
+                                div()
+                                    .ml(px(img_x))
+                                    .mt(px(img_y))
+                                    .child(
+                                        img(Arc::new(img_obj))
+                                            .w(px(disp_w))
+                                            .h(px(disp_h)),
+                                    )
                                     .into_any_element()
                             }
                             None => div()
@@ -152,6 +270,7 @@ pub fn render_preview(view: &RootView, cx: &mut Context<RootView>) -> impl IntoE
                         .justify_center()
                         .w(px(56.))
                         .h(px(56.))
+                        .flex_shrink_0()
                         .rounded_full()
                         .bg(if has_next { theme::colors().element_background } else { theme::colors().border_variant })
                         .text_color(if has_next { theme::colors().text } else { theme::colors().text_muted })
@@ -197,7 +316,7 @@ pub fn render_preview(view: &RootView, cx: &mut Context<RootView>) -> impl IntoE
                     div()
                         .text_sm()
                         .text_color(theme::colors().text_muted)
-                        .child("100%"),
+                        .child(zoom_label),
                 )
                 .child(zoom_button(IconName::Plus, "zoom-in", view_handle.clone()))
                 .child(zoom_button(IconName::Frame, "zoom-fit", view_handle))

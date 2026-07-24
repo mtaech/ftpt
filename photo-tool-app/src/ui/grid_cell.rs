@@ -3,6 +3,7 @@ use std::sync::Arc;
 use photo_tool_core::domain::{CaptureMeta, ColorLabel, Flag, Rating};
 
 use gpui_component::{Icon, IconName, Sizable};
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 
 use crate::ui::theme;
@@ -31,53 +32,81 @@ pub fn render_grid_cell(
     div()
         .flex()
         .flex_col()
+        .size_full()
         .bg(bg)
         .border_color(border_color)
         .border(border_w)
         .rounded_md()
         .overflow_hidden()
         .child(
-            // Thumbnail area
+            // Thumbnail area（填满卡片剩余空间）
             div()
                 .flex()
                 .flex_grow(1.0)
+                .min_h(px(0.))
                 .items_center()
                 .justify_center()
+                .overflow_hidden()
                 .bg(theme::colors().element_background)
                 .child(render_thumbnail(capture, thumbnail_bytes)),
         )
         .child(
-            // Info bar
+            // 底部信息区（两行）：文件名 / 大小 + 星级
             div()
                 .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .px_1()
-                .py_0p5()
+                .flex_col()
+                .flex_shrink_0()
+                .gap_1()
+                .px_2()
+                .py_1p5()
                 .bg(theme::colors().surface_background)
                 .child(
-                    // Filename + flag + color dot
+                    // 第一行：旗标 + 颜色点 + 文件名
                     div()
                         .flex()
                         .flex_row()
                         .items_center()
                         .gap_1()
-                        .child(render_flag_indicator(capture.flag))
-                        .child(render_color_label_dot(capture.color_label))
+                        .when(capture.flag.is_some(), |d| {
+                            d.child(render_flag_indicator(capture.flag))
+                        })
+                        .when(capture.color_label != ColorLabel::None, |d| {
+                            d.child(render_color_label_dot(capture.color_label))
+                        })
                         .child(
                             div()
-                                .text_xs()
-                                .text_color(theme::colors().text_muted)
+                                .text_sm()
+                                .text_color(theme::colors().text)
                                 .truncate()
                                 .child(capture.base_name.clone()),
                         ),
                 )
                 .child(
-                    // Rating stars
-                    render_rating_stars(capture.rating),
+                    // 第二行：文件大小 + 星级
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::colors().text_muted)
+                                .child(format_file_size(capture.file_size)),
+                        )
+                        .child(render_rating_stars(capture.rating)),
                 ),
         )
+}
+
+/// 文件大小格式化为 KB/MB 可读字符串
+fn format_file_size(size: Option<u64>) -> String {
+    match size {
+        Some(bytes) if bytes >= 1_048_576 => format!("{:.1} MB", bytes as f64 / 1_048_576.0),
+        Some(bytes) if bytes >= 1024 => format!("{:.0} KB", bytes as f64 / 1024.0),
+        Some(bytes) => format!("{bytes} B"),
+        None => "\u{2014}".into(),
+    }
 }
 
 fn render_thumbnail(

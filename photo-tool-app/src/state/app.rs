@@ -362,55 +362,31 @@ impl RootView {
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-        let is_raw = matches!(
-            DomainFormat::from_extension(&ext),
-            Some(DomainFormat::Raw(_))
-        );
 
-        if is_raw {
-            // RAW：完整解码（half_size 去马赛克，4x 加速），品质远好于内嵌 JPEG
-            let path_clone = path.clone();
-            self.worker.spawn(
-                cx,
-                move || {
-                    photo_tool_core::thumbnail::decode_raw_preview(&path_clone, 1600)
-                        .inspect_err(|e| tracing::warn!("RAW 预览图解码失败: {e}"))
-                        .ok()
-                },
-                move |this, result, cx| {
-                    this.preview_loading.remove(&capture_idx);
-                    if let Some(bytes) = result {
-                        this.insert_preview(capture_idx, ImageFormat::Jpeg, bytes);
-                        cx.notify();
-                    }
-                },
-            );
-        } else {
-            // 常规图：缩略图缓存路径
-            let Some(cache) = self.thumbnail_cache.clone() else { return };
-            let source = SourceFile {
-                path,
-                format: DomainFormat::from_extension(&ext).unwrap_or(DomainFormat::Jpeg),
-                is_sidecar: false,
-                file_size: meta.file_size,
-            };
-            self.worker.spawn(
-                cx,
-                move || {
-                    cache
-                        .get_or_generate(&source, 1600)
-                        .map_err(|e| tracing::warn!("预览图生成失败: {e}"))
-                        .ok()
-                },
-                move |this, result, cx| {
-                    this.preview_loading.remove(&capture_idx);
-                    if let Some(bytes) = result {
-                        this.insert_preview(capture_idx, ImageFormat::Jpeg, bytes);
-                        cx.notify();
-                    }
-                },
-            );
-        }
+        // RAW 与常规图统一走缩略图缓存：RAW 提取内嵌 JPEG（快，已处理降噪/锐化）
+        let Some(cache) = self.thumbnail_cache.clone() else { return };
+        let source = SourceFile {
+            path,
+            format: DomainFormat::from_extension(&ext).unwrap_or(DomainFormat::Jpeg),
+            is_sidecar: false,
+            file_size: meta.file_size,
+        };
+        self.worker.spawn(
+            cx,
+            move || {
+                cache
+                    .get_or_generate(&source, 1600)
+                    .map_err(|e| tracing::warn!("预览图生成失败: {e}"))
+                    .ok()
+            },
+            move |this, result, cx| {
+                this.preview_loading.remove(&capture_idx);
+                if let Some(bytes) = result {
+                    this.insert_preview(capture_idx, ImageFormat::Jpeg, bytes);
+                    cx.notify();
+                }
+            },
+        );
     }
 
 

@@ -10,6 +10,9 @@ use crate::state::app::RootView;
 use crate::ui::toolbar::render_settings_overlay;
 use crate::ui::theme;
 
+/// 右侧信息面板固定宽度（px），网格列宽计算依赖该值
+pub const RIGHT_PANEL_WIDTH: f32 = 280.0;
+
 /// Render the three-panel layout: sidebar | content | info_panel.
 pub fn render_layout(
     view: &RootView,
@@ -130,7 +133,7 @@ pub fn render_layout(
                                     crate::ui::grid::render_grid(view, window, cx).into_any_element()
                                 }
                                 crate::state::app::ViewMode::Preview => {
-                                    crate::ui::preview::render_preview(view, cx).into_any_element()
+                                crate::ui::preview::render_preview(view, window, cx).into_any_element()
                                 }
                             }
                         }),
@@ -140,6 +143,8 @@ pub fn render_layout(
                     if view.config.right_panel_visible {
                         v_flex()
                             .h_full()
+                            .w(px(RIGHT_PANEL_WIDTH))
+                            .flex_shrink_0()
                             .bg(theme::colors().background)
                             .border_color(theme::colors().border_variant)
                             .border_l_1()
