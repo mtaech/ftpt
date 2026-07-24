@@ -232,39 +232,30 @@ impl ThumbnailCache {
     }
 }
 
-/// 通过 rawlib 完整解码 RAW 文件（half_size 去马赛克，速度约 4x），
-/// 返回 JPEG 字节。在 worker 线程中调用，不会阻塞 UI。
-///
-/// half_size 将输出分辨率减半 —— 对高像素 RAW 预览足够清晰，远好于内嵌 JPEG。
+
+/// 通过 rawlib 完整解码 RAW（preview 预设：half_size + bilinear + 8bit），
+/// 预期 4-8x 加速，返回 JPEG 字节。在 worker 线程中调用，不会阻塞 UI。
 pub fn decode_raw_preview(path: &Path, max_size: u32) -> Result<Vec<u8>, ThumbnailError> {
     use std::io::Cursor;
 
-    let raw_img = rawlib::extract_image_half_size(path, true).map_err(|e| {
-        ThumbnailError::Raw(e.to_string())
-    })?;
+    let raw_img = rawlib::extract_image_with_options(path, &rawlib::DecodeOptions::preview())
+        .map_err(|e| ThumbnailError::Raw(e.to_string()))?;
     let orig_w = raw_img.width as u32;
     let orig_h = raw_img.height as u32;
     let colors = raw_img.colors as usize;
-    let bits = raw_img.bits;
 
-    // 16-bit -> 8-bit 降采样
-    let rgb8: Vec<u8> = if bits >= 16 {
-        let channel_bytes = (bits / 8) as usize;
-        raw_img
-            .data
-            .chunks_exact(colors * channel_bytes)
-            .flat_map(|pixel| {
-                (0..colors.min(3)).map(|i| pixel[i * channel_bytes + (channel_bytes - 1)])
-            })
+    // preview 预设 output_bps=8，LibRaw 直接输出 8-bit RGB
+    let rgb8: Vec<u8> = if raw_img.bits >= 16 {
+        let cb = (raw_img.bits / 8) as usize;
+        raw_img.data.chunks_exact(colors * cb)
+            .flat_map(|p| (0..colors.min(3)).map(move |i| p[i * cb + (cb - 1)]))
             .collect()
     } else {
-        raw_img
-            .data
-            .chunks_exact(colors)
-            .flat_map(|pixel| {
-                let r = pixel[0];
-                let g = if colors > 1 { pixel[1] } else { r };
-                let b = if colors > 2 { pixel[2] } else { r };
+        raw_img.data.chunks_exact(colors)
+            .flat_map(|p| {
+                let r = p[0];
+                let g = if colors > 1 { p[1] } else { r };
+                let b = if colors > 2 { p[2] } else { r };
                 [r, g, b]
             })
             .collect()
@@ -289,6 +280,7 @@ pub fn decode_raw_preview(path: &Path, max_size: u32) -> Result<Vec<u8>, Thumbna
     resized.write_to(&mut buf, image::ImageFormat::Jpeg)?;
     Ok(buf.into_inner())
 }
+
 
 #[cfg(test)]
 mod tests {
