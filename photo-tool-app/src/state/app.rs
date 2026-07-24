@@ -183,6 +183,7 @@ impl RootView {
                             .map(|(i, c)| {
                                 let mut meta = CaptureMeta::from(c);
                                 meta.index = i;
+                                meta.enrich_with_exif();
                                 meta.enrich_with_xmp();
                                 meta
                             })
