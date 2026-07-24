@@ -33,8 +33,14 @@ pub fn render_grid(
     } else {
         0.
     };
-    let available_w =
-        (viewport_w - crate::ui::layout::RAIL_WIDTH - view.config.left_panel_width as f32 - right_w).max(cell_size);
+    // 扣除滚动条预留空间，否则卡片延伸到 padding 区被滚动条遮住
+    const SCROLLBAR_PAD: f32 = 16.;
+    let available_w = (viewport_w
+        - crate::ui::layout::RAIL_WIDTH
+        - view.config.left_panel_width as f32
+        - right_w
+        - SCROLLBAR_PAD)
+        .max(cell_size);
     let cols = ((available_w / cell_size) as usize).max(1);
     let cell_w = (available_w / cols as f32).floor();
     let row_count = item_count.div_ceil(cols);
