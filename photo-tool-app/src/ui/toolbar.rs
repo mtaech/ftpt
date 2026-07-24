@@ -138,7 +138,7 @@ pub fn render_toolbar(
                 })
                 .child(
                     Button::new("refresh-btn")
-                        .icon(IconName::Redo2)
+                        .icon(IconName::RefreshCw)
                         .ghost()
                         .small()
                         .on_click({
@@ -147,22 +147,6 @@ pub fn render_toolbar(
                                 if let Some(entity) = vh.upgrade() {
                                     cx.update_entity(&entity, |view, cx| {
                                         view.dispatch_action(Action::Refresh, cx);
-                                    });
-                                }
-                            }
-                        }),
-                )
-                .child(
-                    Button::new("settings-btn")
-                        .icon(IconName::Settings)
-                        .ghost()
-                        .small()
-                        .on_click({
-                            let vh = vh.clone();
-                            move |_, _window, cx| {
-                                if let Some(entity) = vh.upgrade() {
-                                    cx.update_entity(&entity, |view, cx| {
-                                        view.dispatch_action(Action::ToggleSettings, cx);
                                     });
                                 }
                             }
