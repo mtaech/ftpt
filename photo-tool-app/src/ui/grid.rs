@@ -59,6 +59,7 @@ pub fn render_grid(
                     let cells = (start..end)
                         .filter_map(|i| {
                             let capture_idx = display_order.get(i)?;
+                            let ci = *capture_idx;
                             let capture = captures.get(*capture_idx)?;
                             let is_selected = selected.contains(capture_idx);
                             let thumb = thumbnail_data.get(capture_idx);
@@ -96,8 +97,17 @@ pub fn render_grid(
                                         move |_event: &ClickEvent, _window, cx| {
                                             if let Some(view) = vh.upgrade() {
                                                 let _ = cx.update_entity(&view, |root_view, root_cx| {
-                                                root_view.select(idx, false, false);
-                                                root_view.toggle_view_mode(root_cx);
+                                                    // 用 capture_idx 在 display_order 中的位置设焦点，比 display_idx 可靠
+                                                    if let Some(di) = root_view.display_order
+                                                        .iter()
+                                                        .position(|&c| c == ci)
+                                                    {
+                                                        root_view.focus_index = Some(di);
+                                                        root_view.anchor = Some(di);
+                                                        root_view.selected.clear();
+                                                        root_view.selected.insert(ci);
+                                                    }
+                                                    root_view.toggle_view_mode(root_cx);
                                                     root_cx.notify();
                                                 });
                                             }
