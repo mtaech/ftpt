@@ -1,4 +1,5 @@
 mod action;
+mod assets;
 mod state;
 mod worker;
 mod ui;
@@ -27,8 +28,8 @@ fn main() {
         AppConfig::default()
     });
 
-    // 加载 gpui-component 内置 SVG 资源（图标等），缺失时所有 IconName 渲染为空白
-    let app = gpui_platform::application().with_assets(gpui_component_assets::Assets);
+    // 加载照片工具和 gpui-component 的内置 SVG 资源
+    let app = gpui_platform::application().with_assets(crate::assets::AppAssets);
     app.run(move |cx| {
         cx.activate(true);
         let cp = config_path.clone();

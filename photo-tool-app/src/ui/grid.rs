@@ -96,7 +96,8 @@ pub fn render_grid(
                                         move |_event: &ClickEvent, _window, cx| {
                                             if let Some(view) = vh.upgrade() {
                                                 let _ = cx.update_entity(&view, |root_view, root_cx| {
-                                                    root_view.toggle_view_mode(root_cx);
+                                                root_view.select(idx, false, false);
+                                                root_view.toggle_view_mode(root_cx);
                                                     root_cx.notify();
                                                 });
                                             }

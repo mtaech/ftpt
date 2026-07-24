@@ -104,19 +104,19 @@ pub fn render_toolbar(
         .child(
             h_flex()
                 .gap_1()
-                .child({
-                    let label = match view.sort_by {
-                        SortBy::FileName => "文件名",
-                        SortBy::DateTaken => "拍摄日期",
-                        SortBy::FileSize => "文件大小",
-                        SortBy::Rating => "评分",
-                        SortBy::Modified => "修改时间",
-                    };
+                .child(
                     Button::new("sort-btn")
                         .icon(IconName::SortAscending)
                         .ghost()
                         .small()
-                        .label(label)
+                        .label(match view.sort_by {
+                            SortBy::FileName => "文件名",
+                            SortBy::DateTaken => "拍摄日期",
+                            SortBy::FileSize => "文件大小",
+                            SortBy::Rating => "评分",
+                            SortBy::Modified => "修改时间",
+                        })
+                        .tooltip("排序方式")
                         .on_click({
                             let vh = vh.clone();
                             move |_, _window, cx| {
@@ -134,13 +134,14 @@ pub fn render_toolbar(
                                     });
                                 }
                             }
-                        })
-                })
+                        }),
+                )
                 .child(
                     Button::new("refresh-btn")
-                        .icon(IconName::RefreshCw)
+                        .icon(gpui_component::Icon::empty().path("icons/refresh-cw.svg"))
                         .ghost()
                         .small()
+                        .tooltip("重新扫描")
                         .on_click({
                             let vh = vh.clone();
                             move |_, _window, cx| {
@@ -152,9 +153,6 @@ pub fn render_toolbar(
                             }
                         }),
                 )
-        )
-}
-
 // ── Settings Dialog Overlay ──────────────────────────────────────────
 
 /// 单选组渲染 helper：横排可选按钮，选中态高亮，点击直接写 View config

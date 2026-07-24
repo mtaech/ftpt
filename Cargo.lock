@@ -4866,6 +4866,7 @@ dependencies = [
  "photo-tool-core",
  "rayon",
  "rfd",
+ "rust-embed",
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
