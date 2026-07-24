@@ -238,10 +238,7 @@ impl ThumbnailCache {
 pub fn decode_raw_preview(path: &Path, max_size: u32) -> Result<Vec<u8>, ThumbnailError> {
     use std::io::Cursor;
 
-    let opts = rawlib::DecodeOptions {
-        half_size: true,
-        ..rawlib::DecodeOptions::quality()
-    };
+    let opts = rawlib::DecodeOptions::quality();
     let raw_img = rawlib::extract_image_with_options(path, &opts)
         .map_err(|e| ThumbnailError::Raw(e.to_string()))?;
     let orig_w = raw_img.width as u32;
@@ -272,12 +269,16 @@ pub fn decode_raw_preview(path: &Path, max_size: u32) -> Result<Vec<u8>, Thumbna
                 "RAW decode produced invalid buffer",
             )))
         })?;
-    let dynamic = image::DynamicImage::ImageRgb8(img);
 
     let resized = if orig_w.max(orig_h) > max_size {
-        dynamic.thumbnail(max_size, max_size)
+        let (nw, nh) = {
+            let ratio = max_size as f64 / orig_w.max(orig_h) as f64;
+            ((orig_w as f64 * ratio) as u32, (orig_h as f64 * ratio) as u32)
+        };
+        let buf = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3);
+        image::DynamicImage::ImageRgb8(buf)
     } else {
-        dynamic
+        image::DynamicImage::ImageRgb8(img)
     };
 
     let mut buf = Cursor::new(Vec::new());
