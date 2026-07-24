@@ -53,6 +53,9 @@ pub struct AppConfig {
     pub thumbnail_size: u32,
     pub favorite_dirs: Vec<String>,
     pub last_directory: Option<String>,
+    /// 最近打开的目录（最多 10 个，最新在前）
+    #[serde(default)]
+    pub recent_directories: Vec<String>,
     pub theme: Theme,
     pub default_delete_mode: String,
     pub window_width: u32,
@@ -74,6 +77,7 @@ impl Default for AppConfig {
             thumbnail_size: 220,
             favorite_dirs: vec![],
             last_directory: None,
+            recent_directories: vec![],
             theme: Theme::Light,
             default_delete_mode: "trash".to_string(),
             window_width: 1400,

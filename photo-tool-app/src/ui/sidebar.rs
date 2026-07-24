@@ -150,6 +150,71 @@ fn render_directory_section(
                         }),
                 ),
         )
+        .children(render_recent_directories(view, cx))
+}
+
+// ── Recent Directories ──────────────────────────────────────────────────
+
+fn render_recent_directories(
+    view: &RootView,
+    cx: &mut Context<RootView>,
+) -> impl IntoIterator<Item = impl IntoElement> {
+    let vh = cx.entity().downgrade();
+    let current = view.dir_path.as_ref().map(|p| p.to_string_lossy().to_string());
+    let recents: Vec<String> = view
+        .config
+        .recent_directories
+        .iter()
+        .filter(|d| Some(*d) != current.as_ref())
+        .cloned()
+        .collect();
+
+    let mut elements: Vec<AnyElement> = Vec::new();
+    if recents.is_empty() {
+        return elements;
+    }
+
+    elements.push(
+        div()
+            .pt_2()
+            .child(crate::ui::controls::section_header("最近打开"))
+            .into_any_element(),
+    );
+    for dir in recents {
+        let display = std::path::Path::new(&dir)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&dir)
+            .to_string();
+        let dir_open = dir.clone();
+        let vh_open = vh.clone();
+        elements.push(
+            div()
+                .id(ElementId::Name(SharedString::from(format!("recent-{dir}"))))
+                .px_2()
+                .py_0p5()
+                .rounded_sm()
+                .cursor_pointer()
+                .hover(|style| style.bg(theme::colors().element_hover))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme::colors().text_muted)
+                        .truncate()
+                        .child(display),
+                )
+                .on_click(move |_, _window, cx| {
+                    if let Some(view) = vh_open.upgrade() {
+                        let path = dir_open.clone();
+                        let _ = cx.update_entity(&view, |root_view, root_cx| {
+                            root_view.scan_directory(PathBuf::from(&path), root_cx);
+                        });
+                    }
+                })
+                .into_any_element(),
+        );
+    }
+    elements
 }
 
 // ── Favorites Section ────────────────────────────────────────────────────

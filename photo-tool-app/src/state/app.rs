@@ -208,7 +208,12 @@ impl RootView {
                         this.captures = metas;
                         this.dir_path = Some(dir.clone());
                         // 记住最后打开的目录，下次启动自动恢复
-                        this.config.last_directory = Some(dir.to_string_lossy().to_string());
+                        let dir_str = dir.to_string_lossy().to_string();
+                        this.config.last_directory = Some(dir_str.clone());
+                        // 记录最近打开的目录（去重、最新在前、最多 10 个）
+                        this.config.recent_directories.retain(|d| d != &dir_str);
+                        this.config.recent_directories.insert(0, dir_str);
+                        this.config.recent_directories.truncate(10);
                         this.save_config();
                         this.thumbnail_data.clear();
                         this.preview_data.clear();
