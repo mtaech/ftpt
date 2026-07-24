@@ -212,10 +212,10 @@ impl RootView {
             |this, result, cx| {
                 match result {
                     Ok((dir, metas)) => {
-                        this.captures = metas;
                         this.dir_path = Some(dir.clone());
-                        this.selected.clear();
-                        this.anchor = None;
+                        // 记住最后打开的目录，下次启动自动恢复
+                        this.config.last_directory = Some(dir.to_string_lossy().to_string());
+                        this.save_config();
                         this.thumbnail_data.clear();
                         this.preview_data.clear();
                         this.preview_order.clear();
