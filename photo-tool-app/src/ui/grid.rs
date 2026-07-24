@@ -22,28 +22,28 @@ pub fn render_grid(
     let display_order = view.display_order.clone();
     let selected = view.selected.clone();
     let thumbnail_size = view.config.thumbnail_size;
-    let cell_size = thumbnail_size as f32 + 56.; // thumbnail + 两行信息区
+    let cell_size = thumbnail_size as f32 + 56.;
     let thumbnail_data = view.thumbnail_data.clone();
     let scroll_handle = &view.grid_scroll_handle;
 
-    // 按可用宽度精确计算列数与卡宽：行内卡片为固定像素尺寸
+    // 固定 4 列网格
+    const COLS: usize = 4;
     let viewport_w: f32 = window.viewport_size().width.into();
     let right_w = if view.config.right_panel_visible {
         crate::ui::layout::RIGHT_PANEL_WIDTH
     } else {
         0.
     };
-    // 扣除滚动条预留空间，否则卡片延伸到 padding 区被滚动条遮住
     const SCROLLBAR_PAD: f32 = 16.;
     let available_w = (viewport_w
         - crate::ui::layout::RAIL_WIDTH
         - view.config.left_panel_width as f32
         - right_w
         - SCROLLBAR_PAD)
-        .max(cell_size);
-    let cols = ((available_w / cell_size) as usize).max(1);
-    let cell_w = (available_w / cols as f32).floor();
-    let row_count = item_count.div_ceil(cols);
+        .max(cell_size * COLS as f32);
+    let cell_w = (available_w / COLS as f32).floor();
+    let row_count = item_count.div_ceil(COLS);
+    let cols = COLS;
 
     let view_handle = cx.entity().downgrade();
 
