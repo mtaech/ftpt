@@ -204,7 +204,8 @@ impl RootView {
             },
             |this, result, cx| {
                 match result {
-                    Ok((dir, _metas)) => {
+                    Ok((dir, metas)) => {
+                        this.captures = metas;
                         this.dir_path = Some(dir.clone());
                         // 记住最后打开的目录，下次启动自动恢复
                         this.config.last_directory = Some(dir.to_string_lossy().to_string());
