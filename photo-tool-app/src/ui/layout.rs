@@ -19,7 +19,6 @@ pub fn render_layout(
     window: &mut Window,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
-    let mut wizard_state = crate::ui::import_wizard::ImportWizardState::default();
     let font_family = view.config.font_family.clone();
 
         v_flex()
@@ -62,8 +61,6 @@ pub fn render_layout(
                     // Selection
                     ("a", true) => view.dispatch_action(Action::SelectAll, cx),
                     ("d", true) => view.dispatch_action(Action::DeselectAll, cx),
-                    // Import
-                    ("i", true) => view.dispatch_action(Action::OpenImport, cx),
                     // Refresh
                     ("escape", false) => {
                         if view.show_settings {
@@ -72,6 +69,9 @@ pub fn render_layout(
                         }
                     }
                     ("f5", false) => view.dispatch_action(Action::Refresh, cx),
+                    // Panel toggles
+                    ("[", true) => view.dispatch_action(Action::ToggleLeftPanel, cx),
+                    ("]", true) => view.dispatch_action(Action::ToggleRightPanel, cx),
                     _ => {}
                 }
             },
@@ -86,20 +86,32 @@ pub fn render_layout(
                 .h_full()
                 .flex_grow(1.0)
                 .child(
-                    // Left sidebar
-                    v_flex()
-                        .h_full()
-                        .w(px(view.config.left_panel_width as f32))
-                        .bg(theme::colors().surface_background)
-                        .border_color(theme::colors().border_variant)
-                        .overflow_y_scrollbar()
-                        .child(crate::ui::sidebar::render_sidebar(view, cx)),
+                    // Activity Rail（始终可见）
+                    crate::ui::activity_rail::render_activity_rail(view, cx),
+                )
+                .child(
+                    // Left sidebar（按 sidebar_visible 条件显隐）
+                    if view.sidebar_visible {
+                        v_flex()
+                            .h_full()
+                            .w(px(view.config.left_panel_width as f32))
+                            .bg(theme::colors().surface_background)
+                            .border_color(theme::colors().border_variant)
+                            .overflow_y_scrollbar()
+                            .child(crate::ui::sidebar::render_sidebar(view, cx))
+                            .into_any_element()
+                    } else {
+                        div().into_any_element()
+                    }
                 )
                 .child(
                     // Center content area (grid, preview, or empty state)
                     v_flex()
                         .h_full()
                         .flex_grow(1.0)
+                        // 允许缩到 0：否则内容（如预览大图）的固有宽度会撑开此列，顶移左右面板
+                        .min_w_0()
+                        .overflow_hidden()
                         .child(if view.dir_path.is_none() {
                             // Empty state: no directory loaded
                             v_flex()
@@ -159,14 +171,6 @@ pub fn render_layout(
             // Bottom status bar
             crate::ui::status_bar::render_status_bar(view, cx),
         )
-        // Import wizard overlay
-        .when(view.show_import_wizard, |parent| {
-            parent.child(crate::ui::import_wizard::render_import_wizard(
-                view,
-                cx,
-                &mut wizard_state,
-            ))
-        })
         // Settings overlay
         .when(view.show_settings, |parent| {
             parent.child(render_settings_overlay(view, cx))

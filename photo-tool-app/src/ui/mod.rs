@@ -1,7 +1,7 @@
+pub mod activity_rail;
 pub mod controls;
 pub mod grid;
 pub mod grid_cell;
-pub mod import_wizard;
 pub mod info_panel;
 pub mod layout;
 pub mod preview;

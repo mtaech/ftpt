@@ -144,6 +144,10 @@ pub const FOCUS_RING_WIDTH: f32 = 2.0;
 
 pub const DEFAULT_FONT_FAMILY: &str = "Microsoft YaHei UI";
 
+/// 等宽字体：EXIF 数值、文件大小、状态栏计数等数字场景统一使用。
+/// Cascadia Mono 随 Windows 11 预装；缺失时 GPUI 自动回落系统默认。
+pub const MONO_FONT_FAMILY: &str = "Cascadia Mono";
+
 // ═══════════════════════════════════════════════════════════════
 //  Color helpers
 // ═══════════════════════════════════════════════════════════════
@@ -194,6 +198,17 @@ pub mod colors {
     pub static LABEL_PURPLE: LazyLock<Hsla> = LazyLock::new(|| hex_rgb(0x8b5cf6));
     pub static PICK: LazyLock<Hsla> = LazyLock::new(|| hex_rgb(0x22c55e));
     pub static REJECT: LazyLock<Hsla> = LazyLock::new(|| hex_rgb(0xef4444));
+
+    /// 徽标底：缩略图角标（RAW/JPG、旗标）的半透明黑底，两种模式通用
+    pub static BADGE_BG: LazyLock<Hsla> = LazyLock::new(|| hex_rgba(0x000000b3));
+}
+
+/// accent 色的低透明度版本：选中行底色等大面积弱化场景。
+/// 由 text_accent 派生，跟随当前模式。
+pub fn accent_dim() -> Hsla {
+    let mut c = colors().text_accent;
+    c.a = 0.10;
+    c
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -244,30 +259,31 @@ impl ThemeColors {
 
     pub fn dark() -> Self {
         Self {
-            border: hex_rgb(0x4b5563),
-            border_variant: hex_rgb(0x374151),
-            border_focused: hex_rgb(0x60a5fa),
-            border_selected: hex_rgb(0x2563eb),
+            // 交易终端式近黑层级：面板靠微差亮度区分，边框近乎不可见
+            border: hex_rgb(0x23272f),
+            border_variant: hex_rgb(0x1b1f27),
+            border_focused: hex_rgb(0x22d3ee),
+            border_selected: hex_rgb(0x155e75),
             border_transparent: hsla(0., 0., 0., 0.),
-            border_disabled: hex_rgb(0x374151),
-            elevated_surface_background: hex_rgb(0x374151),
-            surface_background: hex_rgb(0x1f2937),
-            background: hex_rgb(0x111827),
-            element_background: hex_rgb(0x374151),
-            element_hover: hex_rgb(0x4b5563),
-            element_active: hex_rgb(0x6b7280),
-            element_selected: hex_rgb(0x1e3a5f),
-            element_disabled: hex_rgb(0x374151),
+            border_disabled: hex_rgb(0x1b1f27),
+            elevated_surface_background: hex_rgb(0x1a1e26),
+            surface_background: hex_rgb(0x12151b),
+            background: hex_rgb(0x0b0d11),
+            element_background: hex_rgb(0x171b22),
+            element_hover: hex_rgb(0x1c212b),
+            element_active: hex_rgb(0x262c38),
+            element_selected: hex_rgb(0x14202c),
+            element_disabled: hex_rgb(0x171b22),
             text: hex_rgb(0xf9fafb),
             text_muted: hex_rgb(0x9ca3af),
             text_placeholder: hex_rgb(0x6b7280),
             text_disabled: hex_rgb(0x4b5563),
-            text_accent: hex_rgb(0x60a5fa),
+            text_accent: hex_rgb(0x22d3ee),
             icon: hex_rgb(0xf9fafb),
             icon_muted: hex_rgb(0x9ca3af),
             icon_disabled: hex_rgb(0x4b5563),
             icon_placeholder: hex_rgb(0x6b7280),
-            icon_accent: hex_rgb(0x60a5fa),
+            icon_accent: hex_rgb(0x22d3ee),
             error: hex_rgb(0xf87171),
             error_background: hex_rgba(0x7f1d1d80),
             error_border: hex_rgb(0x7f1d1d),

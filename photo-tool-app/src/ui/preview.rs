@@ -19,7 +19,7 @@ pub fn render_preview(
         .focus_index
         .map_or(false, |i| i + 1 < view.display_order.len());
 
-    // 优先使用预览数据（非 RAW 为原图）；未加载完成时回退缩略图
+    // 优先 1600px 预览数据；未加载完成时回退缩略图
     let image_source = focused.and_then(|meta| {
         let idx = meta.index;
         view.preview_data
@@ -233,9 +233,13 @@ pub fn render_preview(
                         .child(match &image_source {
                             Some((fmt, bytes)) => {
                                 let img_obj = Image::from_bytes(*fmt, bytes.clone());
+                                // 绝对定位脱离文档流：拖动/缩放只改偏移，不参与 flex 布局，
+                                // 否则 margin 会改变内容固有尺寸，把左右面板顶移位。
+                                // 坐标原点 = 父容器左上，需补回 p_4 的 16px 内边距。
                                 div()
-                                    .ml(px(img_x))
-                                    .mt(px(img_y))
+                                    .absolute()
+                                    .left(px(img_x + pad_px))
+                                    .top(px(img_y + pad_px))
                                     .child(
                                         img(Arc::new(img_obj))
                                             .w(px(disp_w))
@@ -311,19 +315,19 @@ pub fn render_preview(
                 .bg(theme::colors().surface_background)
                 .border_t_1()
                 .border_color(theme::colors().border_variant)
-                .child(zoom_button(IconName::Minus, "zoom-out", view_handle.clone()))
+                .child(zoom_button(IconName::Minus, "zoom-out", crate::action::Action::ZoomOut, false, view_handle.clone()))
                 .child(
                     div()
                         .text_sm()
                         .text_color(theme::colors().text_muted)
                         .child(zoom_label),
                 )
-                .child(zoom_button(IconName::Plus, "zoom-in", view_handle.clone()))
-                .child(zoom_button(IconName::Frame, "zoom-fit", view_handle))
+                .child(zoom_button(IconName::Plus, "zoom-in", crate::action::Action::ZoomIn, false, view_handle.clone()))
+                .child(zoom_button(IconName::Frame, "zoom-fit", crate::action::Action::ZoomToFit, false, view_handle.clone()))
         )
 }
 
-fn zoom_button(icon: IconName, id: &str, view_handle: WeakEntity<RootView>) -> impl IntoElement {
+fn zoom_button(icon: IconName, id: &str, action: crate::action::Action, active: bool, view_handle: WeakEntity<RootView>) -> impl IntoElement {
     let vh = view_handle.clone();
     let owned_id = id.to_string();
     div()
@@ -334,30 +338,15 @@ fn zoom_button(icon: IconName, id: &str, view_handle: WeakEntity<RootView>) -> i
         .w(px(36.))
         .h(px(36.))
         .rounded_md()
-        .bg(theme::colors().element_background)
+        .bg(if active { theme::colors().element_hover } else { theme::colors().element_background })
         .text_color(theme::colors().text)
         .text_sm()
         .cursor(CursorStyle::PointingHand)
-        .child(Icon::new(icon.clone()).small().text_color(theme::colors().text))
+        .child(Icon::new(icon).small().text_color(theme::colors().text))
         .on_click(move |_event: &ClickEvent, _window, cx| {
             if let Some(view) = vh.upgrade() {
                 let _ = cx.update_entity(&view, |root_view, root_cx| {
-                    match icon {
-                        IconName::Plus => root_view.dispatch_action(
-                            crate::action::Action::ZoomIn,
-                            root_cx,
-                        ),
-                        IconName::Minus => root_view.dispatch_action(
-                            crate::action::Action::ZoomOut,
-                            root_cx,
-                        ),
-                        IconName::Frame => root_view.dispatch_action(
-                            crate::action::Action::ZoomToFit,
-                            root_cx,
-                        ),
-                        // zoom_button 仅由本文件以 Minus/Plus/Frame 调用
-                        _ => unreachable!("zoom_button 不支持的图标"),
-                    }
+                    root_view.dispatch_action(action, root_cx);
                 });
             }
         })

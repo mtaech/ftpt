@@ -4,14 +4,15 @@ use gpui_component::{Sizable, Selectable};
 
 use crate::ui::theme;
 
-/// 分区标题：全应用统一的 section header（粗体 xs muted）。
+/// 分区标题：全应用统一的 section header。
+/// 交易终端风格：全大写、xs、muted。
+/// 注：GPUI 无 letter-spacing API，故仅在视觉上通过全大写实现字距感。
 pub fn section_header(label: &str) -> Div {
     div()
-        .font_weight(FontWeight::SEMIBOLD)
         .text_xs()
         .text_color(theme::colors().text_muted)
         .pb_1()
-        .child(label.to_string())
+        .child(label.to_uppercase())
 }
 
 /// 分段选择按钮：用于「任意/入选/淘汰/未标记」这类互斥选项组。

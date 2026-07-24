@@ -19,40 +19,67 @@ pub fn render_info_panel(view: &RootView, cx: &mut Context<RootView>) -> impl In
         .flex_col()
         .size_full()
         .p_3()
-        .gap_3()
-        .child(card_section(render_exif_section(focused)))
-        .child(card_section(render_rating_section(focused, cx)))
-        .child(card_section(render_color_label_section(focused, cx)))
-        .child(card_section(render_flag_section(focused, cx)))
-}
-fn card_section(content: impl IntoElement) -> impl IntoElement {
-    div()
-        .p_3()
-        .rounded_md()
-        .border_1()
-        .bg(theme::colors().elevated_surface_background)
-        .border_color(theme::colors().border_variant)
-        .shadow(theme::ElevationIndex::Surface.shadow())
-        .child(content)
+        .gap_2()
+        // ── Hero ──
+        .child(render_hero(focused))
+        .child(section_divider())
+        .child(render_exif_section(focused))
+        .child(section_divider())
+        .child(render_rating_section(focused, cx))
+        .child(section_divider())
+        .child(render_color_label_section(focused, cx))
+        .child(section_divider())
+        .child(render_flag_section(focused, cx))
 }
 
-// ── helpers ──────────────────────────────────────────────────────────────
+/// 1px 分隔线
+fn section_divider() -> impl IntoElement {
+    div().h(px(1.)).w_full().bg(theme::colors().border_variant)
+}
 
-
-fn info_row(label: &str, value: &str) -> impl IntoElement {
-    let label = format!("{}:", label);
-    let value = value.to_string();
-    div()
-        .flex()
-        .flex_row()
-        .gap_1()
-        .text_xs()
-        .child(
-            div()
-                .text_color(theme::colors().text_muted)
-                .child(label),
-        )
-        .child(div().text_color(theme::colors().text).child(value))
+/// Hero 区：文件名（粗体截断）+ 分辨率/文件大小（等宽强调）
+fn render_hero(focused: Option<&CaptureMeta>) -> impl IntoElement {
+    match focused {
+        None => div()
+            .text_sm()
+            .text_color(theme::colors().text_placeholder)
+            .child("未选择图片")
+            .into_any_element(),
+        Some(meta) => div()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::colors().text)
+                            .truncate()
+                            .child(meta.base_name.clone()),
+                    )
+                    .child(
+                        div()
+                            .font_family(theme::MONO_FONT_FAMILY)
+                            .text_xs()
+                            .text_color(theme::colors().text_muted)
+                            .child(format_file_size(meta.file_size)),
+                    ),
+            )
+            .child(
+                div()
+                    .font_family(theme::MONO_FONT_FAMILY)
+                    .text_xl()
+                    .text_color(theme::colors().text_accent)
+                    .child(match (meta.image_width, meta.image_height) {
+                        (Some(w), Some(h)) => format!("{} × {}", w, h),
+                        _ => "\u{2014} × \u{2014}".into(),
+                    }),
+            )
+            .into_any_element(),
+    }
 }
 
 fn format_file_size(size: Option<u64>) -> String {
@@ -64,6 +91,25 @@ fn format_file_size(size: Option<u64>) -> String {
     }
 }
 
+/// 信息行：标签（左 muted 小字） 值（右等宽对齐）
+fn info_row(label: &str, value: &str) -> impl IntoElement {
+    let label = format!("{}:", label);
+    h_flex()
+        .justify_between()
+        .text_xs()
+        .child(
+            div()
+                .text_color(theme::colors().text_muted)
+                .child(label),
+        )
+        .child(
+            div()
+                .font_family(theme::MONO_FONT_FAMILY)
+                .text_color(theme::colors().text)
+                .child(value.to_string()),
+        )
+}
+
 // ── EXIF Section ─────────────────────────────────────────────────────────
 
 fn render_exif_section(
@@ -73,31 +119,59 @@ fn render_exif_section(
         .flex()
         .flex_col()
         .gap_1()
+        .py_2()
         .child(section_header("信息"))
         .child(match focused {
             None => div()
+                .text_xs()
                 .text_color(theme::colors().text_muted)
-                .child("未选择图片")
+                .child("无 EXIF 信息")
                 .into_any_element(),
             Some(meta) => div()
                 .flex()
                 .flex_col()
                 .gap_0p5()
-                .child(info_row("文件名", &meta.base_name))
                 .child(info_row(
-                    "尺寸",
-                    &match (meta.image_width, meta.image_height) {
-                        (Some(w), Some(h)) => format!("{} x {}", w, h),
-                        _ => "\u{2014}".into(),
-                    },
+                    "相机",
+                    meta.camera_make.as_deref().unwrap_or("\u{2014}"),
                 ))
                 .child(info_row(
-                    "文件大小",
-                    &format_file_size(meta.file_size),
+                    "型号",
+                    meta.camera_model.as_deref().unwrap_or("\u{2014}"),
+                ))
+                .child(info_row(
+                    "镜头",
+                    meta.lens.as_deref().unwrap_or("\u{2014}"),
+                ))
+                .child(info_row(
+                    "焦距",
+                    meta.focal_length.as_deref().unwrap_or("\u{2014}"),
+                ))
+                .child(info_row(
+                    "光圈",
+                    meta.f_number.as_deref().unwrap_or("\u{2014}"),
+                ))
+                .child(info_row(
+                    "快门",
+                    meta.exposure_time.as_deref().unwrap_or("\u{2014}"),
+                ))
+                .child(info_row(
+                    "ISO",
+                    &meta
+                        .iso
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "\u{2014}".into()),
+                ))
+                .child(info_row(
+                    "日期",
+                    meta.date_taken.as_deref().unwrap_or("\u{2014}"),
                 ))
                 .into_any_element(),
         })
 }
+
+// ── Rating Section ───────────────────────────────────────────────────────
+
 fn render_rating_section(
     focused: Option<&CaptureMeta>,
     cx: &mut Context<RootView>,
@@ -106,9 +180,15 @@ fn render_rating_section(
         return div()
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_1()
+            .py_2()
             .child(section_header("评分"))
-            .child(div().text_xs().text_color(theme::colors().text_muted).child("未选择图片"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::colors().text_muted)
+                    .child("未选择图片"),
+            )
             .into_any_element();
     }
 
@@ -120,7 +200,8 @@ fn render_rating_section(
     div()
         .flex()
         .flex_col()
-        .gap_2()
+        .gap_1()
+        .py_2()
         .child(section_header("评分"))
         .child(
             Rating::new("rating")
@@ -137,7 +218,11 @@ fn render_rating_section(
                             5 => Action::Rate5,
                             _ => unreachable!(),
                         };
-                        if let Some(entity) = vh.upgrade() { cx.update_entity(&entity, |view, cx| view.dispatch_action(action, cx)); }
+                        if let Some(entity) = vh.upgrade() {
+                            cx.update_entity(&entity, |view, cx| {
+                                view.dispatch_action(action, cx)
+                            });
+                        }
                     }
                 }),
         )
@@ -147,7 +232,11 @@ fn render_rating_section(
                 .child(clear_link("clear-rating", "清除评分", {
                     let vh = vh.clone();
                     move |_, _w, cx| {
-                        if let Some(entity) = vh.upgrade() { cx.update_entity(&entity, |view, cx| view.dispatch_action(Action::Rate0, cx)); }
+                        if let Some(entity) = vh.upgrade() {
+                            cx.update_entity(&entity, |view, cx| {
+                                view.dispatch_action(Action::Rate0, cx)
+                            });
+                        }
                     }
                 })),
         )
@@ -164,18 +253,34 @@ fn render_color_label_section(
         return div()
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_1()
+            .py_2()
             .child(section_header("颜色标签"))
-            .child(div().text_xs().text_color(theme::colors().text_muted).child("未选择图片"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::colors().text_muted)
+                    .child("未选择图片"),
+            )
             .into_any_element();
     }
 
     let current_label = focused.map(|m| m.color_label).unwrap_or(ColorLabel::None);
     let vh = cx.entity().downgrade();
 
-    fn label_dot(color: Hsla, action: Action, id: &str, is_selected: bool, cx: &mut Context<RootView>) -> impl IntoElement {
+    fn label_dot(
+        color: Hsla,
+        action: Action,
+        id: &str,
+        is_selected: bool,
+        cx: &mut Context<RootView>,
+    ) -> impl IntoElement {
         let size = if is_selected { px(28.) } else { px(22.) };
-        let border_color = if is_selected { theme::colors().text } else { theme::colors().border_variant };
+        let border_color = if is_selected {
+            theme::colors().text_accent
+        } else {
+            theme::colors().border_variant
+        };
         let border_w = if is_selected { px(3.) } else { px(1.) };
         div()
             .id(ElementId::Name(id.into()))
@@ -195,12 +300,12 @@ fn render_color_label_section(
     div()
         .flex()
         .flex_col()
-        .gap_2()
+        .gap_1()
+        .py_2()
         .child(section_header("颜色标签"))
         .child(
-            div()
-                .flex()
-                .gap_2()
+            h_flex()
+                .justify_between()
                 .child(label_dot(*theme::colors::LABEL_RED, Action::LabelRed, "color-label-red", current_label == ColorLabel::Red, cx))
                 .child(label_dot(*theme::colors::LABEL_YELLOW, Action::LabelYellow, "color-label-yellow", current_label == ColorLabel::Yellow, cx))
                 .child(label_dot(*theme::colors::LABEL_GREEN, Action::LabelGreen, "color-label-green", current_label == ColorLabel::Green, cx))
@@ -213,7 +318,11 @@ fn render_color_label_section(
                 .child(clear_link("clear-label", "清除标签", {
                     let vh = vh.clone();
                     move |_, _w, cx| {
-                        if let Some(entity) = vh.upgrade() { cx.update_entity(&entity, |view, cx| view.dispatch_action(Action::LabelNone, cx)); }
+                        if let Some(entity) = vh.upgrade() {
+                            cx.update_entity(&entity, |view, cx| {
+                                view.dispatch_action(Action::LabelNone, cx)
+                            });
+                        }
                     }
                 })),
         )
@@ -230,9 +339,15 @@ fn render_flag_section(
         return div()
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_1()
+            .py_2()
             .child(section_header("旗标"))
-            .child(div().text_xs().text_color(theme::colors().text_muted).child("未选择图片"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::colors().text_muted)
+                    .child("未选择图片"),
+            )
             .into_any_element();
     }
 
@@ -242,13 +357,12 @@ fn render_flag_section(
     div()
         .flex()
         .flex_col()
-        .gap_2()
+        .gap_1()
+        .py_2()
         .child(section_header("旗标"))
         .child(
-            div()
-                .flex()
-                .flex_row()
-                .gap_2()
+            h_flex()
+                .justify_between()
                 .child(segmented_button(
                     "flag-pick",
                     "入选",
@@ -256,7 +370,11 @@ fn render_flag_section(
                     {
                         let vh = vh.clone();
                         move |_, _window, cx| {
-                            if let Some(entity) = vh.upgrade() { cx.update_entity(&entity, |view, cx| view.dispatch_action(Action::FlagPick, cx)); }
+                            if let Some(entity) = vh.upgrade() {
+                                cx.update_entity(&entity, |view, cx| {
+                                    view.dispatch_action(Action::FlagPick, cx)
+                                });
+                            }
                         }
                     },
                 ))
@@ -267,7 +385,11 @@ fn render_flag_section(
                     {
                         let vh = vh.clone();
                         move |_, _window, cx| {
-                            if let Some(entity) = vh.upgrade() { cx.update_entity(&entity, |view, cx| view.dispatch_action(Action::FlagReject, cx)); }
+                            if let Some(entity) = vh.upgrade() {
+                                cx.update_entity(&entity, |view, cx| {
+                                    view.dispatch_action(Action::FlagReject, cx)
+                                });
+                            }
                         }
                     },
                 ))
@@ -278,7 +400,11 @@ fn render_flag_section(
                     {
                         let vh = vh.clone();
                         move |_, _window, cx| {
-                            if let Some(entity) = vh.upgrade() { cx.update_entity(&entity, |view, cx| view.dispatch_action(Action::FlagNone, cx)); }
+                            if let Some(entity) = vh.upgrade() {
+                                cx.update_entity(&entity, |view, cx| {
+                                    view.dispatch_action(Action::FlagNone, cx)
+                                });
+                            }
                         }
                     },
                 )),
