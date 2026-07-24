@@ -34,6 +34,7 @@ pub struct RootView {
     pub config: AppConfig,
     pub config_path: PathBuf,
     pub worker: Worker,
+    pub exif_cache: Option<photo_tool_core::cache::ExifCache>,
     pub thumbnail_cache: Option<ThumbnailCache>,
     pub dir_path: Option<PathBuf>,
     pub captures: Vec<CaptureMeta>,
@@ -115,6 +116,7 @@ impl RootView {
         let mut this = Self {
             config,
             config_path,
+            exif_cache: None,
             worker,
             thumbnail_cache,
             dir_path: None,
@@ -184,12 +186,20 @@ impl RootView {
                         let metas: Vec<CaptureMeta> = captures
                             .iter()
                             .enumerate()
-                            .map(|(i, c)| {
+                            .map(|(_i, c)| {
                                 let mut meta = CaptureMeta::from(c);
-                                meta.index = i;
-                                meta.enrich_with_xmp(); // 快：只读 sidecar
-                                // 从缓存获取 EXIF（未命中则提取并写入缓存）
-                                if let Some(ref cache) = exif_cache {
+                                if let Some(cache) = &exif_cache {
+                                    let primary = &c.source_files[c.primary_index];
+                                    let xmp = cache
+                                        .get_or_read_xmp(&primary.path)
+                                        .unwrap_or_default();
+                                    meta.rating = xmp.rating();
+                                    meta.color_label = xmp.color_label();
+                                    meta.flag = xmp.flag();
+                                } else {
+                                    meta.enrich_with_xmp(); // 兜底：从旁车文件读取
+                                }
+                                if let Some(cache) = &exif_cache {
                                     let primary = &c.source_files[c.primary_index];
                                     let exif = cache
                                         .get_or_extract(&primary.path, &primary.format)
@@ -199,13 +209,14 @@ impl RootView {
                                 meta
                             })
                             .collect();
-                        (path, metas)
+                        (path, metas, exif_cache)
                     })
             },
             |this, result, cx| {
                 match result {
-                    Ok((dir, metas)) => {
+                    Ok((dir, metas, cache)) => {
                         this.captures = metas;
+                        this.exif_cache = cache;
                         this.dir_path = Some(dir.clone());
                         // 记住最后打开的目录，下次启动自动恢复
                         let dir_str = dir.to_string_lossy().to_string();
