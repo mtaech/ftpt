@@ -141,7 +141,7 @@ fn settings_page(vh: WeakEntity<RootView>) -> SettingPage {
         .collect();
     let font_field = {
         let vh = vh.clone();
-        SettingField::<SharedString>::dropdown(
+        SettingField::<SharedString>::scrollable_dropdown(
             fonts,
             {
                 let vh = vh.clone();
