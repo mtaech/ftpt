@@ -4,6 +4,8 @@ use thiserror::Error;
 
 use crate::domain::{ImageFormat, SourceFile};
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 #[derive(Error, Debug)]
 pub enum ThumbnailError {
     #[error("IO error: {0}")]
@@ -12,8 +14,9 @@ pub enum ThumbnailError {
     Image(#[from] image::ImageError),
     #[error("RAW extraction error: {0}")]
     Raw(String),
+    #[error("Cancelled")]
+    Cancelled,
 }
-
 /// 缩略图缓存管理器
 #[derive(Clone)]
 pub struct ThumbnailCache {
@@ -27,11 +30,18 @@ impl ThumbnailCache {
         Self { cache_dir }
     }
 
-    /// 获取或生成缩略图，返回 JPEG 字节
+    /// 获取缓存目录路径
+    pub fn cache_dir(&self) -> &Path {
+        &self.cache_dir
+    }
+
+    /// 获取或生成缩略图，返回 JPEG 字节。
+    /// `cancel` 为合作式取消令牌：Some 时每次慢操作前检查，已取消则返回 `Cancelled` 错误。
     pub fn get_or_generate(
         &self,
         source: &SourceFile,
         size: u32,
+        cancel: Option<&AtomicBool>,
     ) -> Result<Vec<u8>, ThumbnailError> {
         let cache_key = self.cache_key(source, size);
         let cache_path = self.cache_dir.join(&cache_key);
@@ -40,7 +50,7 @@ impl ThumbnailCache {
             return Ok(std::fs::read(&cache_path)?);
         }
 
-        let thumb_bytes = self.generate_thumbnail(source, size)?;
+        let thumb_bytes = self.generate_thumbnail(source, size, cancel)?;
         std::fs::write(&cache_path, &thumb_bytes)?;
         Ok(thumb_bytes)
     }
@@ -60,52 +70,49 @@ impl ThumbnailCache {
         &self,
         source: &SourceFile,
         size: u32,
+        cancel: Option<&AtomicBool>,
     ) -> Result<Vec<u8>, ThumbnailError> {
         match source.format {
-            ImageFormat::Raw(_) => self.generate_raw_thumbnail(&source.path, size),
-            _ => self.generate_image_thumbnail(&source.path, size),
+            ImageFormat::Raw(_) => self.generate_raw_thumbnail(&source.path, size, cancel),
+            _ => self.generate_image_thumbnail(&source.path, size, cancel),
         }
     }
 
     /// RAW 格式：优先内嵌 JPEG，失败时回落完整解码
-    fn generate_raw_thumbnail(&self, path: &Path, size: u32) -> Result<Vec<u8>, ThumbnailError> {
+    fn generate_raw_thumbnail(&self, path: &Path, size: u32, cancel: Option<&AtomicBool>) -> Result<Vec<u8>, ThumbnailError> {
         let path_str = path.to_string_lossy();
-        // 首选：提取相机内嵌 JPEG 预览（最快，已含降噪/锐化/色彩）
         match rawlib::extract_thumbnail(path_str.as_ref()) {
             Ok(jpeg_bytes) => return self.resize_jpeg(&jpeg_bytes, size),
             Err(e) => {
-                tracing::warn!(
-                    "内嵌缩略图提取失败，回退完整解码: {} — {e}",
-                    path.display()
-                );
+                tracing::warn!("内嵌缩略图提取失败，回退完整解码: {} — {e}", path.display());
             }
         }
-        // 回落：完整 RAW 解码（preview 预设：half_size + bilinear + 8bit）
+        // 完整 RAW 解码前检查取消
+        if cancel.map_or(false, |c| c.load(Ordering::Relaxed)) {
+            return Err(ThumbnailError::Cancelled);
+        }
         let img = rawlib::extract_image_with_options(
             path_str.as_ref(),
             &rawlib::DecodeOptions::preview(),
         )
         .map_err(|e| ThumbnailError::Raw(e.to_string()))?;
         tracing::info!("完整解码成功: {} ({}×{})", path.display(), img.width, img.height);
-        // 将 bitmap 编码为 JPEG 并缩放到目标尺寸
         encode_bitmap_to_jpeg(&img, size)
     }
 
     /// 常规图片格式：JPEG 走 DCT 降采样快路径，其余全解码
-    fn generate_image_thumbnail(&self, path: &Path, size: u32) -> Result<Vec<u8>, ThumbnailError> {
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_lowercase());
+    fn generate_image_thumbnail(&self, path: &Path, size: u32, cancel: Option<&AtomicBool>) -> Result<Vec<u8>, ThumbnailError> {
+        let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase());
 
-        // JPEG 快路径：DCT 降采样（1/2, 1/4, 1/8），比全解码快 10-20x
         if matches!(ext.as_deref(), Some("jpg" | "jpeg")) {
             if let Ok(bytes) = self.decode_jpeg_scaled(path, size) {
                 return Ok(bytes);
             }
-            // 失败时回退全解码
         }
 
+        if cancel.map_or(false, |c| c.load(Ordering::Relaxed)) {
+            return Err(ThumbnailError::Cancelled);
+        }
         let img = image::open(path)?;
         let resized = img.thumbnail(size, size);
         let mut buf = Cursor::new(Vec::new());
@@ -252,8 +259,9 @@ impl ThumbnailCache {
             }
         }
         Ok(())
-    }
 }
+}
+
 
 
 /// 从 RAW 提取用于预览的图像（优先内嵌 JPEG，失败时回落完整解码）。
@@ -337,7 +345,7 @@ mod tests {
             file_size: None,
         };
 
-        let result = cache.get_or_generate(&source, 64).unwrap();
+        let result = cache.get_or_generate(&source, 64, None).unwrap();
         assert!(!result.is_empty(), "thumbnail bytes should not be empty");
     }
 
@@ -356,8 +364,8 @@ mod tests {
             file_size: None,
         };
 
-        let first = cache.get_or_generate(&source, 64).unwrap();
-        let second = cache.get_or_generate(&source, 64).unwrap();
+        let first = cache.get_or_generate(&source, 64, None).unwrap();
+        let second = cache.get_or_generate(&source, 64, None).unwrap();
         assert_eq!(first, second, "cache hit should return identical bytes");
     }
 
@@ -376,8 +384,8 @@ mod tests {
             file_size: None,
         };
 
-        let small = cache.get_or_generate(&source, 32).unwrap();
-        let large = cache.get_or_generate(&source, 64).unwrap();
+        let small = cache.get_or_generate(&source, 32, None).unwrap();
+        let large = cache.get_or_generate(&source, 64, None).unwrap();
         assert_ne!(
             small.len(),
             large.len(),
@@ -400,7 +408,7 @@ mod tests {
             file_size: None,
         };
 
-        let _ = cache.get_or_generate(&source, 64).unwrap();
+        let _ = cache.get_or_generate(&source, 64, None).unwrap();
         let (count, _size) = cache.stats().unwrap();
         assert_eq!(count, 1, "should have 1 cached file");
 
@@ -425,7 +433,7 @@ mod tests {
                 is_sidecar: false,
                 file_size: None,
             };
-            let _ = cache.get_or_generate(&source, 64).unwrap();
+            let _ = cache.get_or_generate(&source, 64, None).unwrap();
         }
 
         let (count_before, total_size) = cache.stats().unwrap();
@@ -447,7 +455,7 @@ mod tests {
             file_size: None,
         };
 
-        let result = cache.get_or_generate(&source, 64);
+        let result = cache.get_or_generate(&source, 64, None);
         assert!(result.is_err(), "should error on nonexistent file");
     }
 
@@ -471,7 +479,7 @@ mod tests {
             is_sidecar: false,
             file_size: None,
         };
-        let bytes = cache.get_or_generate(&source, 128).unwrap();
+        let bytes = cache.get_or_generate(&source, 128, None).unwrap();
         let out = image::load_from_memory(&bytes).unwrap().to_rgb8();
         for row in out.rows() {
             let mut row = row;
@@ -508,7 +516,7 @@ mod tests {
         let cache = ThumbnailCache::new(dir.path().join("thumbs"));
         for capture in &captures {
             let primary = &capture.source_files[capture.primary_index];
-            let bytes = cache.get_or_generate(primary, 220).unwrap();
+            let bytes = cache.get_or_generate(primary, 220, None).unwrap();
             assert!(bytes.len() > 100, "缩略图字节数异常：{}", bytes.len());
             assert_eq!(&bytes[..2], &[0xFF, 0xD8], "应为 JPEG 头");
         }

@@ -114,6 +114,50 @@ pub enum OpError {
 - `scanner::apply_filter` 当前**仅实现 `text_search`**，`FilterCriteria` 其余字段未生效
 - 使用了 let-chains（edition 2024 特性），如 `config.rs` 便携路径判断
 
+### 调试：GPUI 事件处理器无声失败
+
+GPUI 会**静默吞掉**事件处理器（`on_click`、`cx.listener` 等）中的 panic——应用不崩溃，只是"点了没反应"。排查这类问题**必须打日志**而非猜：
+
+```rust
+.on_click({
+    move |_, window, cx| {
+        tracing::info!("STEP 1: click handler fired");
+        do_something(window, cx);
+        tracing::info!("STEP 2: do_something returned");
+    }
+})
+```
+
+日志没出现 = 事件没触发。日志只到 STEP 1 = 中间某步 panic 了。
+
+终端中运行：`$env:RUST_LOG="info"; cargo run -p photo-tool-app`
+
+### gpui-component：`open_window` 必须在 `cx.spawn` 里
+
+`cx.open_window()` **不能**直接在 `app.run()` 回调中调用，必须放在 `cx.spawn(async …)` 内，否则 `Root` 不会正确注册为窗口根视图，导致 `window.root::<Root>()` 返回 `None`——所有依赖 `Root` 的功能（Dialog、Sheet、Notification 等）全部静默失效。
+
+```rust
+// ❌ 错误 —— Root 不会注册
+app.run(move |cx| {
+    cx.open_window(..., |window, cx| {
+        cx.new(|cx| Root::new(view, window, cx))
+    })
+});
+
+// ✅ 正确 —— Quick Start 文档的写法
+app.run(move |cx| {
+    gpui_component::init(cx);
+    cx.spawn(async move |cx| {
+        cx.update(|cx| {
+            cx.open_window(..., |window, cx| {
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        });
+    })
+    .detach();
+});
+```
+
 ---
 
 ## 重要文件

@@ -1,17 +1,11 @@
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::select::Select;
-use gpui_component::{IconName, Selectable};
-use gpui_component::Sizable;
-use gpui_component::h_flex;
-
-use photo_tool_core::domain::SortBy;
+use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
+use gpui_component::{h_flex, v_flex, IconName, Sizable};
 
 use crate::action::Action;
-use crate::state::app::RootView;
+use crate::state::app::{RootView, SYSTEM_FONTS};
 use crate::ui::theme;
-
-/// 渲染顶部工具栏：目录信息 | 视图切换 tab | 操作区
 /// 交易终端风格：近黑底色、下划线 tab、等宽计数、icon-only 按钮
 pub fn render_toolbar(
     view: &RootView,
@@ -105,36 +99,14 @@ pub fn render_toolbar(
             h_flex()
                 .gap_1()
                 .child(
-                    Button::new("sort-btn")
-                        .icon(IconName::SortAscending)
-                        .ghost()
-                        .small()
-                        .label(match view.sort_by {
-                            SortBy::FileName => "文件名",
-                            SortBy::DateTaken => "拍摄日期",
-                            SortBy::FileSize => "文件大小",
-                            SortBy::Rating => "评分",
-                            SortBy::Modified => "修改时间",
-                        })
-                        .tooltip("排序方式")
-                        .on_click({
-                            let vh = vh.clone();
-                            move |_, _window, cx| {
-                                if let Some(entity) = vh.upgrade() {
-                                    cx.update_entity(&entity, |view, cx| {
-                                        view.sort_by = match view.sort_by {
-                                            SortBy::FileName => SortBy::DateTaken,
-                                            SortBy::DateTaken => SortBy::FileSize,
-                                            SortBy::FileSize => SortBy::Rating,
-                                            SortBy::Rating => SortBy::Modified,
-                                            SortBy::Modified => SortBy::FileName,
-                                        };
-                                        view.apply_filter_and_sort();
-                                        cx.notify();
-                                    });
-                                }
-                            }
-                        }),
+                    div()
+                        .w(px(120.))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme::colors().text)
+                                .child("排序: 文件名")
+                        ),
                 )
                 .child(
                     Button::new("refresh-btn")
@@ -156,51 +128,148 @@ pub fn render_toolbar(
         )
 }
 
-// ── Settings Dialog Overlay ──────────────────────────────────────────
+// ── 设置弹窗（gpui-component Settings，story 风格）────────────────
 
-/// 单选组渲染 helper：横排可选按钮，选中态高亮，点击直接写 View config
-fn settings_radio_row(
-    vh: WeakEntity<RootView>,
-    label: &'static str,
-    options: &'static [(&'static str, &'static str)],
-    current: &str,
-    on_pick: impl Fn(&str, &mut RootView) + 'static + Clone,
-) -> impl IntoElement {
-    h_flex()
-        .items_center()
-        .justify_between()
-        .child(div().text_color(theme::colors().text_muted).child(label))
-        .child(
-            h_flex()
-                .gap_1()
-                .children(options.iter().map(move |(id, display)| {
-                    let id = id.to_string();
-                    let display = display.to_string();
-                    let is_selected = current == id;
-                    let vh = vh.clone();
-                    let act = on_pick.clone();
-                    Button::new(format!("setting-{id}"))
-                        .ghost()
-                        .selected(is_selected)
-                        .label(display)
-                        .on_click(move |_, _, cx| {
-                            if let Some(e) = vh.upgrade() {
-                                cx.update_entity(&e, |view, cx| {
-                                    act(&id, view);
-                                    view.save_config();
-                                    cx.notify();
-                                });
-                            }
+fn settings_page(vh: WeakEntity<RootView>) -> SettingPage {
+    // ── 字体下拉 ──
+    let fonts: Vec<(SharedString, SharedString)> = SYSTEM_FONTS
+        .iter()
+        .map(|f| {
+            let s: SharedString = f.clone().into();
+            (s.clone(), s)
+        })
+        .collect();
+    let font_field = {
+        let vh = vh.clone();
+        SettingField::<SharedString>::dropdown(
+            fonts,
+            {
+                let vh = vh.clone();
+                move |app: &App| {
+                    vh.upgrade()
+                        .map(|e| e.read(app).config.font_family.clone().into())
+                        .unwrap_or_default()
+                }
+            },
+            {
+                let vh = vh.clone();
+                move |value: SharedString, app: &mut App| {
+                    if let Some(e) = vh.upgrade() {
+                        app.update_entity(&e, |view, _cx| {
+                            view.config.font_family = value.to_string();
+                            view.save_config();
+                        });
+                    }
+                }
+            },
+        )
+    };
+
+    // ── 删除模式 ──
+    let delete_field = {
+        let vh = vh.clone();
+        SettingField::<SharedString>::dropdown(
+            vec![
+                ("trash".into(), "回收站".into()),
+                ("permanent".into(), "永久删除".into()),
+            ],
+            {
+                let vh = vh.clone();
+                move |app: &App| {
+                    vh.upgrade()
+                        .map(|e| e.read(app).config.default_delete_mode.clone().into())
+                        .unwrap_or_default()
+                }
+            },
+            {
+                let vh = vh.clone();
+                move |value: SharedString, app: &mut App| {
+                    if let Some(e) = vh.upgrade() {
+                        app.update_entity(&e, |view, _cx| {
+                            view.config.default_delete_mode = value.to_string();
+                            view.save_config();
+                        });
+                    }
+                }
+            },
+        )
+    };
+
+    // ── 缓存大小 ──
+    let cache_field = {
+        let vh = vh.clone();
+        SettingField::<SharedString>::dropdown(
+            vec![
+                ("256".into(), "256 MB".into()),
+                ("512".into(), "512 MB".into()),
+                ("1024".into(), "1 GB".into()),
+                ("2048".into(), "2 GB".into()),
+            ],
+            {
+                let vh = vh.clone();
+                move |app: &App| {
+                    vh.upgrade()
+                        .map(|e| {
+                            let size = e.read(app).config.max_cache_size_mb;
+                            SharedString::from(size.to_string())
                         })
-                })),
+                        .unwrap_or_default()
+                }
+            },
+            {
+                let vh = vh.clone();
+                move |value: SharedString, app: &mut App| {
+                    if let Ok(size) = value.parse::<u64>() {
+                        if let Some(e) = vh.upgrade() {
+                            app.update_entity(&e, |view, _cx| {
+                                view.config.max_cache_size_mb = size;
+                                view.save_config();
+                            });
+                        }
+                    }
+                }
+            },
+        )
+    };
+
+    SettingPage::new("通用")
+        .icon(IconName::Settings)
+        .description("应用通用设置")
+        .default_open(true)
+        .resettable(false)
+        .group(
+            SettingGroup::new()
+                .title("界面")
+                .description("字体与外观")
+                .item(
+                    SettingItem::new("字体", font_field)
+                        .description("应用界面字体"),
+                ),
+        )
+        .group(
+            SettingGroup::new()
+                .title("文件操作")
+                .description("删除与移动")
+                .item(
+                    SettingItem::new("默认删除模式", delete_field)
+                        .description("删除文件时的默认操作"),
+                ),
+        )
+        .group(
+            SettingGroup::new()
+                .title("缓存")
+                .description("缩略图缓存")
+                .item(
+                    SettingItem::new("最大缓存", cache_field)
+                        .description("缩略图磁盘缓存上限"),
+                ),
         )
 }
 
-/// 渲染设置弹窗：卡片式布局，Escape/X 关闭，不拦截 Select 子弹出层。
-pub fn render_settings_overlay(view: &RootView, cx: &mut Context<RootView>) -> impl IntoElement {
+pub fn render_settings_overlay(_view: &RootView, cx: &mut Context<RootView>) -> impl IntoElement {
     let vh = cx.entity().downgrade();
-    let delete_mode = view.config.default_delete_mode.clone();
-    let cache_size = view.config.max_cache_size_mb;
+    let colors = theme::colors();
+    let settings = Settings::new("app-settings").page(settings_page(vh));
 
     div()
         .size_full()
@@ -208,112 +277,61 @@ pub fn render_settings_overlay(view: &RootView, cx: &mut Context<RootView>) -> i
         .flex()
         .items_center()
         .justify_center()
-        .bg(rgba(0x00000055))
+        .bg(rgba(0x00000033))
+        .id("settings-backdrop")
+        .occlude()
+        .on_scroll_wheel(|_, _, _| {})
+        .on_click(cx.listener(|v, _: &ClickEvent, _w, cx| {
+            v.show_settings = false;
+            cx.notify();
+        }))
+        .on_key_down(cx.listener(|v, event: &KeyDownEvent, _w, cx| {
+            if event.keystroke.key.as_str() == "escape" {
+                v.show_settings = false;
+                cx.notify();
+            }
+        }))
         .child(
             div()
-                .w(px(560.))
-                .bg(theme::colors().surface_background)
-                .rounded_md()
+                .w(px(720.))
+                .h(px(560.))
+                .bg(colors.elevated_surface_background)
+                .rounded_lg()
                 .border_1()
-                .border_color(theme::colors().border_variant)
+                .border_color(colors.border)
                 .shadow(theme::ElevationIndex::ModalSurface.shadow())
-                .p_4()
-                .gap_3()
-                .flex()
-                .flex_col()
-                .on_key_down(cx.listener(move |v, event: &KeyDownEvent, _w, cx| {
-                    if event.keystroke.key.as_str() == "escape" {
-                        v.show_settings = false;
-                        cx.notify();
-                    }
-                }))
+                .overflow_hidden()
+                .id("settings-card")
+                .on_click(|_, _, cx| cx.stop_propagation())
                 .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .child(div().text_lg().child("设置"))
+                    v_flex()
+                        .size_full()
                         .child(
-                            Button::new("settings-x")
-                                .icon(IconName::Close)
-                                .ghost()
-                                .on_click(cx.listener(move |v, _, _w, cx| {
-                                    v.show_settings = false;
-                                    cx.notify();
-                                })),
-                        ),
-                )
-                .child(div().h(px(1.)).w_full().bg(theme::colors().border_variant))
-                .child(section("界面"))
-                .child(
-                    h_flex()
-                        .items_center()
-                        .justify_between()
-                        .child(div().text_color(theme::colors().text_muted).child("字体"))
-                        .child(
-                            div()
-                                .w(px(320.))
-                                .child(Select::new(&view.font_select).search_placeholder("输入字体名过滤")),
-                        ),
-                )
-                .child(div().h(px(1.)).w_full().bg(theme::colors().border_variant))
-                .child(section("文件操作"))
-                .child(settings_radio_row(
-                    vh.clone(),
-                    "默认删除模式",
-                    &[("trash", "回收站"), ("permanent", "永久删除")],
-                    &delete_mode,
-                    |id, view| view.config.default_delete_mode = id.to_string(),
-                ))
-                .child(section("缓存"))
-                .child(
-                    h_flex()
-                        .items_center()
-                        .justify_between()
-                        .child(div().text_color(theme::colors().text_muted).child("最大缓存"))
-                        .child(
+                            // ── Header ──
                             h_flex()
-                                .gap_1()
-                                .children([256u64, 512, 1024, 2048].map(|opt| {
-                                    let vh = vh.clone();
-                                    Button::new(format!("cache-{opt}"))
+                                .items_center()
+                                .justify_between()
+                                .px_4()
+                                .py_3()
+                                .border_b_1()
+                                .border_color(colors.border_variant)
+                                .child(
+                                    div()
+                                        .text_base()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child("设置"),
+                                )
+                                .child(
+                                    Button::new("settings-x")
+                                        .icon(IconName::Close)
                                         .ghost()
-                                        .selected(cache_size == opt)
-                                        .label(format!("{} MB", opt))
-                                        .on_click(move |_, _, cx| {
-                                            if let Some(e) = vh.upgrade() {
-                                                cx.update_entity(&e, |view, cx| {
-                                                    view.config.max_cache_size_mb = opt;
-                                                    view.save_config();
-                                                    cx.notify();
-                                                });
-                                            }
-                                        })
-                                })),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .justify_end()
-                        .pt_3()
-                        .child(
-                            Button::new("settings-close")
-                                .primary()
-                                .label("关闭")
-                                .on_click(cx.listener(move |v, _, _w, cx| {
-                                    v.show_settings = false;
-                                    cx.notify();
-                                })),
-                        ),
+                                        .on_click(cx.listener(|v, _, _w, cx| {
+                                            v.show_settings = false;
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(settings),
                 ),
         )
 }
-
-fn section(label: &str) -> impl IntoElement {
-    div()
-        .text_color(theme::colors().text_muted)
-        .font_weight(FontWeight::MEDIUM)
-        .child(label.to_string())
-}
-

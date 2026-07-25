@@ -62,6 +62,9 @@ pub struct AppConfig {
     pub thumbnail_cache_mode: ThumbnailCacheMode,
     pub max_cache_size_mb: u64,
     pub font_family: String,
+    /// 自定义缩略图缓存目录。None 时用 config 所在目录的 thumbnails/ 子目录。
+    #[serde(default)]
+    pub cache_directory: Option<String>,
 }
 
 fn default_font_family() -> String {
@@ -85,6 +88,7 @@ impl Default for AppConfig {
             thumbnail_cache_mode: ThumbnailCacheMode::default(),
             max_cache_size_mb: 500,
             font_family: default_font_family(),
+            cache_directory: None,
         }
     }
 }

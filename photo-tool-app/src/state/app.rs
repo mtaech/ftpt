@@ -480,7 +480,7 @@ impl RootView {
             cx,
             move || {
                 cache
-                    .get_or_generate(&source, 1600)
+                    .get_or_generate(&source, 1600, None)
                     .map_err(|e| tracing::warn!("预览图生成失败: {e}"))
                     .ok()
             },
@@ -525,7 +525,7 @@ impl RootView {
             cx,
             move || {
                 cache
-                    .get_or_generate(&source, thumbnail_size * 2)
+                    .get_or_generate(&source, thumbnail_size * 2, None)
                     .map_err(|e| {
                         tracing::warn!("懒加载缩略图失败 {}: {e}", source.path.display());
                     })
@@ -591,7 +591,7 @@ impl RootView {
             self.worker.spawn(cx, move || {
                 // 2x 生成：高 DPI 下 1x 缩略图拉伸会模糊
                 cache_clone
-                    .get_or_generate(&source, thumbnail_size * 2)
+                    .get_or_generate(&source, thumbnail_size * 2, None)
                     .map_err(|e| {
                         tracing::warn!("缩略图生成失败 {}: {e}", path_display.display());
                     })

@@ -32,7 +32,6 @@ fn main() {
     let app = gpui_platform::application().with_assets(crate::assets::AppAssets);
     app.run(move |cx| {
         cx.activate(true);
-        let cp = config_path.clone();
         gpui_component::init(cx);
         // 默认亮色主题，从配置文件恢复用户保存的主题
         let gc_mode = match app_config.theme {
@@ -51,24 +50,28 @@ fn main() {
             config::Theme::Dark => crate::ui::theme::ThemeMode::Dark,
         };
         crate::ui::theme::set_mode(pt_mode);
+        let cp = config_path.clone();
         let ac = app_config.clone();
 
-        // 窗口图标通过 build.rs 嵌入 Windows .ico 资源，不在此处设置
-        // （GPUI WindowOptions::icon 仅 X11 有效）
-
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Maximized(Bounds {
-                    origin: Default::default(),
-                    size: size(px(1400.), px(900.)),
-                })),
-                ..Default::default()
-            },
-            move |window, cx| {
-                let view = cx.new(|cx| RootView::new(window, cx, cp.clone(), ac.clone()));
-                cx.new(|cx| gpui_component::Root::new(view, window, cx))
-            },
-        )
-        .unwrap();
+        cx.spawn(async move |cx| {
+            cx.update(|cx| {
+                cx.open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Maximized(Bounds {
+                            origin: Default::default(),
+                            size: size(px(1400.), px(900.)),
+                        })),
+                        ..Default::default()
+                    },
+                    move |window, cx| {
+                        let view =
+                            cx.new(|cx| RootView::new(window, cx, cp.clone(), ac.clone()));
+                        cx.new(|cx| gpui_component::Root::new(view, window, cx))
+                    },
+                )
+                .unwrap();
+            });
+        })
+        .detach();
     });
 }
