@@ -54,7 +54,14 @@ pub fn render_batch_ops_section(
                 .child(
                     Button::new("batch-compare-dir")
                         .ghost()
-                        .tooltip("点击选择要对比的目录")
+                        .tooltip({
+                            let tip = if view.batch_compare_dir.is_empty() {
+                                "点击选择要对比的目录".to_string()
+                            } else {
+                                format!("对比目录: {}", view.batch_compare_dir)
+                            };
+                            SharedString::from(tip)
+                        })
                         .label(if compare_dir.is_empty() {
                             SharedString::from("选择对比目录...")
                         } else {
