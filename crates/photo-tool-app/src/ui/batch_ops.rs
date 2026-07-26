@@ -7,6 +7,25 @@ use photo_domain::BatchOpType;
 use crate::state::app::RootView;
 use crate::ui::theme;
 
+/// 支持的图片格式列表（显示名, 存入值）
+const FORMAT_OPTIONS: &[(&str, &str)] = &[
+    ("全部类型", ""),
+    ("JPG", "JPG"),
+    ("PNG", "PNG"),
+    ("TIFF", "TIFF"),
+    ("HEIF", "HEIF"),
+    ("WebP", "WebP"),
+    ("BMP", "BMP"),
+    ("GIF", "GIF"),
+    ("RW2", "RW2"),
+    ("CR2", "CR2"),
+    ("CR3", "CR3"),
+    ("NEF", "NEF"),
+    ("ARW", "ARW"),
+    ("ORF", "ORF"),
+    ("DNG", "DNG"),
+];
+
 /// 渲染左侧边栏的"文件操作" tab
 pub fn render_batch_ops_section(
     view: &RootView,
@@ -14,18 +33,18 @@ pub fn render_batch_ops_section(
 ) -> impl IntoElement {
     let vh = cx.entity().downgrade();
 
-    let compare_dir = view.batch_compare_dir.clone();
-    let source_fmt = view.batch_source_format.clone();
-    let compare_fmt = view.batch_compare_format.clone();
-    let op_type = view.batch_op_type;
-    let in_progress = view.batch_in_progress;
-    let has_results = !view.batch_results.is_empty();
-    let results = view.batch_results.clone();
     let compare_dir: SharedString = if view.batch_compare_dir.is_empty() {
         "选择对比目录...".into()
     } else {
         view.batch_compare_dir.clone().into()
     };
+    let source_fmt = view.batch_source_format.clone();
+    let compare_fmt = view.batch_compare_format.clone();
+    let op_type = view.batch_op_type;
+    let has_results = !view.batch_results.is_empty();
+    let results = view.batch_results.clone();
+    let in_progress = view.batch_in_progress;
+
     v_flex()
         .gap_2()
         // ── 对比目录 ──
@@ -57,7 +76,7 @@ pub fn render_batch_ops_section(
                                 } else {
                                     theme::colors().text
                                 })
-                                .child(compare_dir.clone())
+                                .child(compare_dir)
                                 .cursor_pointer()
                                 .on_click(move |_, _window, cx| {
                                     if let Some(e) = vh.upgrade() {
@@ -69,12 +88,24 @@ pub fn render_batch_ops_section(
                         }),
                 ),
         )
-        // ── 格式设置 ──
+        // ── 格式下拉 ──
         .child(
             h_flex()
                 .gap_2()
-                .child(format_input("源格式", source_fmt, "留空=全部"))
-                .child(format_input("对比格式", compare_fmt, "留空=全部")),
+                .child(format_dropdown(
+                    "源格式",
+                    &source_fmt,
+                    "batch-source-fmt",
+                    view.batch_source_fmt_open,
+                    vh.clone(),
+                ))
+                .child(format_dropdown(
+                    "对比格式",
+                    &compare_fmt,
+                    "batch-compare-fmt",
+                    view.batch_compare_fmt_open,
+                    vh.clone(),
+                )),
         )
         // ── 操作类型下拉 ──
         .child(
@@ -87,45 +118,7 @@ pub fn render_batch_ops_section(
                         .text_color(theme::colors().text_muted)
                         .child("操作类型"),
                 )
-                .child({
-                    let items: Vec<gpui::AnyElement> = BatchOpType::all()
-                        .iter()
-                        .map(|op| {
-                            let vh = vh.clone();
-                            let is_active = op_type == *op;
-                            let label: SharedString = op.to_string().into();
-                            div()
-                                .id(label.clone())
-                                .px_2()
-                                .py_1()
-                                .rounded_sm()
-                                .text_xs()
-                                .cursor_pointer()
-                                .text_color(if is_active {
-                                    theme::colors().text_accent
-                                } else {
-                                    theme::colors().text
-                                })
-                                .bg(if is_active {
-                                    theme::accent_dim()
-                                } else {
-                                    hsla(0., 0., 0., 0.)
-                                })
-                                .hover(|style| style.bg(theme::colors().element_hover))
-                                .on_click(move |_, _window, cx| {
-                                    if let Some(e) = vh.upgrade() {
-                                        cx.update_entity(&e, |view, cx| {
-                                            view.batch_op_type = *op;
-                                            cx.notify();
-                                        });
-                                    }
-                                })
-                                .child(label)
-                                .into_any_element()
-                        })
-                        .collect();
-                    v_flex().gap_1().children(items)
-                }),
+                .child(op_type_dropdown(op_type, view.batch_op_dropdown_open, vh.clone())),
         )
         // ── 开始执行按钮 ──
         .child(
@@ -198,14 +191,21 @@ pub fn render_batch_ops_section(
         })
 }
 
-/// 格式输入框组件（已去消所有借用，只持 owned String）
-fn format_input(label: &'static str, value: String, placeholder: &'static str) -> impl IntoElement {
-    let is_empty = value.is_empty();
-    let display: SharedString = if is_empty {
-        placeholder.into()
+/// 格式选择下拉框
+fn format_dropdown(
+    label: &'static str,
+    current: &str,
+    id_suffix: &'static str,
+    is_open: bool,
+    vh: WeakEntity<RootView>,
+) -> impl IntoElement {
+    let display: SharedString = if current.is_empty() {
+        "全部".into()
     } else {
-        value.into()
+        current.to_string().into()
     };
+    let suffix = id_suffix;
+
     v_flex()
         .flex_1()
         .gap_1()
@@ -218,17 +218,195 @@ fn format_input(label: &'static str, value: String, placeholder: &'static str) -
         )
         .child(
             div()
-                .id(SharedString::from(label))
+                .id(SharedString::from(format!("fmt-{}", suffix)))
+                .relative()
+                .child({
+                    let vh = vh.clone();
+                    div()
+                        .id(SharedString::from(format!("fmt-sel-{}", suffix)))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(theme::colors().element_background)
+                        .text_xs()
+                        .cursor_pointer()
+                        .on_click(move |_, _window, cx| {
+                            if let Some(e) = vh.upgrade() {
+                                cx.update_entity(&e, |view, cx| {
+                                    let field = suffix;
+                                    match field {
+                                        "batch-source-fmt" => {
+                                            view.batch_source_fmt_open = !view.batch_source_fmt_open;
+                                            view.batch_compare_fmt_open = false;
+                                            view.batch_op_dropdown_open = false;
+                                        }
+                                        "batch-compare-fmt" => {
+                                            view.batch_compare_fmt_open = !view.batch_compare_fmt_open;
+                                            view.batch_source_fmt_open = false;
+                                            view.batch_op_dropdown_open = false;
+                                        }
+                                        _ => {}
+                                    }
+                                    cx.notify();
+                                });
+                            }
+                        })
+                        .child(display)
+                        .child(div().text_xs().text_color(theme::colors().text_muted).child("▼"))
+                })
+                .when(is_open, |parent| {
+                    let items: Vec<gpui::AnyElement> = FORMAT_OPTIONS
+                        .iter()
+                        .map(|&(display_name, value)| {
+                            let vh = vh.clone();
+                            let is_active = (current.is_empty() && value.is_empty())
+                                || current == value;
+                            div()
+                                .id(SharedString::from(display_name))
+                                .px_2()
+                                .py_1()
+                                .text_xs()
+                                .cursor_pointer()
+                                .text_color(if is_active {
+                                    theme::colors().text_accent
+                                } else {
+                                    theme::colors().text
+                                })
+                                .bg(if is_active {
+                                    theme::accent_dim()
+                                } else {
+                                    hsla(0., 0., 0., 0.)
+                                })
+                                .hover(|style| style.bg(theme::colors().element_hover))
+                                .on_click(move |_, _window, cx| {
+                                    if let Some(e) = vh.upgrade() {
+                                        cx.update_entity(&e, |view, cx| {
+                                            let field = suffix;
+                                            match field {
+                                                "batch-source-fmt" => {
+                                                    view.batch_source_format = value.to_string();
+                                                    view.batch_source_fmt_open = false;
+                                                }
+                                                "batch-compare-fmt" => {
+                                                    view.batch_compare_format = value.to_string();
+                                                    view.batch_compare_fmt_open = false;
+                                                }
+                                                _ => {}
+                                            }
+                                            cx.notify();
+                                        });
+                                    }
+                                })
+                                .child(display_name)
+                                .into_any_element()
+                        })
+                        .collect();
+                    parent.child(
+                        div()
+                            .absolute()
+                            .left(px(0.))
+                            .right(px(0.))
+                            .mt_1()
+                            .rounded_sm()
+                            .bg(theme::colors().surface_background)
+                            .border_1()
+                            .border_color(theme::colors().border_variant)
+                            .py_1()
+                            .children(items),
+                    )
+                }),
+        )
+}
+
+/// 操作类型下拉框
+fn op_type_dropdown(
+    current: BatchOpType,
+    is_open: bool,
+    vh: WeakEntity<RootView>,
+) -> impl IntoElement {
+    let display: SharedString = current.to_string().into();
+
+    div()
+        .id("batch-op-dropdown")
+        .relative()
+        .child({
+            let vh = vh.clone();
+            div()
+                .id("batch-op-selected")
+                .flex()
+                .items_center()
+                .justify_between()
                 .px_2()
                 .py_1()
                 .rounded_sm()
                 .bg(theme::colors().element_background)
                 .text_xs()
-                .text_color(if is_empty {
-                    theme::colors().text_muted
-                } else {
-                    theme::colors().text
+                .cursor_pointer()
+                .on_click(move |_, _window, cx| {
+                    if let Some(e) = vh.upgrade() {
+                        cx.update_entity(&e, |view, cx| {
+                            view.batch_op_dropdown_open = !view.batch_op_dropdown_open;
+                            view.batch_source_fmt_open = false;
+                            view.batch_compare_fmt_open = false;
+                            cx.notify();
+                        });
+                    }
                 })
-                .child(display),
-        )
+                .child(display)
+                .child(div().text_xs().text_color(theme::colors().text_muted).child("▼"))
+        })
+        .when(is_open, |parent| {
+            let items: Vec<gpui::AnyElement> = BatchOpType::all()
+                .iter()
+                .map(|op| {
+                    let vh = vh.clone();
+                    let is_active = current == *op;
+                    let label: SharedString = op.to_string().into();
+                    div()
+                        .id(label.clone())
+                        .px_2()
+                        .py_1()
+                        .text_xs()
+                        .cursor_pointer()
+                        .text_color(if is_active {
+                            theme::colors().text_accent
+                        } else {
+                            theme::colors().text
+                        })
+                        .bg(if is_active {
+                            theme::accent_dim()
+                        } else {
+                            hsla(0., 0., 0., 0.)
+                        })
+                        .hover(|style| style.bg(theme::colors().element_hover))
+                        .on_click(move |_, _window, cx| {
+                            if let Some(e) = vh.upgrade() {
+                                cx.update_entity(&e, |view, cx| {
+                                    view.batch_op_type = *op;
+                                    view.batch_op_dropdown_open = false;
+                                    cx.notify();
+                                });
+                            }
+                        })
+                        .child(label)
+                        .into_any_element()
+                })
+                .collect();
+            parent.child(
+                div()
+                    .absolute()
+                    .left(px(0.))
+                    .right(px(0.))
+                    .mt_1()
+                    .rounded_sm()
+                    .bg(theme::colors().surface_background)
+                    .border_1()
+                    .border_color(theme::colors().border_variant)
+                    .py_1()
+                    .children(items),
+            )
+        })
 }

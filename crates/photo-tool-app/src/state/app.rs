@@ -83,6 +83,9 @@ pub struct RootView {
     pub batch_source_format: String,
     pub batch_compare_format: String,
     pub batch_op_type: BatchOpType,
+    pub batch_op_dropdown_open: bool,
+    pub batch_source_fmt_open: bool,
+    pub batch_compare_fmt_open: bool,
     pub batch_results: Vec<String>,
     pub batch_in_progress: bool,
 }
@@ -157,6 +160,9 @@ impl RootView {
             batch_source_format: String::new(),
             batch_compare_format: String::new(),
             batch_op_type: BatchOpType::CopySame,
+            batch_op_dropdown_open: false,
+            batch_source_fmt_open: false,
+            batch_compare_fmt_open: false,
             batch_results: Vec::new(),
             batch_in_progress: false,
         };
