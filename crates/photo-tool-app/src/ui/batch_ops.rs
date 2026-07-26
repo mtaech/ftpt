@@ -7,7 +7,6 @@ use photo_domain::BatchOpType;
 use crate::state::app::RootView;
 use crate::ui::theme;
 
-/// 支持的图片格式列表（显示名, 存入值）
 const FORMAT_OPTIONS: &[(&str, &str)] = &[
     ("全部类型", ""),
     ("JPG", "JPG"),
@@ -26,7 +25,6 @@ const FORMAT_OPTIONS: &[(&str, &str)] = &[
     ("DNG", "DNG"),
 ];
 
-/// 渲染左侧边栏的"文件操作" tab
 pub fn render_batch_ops_section(
     view: &RootView,
     cx: &mut Context<RootView>,
@@ -52,13 +50,7 @@ pub fn render_batch_ops_section(
             let vh = vh.clone();
             v_flex()
                 .gap_1()
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme::colors().text_muted)
-                        .child("对比目录"),
-                )
+                .child(label("对比目录"))
                 .child(
                     div()
                         .id("batch-compare-dir")
@@ -84,39 +76,19 @@ pub fn render_batch_ops_section(
                         }),
                 )
         })
-        // ── 格式下拉 ──
-        .child({
-            let vh = vh.clone();
-            h_flex()
-                .gap_2()
-                .child(format_dropdown(
-                    "源格式",
-                    &source_fmt,
-                    "batch-source-fmt",
-                    view.batch_source_fmt_open,
-                    &vh,
-                ))
-                .child(format_dropdown(
-                    "对比格式",
-                    &compare_fmt,
-                    "batch-compare-fmt",
-                    view.batch_compare_fmt_open,
-                    &vh,
-                ))
-        })
-        // ── 操作类型下拉 ──
+        // ── 源格式 ──
+        .child(format_dropdown("源格式", &source_fmt, "batch-source-fmt",
+            view.batch_source_fmt_open, &vh))
+        // ── 对比格式 ──
+        .child(format_dropdown("对比格式", &compare_fmt, "batch-compare-fmt",
+            view.batch_compare_fmt_open, &vh))
+        // ── 操作类型 ──
         .child({
             let vh_click = vh.clone();
             let vh_options = vh.clone();
             v_flex()
                 .gap_1()
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme::colors().text_muted)
-                        .child("操作类型"),
-                )
+                .child(label("操作类型"))
                 .child(
                     div()
                         .id("batch-op-selected")
@@ -140,7 +112,7 @@ pub fn render_batch_ops_section(
                             }
                         })
                         .child(SharedString::from(op_type.to_string()))
-                        .child(div().text_xs().text_color(theme::colors().text_muted).child("▼")),
+                        .child(arrow()),
                 )
                 .when(view.batch_op_dropdown_open, move |parent| {
                     let items: Vec<gpui::AnyElement> = BatchOpType::all()
@@ -179,16 +151,7 @@ pub fn render_batch_ops_section(
                                 .into_any_element()
                         })
                         .collect();
-                    parent.child(
-                        div()
-                            .mt_1()
-                            .rounded_sm()
-                            .bg(theme::colors().surface_background)
-                            .border_1()
-                            .border_color(theme::colors().border_variant)
-                            .py_1()
-                            .children(items),
-                    )
+                    parent.child(option_list(items))
                 })
         })
         // ── 开始执行按钮 ──
@@ -246,21 +209,37 @@ pub fn render_batch_ops_section(
                 v_flex()
                     .mt_2()
                     .gap_1()
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme::colors().text_muted)
-                            .child("执行结果"),
-                    )
+                    .child(label("执行结果"))
                     .child(div().flex_1().children(items)),
             )
         })
 }
 
-/// 格式选择下拉框
+fn label(text: &'static str) -> impl IntoElement {
+    div()
+        .text_xs()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme::colors().text_muted)
+        .child(text)
+}
+
+fn arrow() -> impl IntoElement {
+    div().text_xs().text_color(theme::colors().text_muted).child("▼")
+}
+
+fn option_list(items: Vec<gpui::AnyElement>) -> impl IntoElement {
+    div()
+        .mt_1()
+        .rounded_sm()
+        .bg(theme::colors().surface_background)
+        .border_1()
+        .border_color(theme::colors().border_variant)
+        .py_1()
+        .children(items)
+}
+
 fn format_dropdown(
-    label: &'static str,
+    label_text: &'static str,
     current: &str,
     id_suffix: &'static str,
     is_open: bool,
@@ -275,15 +254,8 @@ fn format_dropdown(
     };
 
     v_flex()
-        .flex_1()
         .gap_1()
-        .child(
-            div()
-                .text_xs()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme::colors().text_muted)
-                .child(label),
-        )
+        .child(label(label_text))
         .child(
             div()
                 .id(SharedString::from(format!("fmt-sel-{}", id_suffix)))
@@ -299,25 +271,13 @@ fn format_dropdown(
                 .on_click(move |_, _window, cx| {
                     if let Some(e) = vh_click.upgrade() {
                         cx.update_entity(&e, |view, cx| {
-                            match id_suffix {
-                                "batch-source-fmt" => {
-                                    view.batch_source_fmt_open = !view.batch_source_fmt_open;
-                                    view.batch_compare_fmt_open = false;
-                                    view.batch_op_dropdown_open = false;
-                                }
-                                "batch-compare-fmt" => {
-                                    view.batch_compare_fmt_open = !view.batch_compare_fmt_open;
-                                    view.batch_source_fmt_open = false;
-                                    view.batch_op_dropdown_open = false;
-                                }
-                                _ => {}
-                            }
+                            toggle_fmt_dropdown(id_suffix, view);
                             cx.notify();
                         });
                     }
                 })
                 .child(display)
-                .child(div().text_xs().text_color(theme::colors().text_muted).child("▼")),
+                .child(arrow()),
         )
         .when(is_open, move |parent| {
             let items: Vec<gpui::AnyElement> = FORMAT_OPTIONS
@@ -346,7 +306,8 @@ fn format_dropdown(
                         .on_click(move |_, _window, cx| {
                             if let Some(e) = vh.upgrade() {
                                 cx.update_entity(&e, |view, cx| {
-                                    match id_suffix {
+                                    let field = id_suffix;
+                                    match field {
                                         "batch-source-fmt" => {
                                             view.batch_source_format = value.to_string();
                                             view.batch_source_fmt_open = false;
@@ -365,15 +326,22 @@ fn format_dropdown(
                         .into_any_element()
                 })
                 .collect();
-            parent.child(
-                div()
-                    .mt_1()
-                    .rounded_sm()
-                    .bg(theme::colors().surface_background)
-                    .border_1()
-                    .border_color(theme::colors().border_variant)
-                    .py_1()
-                    .children(items),
-            )
+            parent.child(option_list(items))
         })
+}
+
+fn toggle_fmt_dropdown(id: &str, view: &mut RootView) {
+    match id {
+        "batch-source-fmt" => {
+            view.batch_source_fmt_open = !view.batch_source_fmt_open;
+            view.batch_compare_fmt_open = false;
+            view.batch_op_dropdown_open = false;
+        }
+        "batch-compare-fmt" => {
+            view.batch_compare_fmt_open = !view.batch_compare_fmt_open;
+            view.batch_source_fmt_open = false;
+            view.batch_op_dropdown_open = false;
+        }
+        _ => {}
+    }
 }
