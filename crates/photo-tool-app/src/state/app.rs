@@ -7,7 +7,7 @@ use gpui_component::select::{SearchableVec, SelectEvent, SelectState};
 use std::sync::LazyLock;
 use photo_config::AppConfig;
 use photo_domain::{
-    CaptureMeta, ColorLabel, DeleteMode, FilterCriteria, Flag, Rating, SortBy, SortDirection,
+    BatchOpType, CaptureMeta, ColorLabel, DeleteMode, FilterCriteria, Flag, Rating, SortBy, SortDirection,
 };
 use photo_engine::thumbnail::ThumbnailCache;
 use photo_engine::{scanner, xmp};
@@ -78,6 +78,13 @@ pub struct RootView {
     pub preview_pan: (f32, f32),
     /// 拖拽起始状态：(鼠标x, 鼠标y, 起始pan_x, 起始pan_y)
     pub preview_drag: Option<(f32, f32, f32, f32)>,
+    // ── 批量文件操作 ──
+    pub batch_compare_dir: String,
+    pub batch_source_format: String,
+    pub batch_compare_format: String,
+    pub batch_op_type: BatchOpType,
+    pub batch_results: Vec<String>,
+    pub batch_in_progress: bool,
 }
 
 impl RootView {
@@ -146,6 +153,12 @@ impl RootView {
             sidebar_visible: true,
             grid_scroll_handle: UniformListScrollHandle::new(),
             filmstrip_scroll: ScrollHandle::default(),
+            batch_compare_dir: String::new(),
+            batch_source_format: String::new(),
+            batch_compare_format: String::new(),
+            batch_op_type: BatchOpType::CopySame,
+            batch_results: Vec::new(),
+            batch_in_progress: false,
         };
 
         if let Some(last_dir) = &auto_dir {
@@ -165,6 +178,20 @@ impl RootView {
             move |this, result, cx| {
                 if let Some(path) = result {
                     this.scan_directory(path, cx);
+                }
+            },
+        );
+    }
+
+    /// 弹出目录选择对话框，选择对比目录用于批量文件操作
+    pub fn pick_batch_compare_dir(&mut self, cx: &mut Context<Self>) {
+        self.worker.spawn(
+            cx,
+            move || rfd::FileDialog::new().pick_folder(),
+            move |this, result, cx| {
+                if let Some(path) = result {
+                    this.batch_compare_dir = path.display().to_string();
+                    cx.notify();
                 }
             },
         );
@@ -314,6 +341,91 @@ impl RootView {
                 },
             );
         }
+    }
+
+    /// 执行批量文件操作（在工作线程中运行，不阻塞 UI）
+    pub fn execute_batch_ops(&mut self, cx: &mut Context<Self>) {
+        let compare_dir = self.batch_compare_dir.clone();
+        let source_format = self.batch_source_format.clone();
+        let compare_format = self.batch_compare_format.clone();
+        let op_type = self.batch_op_type;
+        let source_dir = self.dir_path.clone();
+
+        if compare_dir.is_empty() {
+            self.batch_results = vec!["请先选择对比目录".into()];
+            cx.notify();
+            return;
+        }
+        let Some(ref src_dir) = source_dir else {
+            self.batch_results = vec!["请先打开一个目录".into()];
+            cx.notify();
+            return;
+        };
+
+        self.batch_in_progress = true;
+        self.batch_results.clear();
+        cx.notify();
+
+        let src_dir = src_dir.clone();
+        self.worker.spawn(
+            cx,
+            move || {
+                // 1. 扫描源目录获取完整 Capture 列表
+                let source_captures = match photo_engine::scanner::scan_directory(
+                    &src_dir,
+                    &[],
+                    &Default::default(),
+                    None,
+                ) {
+                    Ok(caps) => caps,
+                    Err(e) => return vec![format!("扫描源目录失败: {e}")],
+                };
+
+                if source_captures.is_empty() {
+                    return vec!["源目录无匹配文件".into()];
+                }
+
+                // 2. 查找匹配
+                let (matched, unmatched) = match photo_engine::batch_ops::find_matching(
+                    &source_captures,
+                    Path::new(&compare_dir),
+                    if source_format.is_empty() { None } else { Some(source_format.as_str()) },
+                    if compare_format.is_empty() { None } else { Some(compare_format.as_str()) },
+                ) {
+                    Ok(result) => result,
+                    Err(e) => return vec![format!("匹配失败: {e}")],
+                };
+
+                // 3. 根据操作类型决定使用哪组索引
+                let indices = if op_type.is_same_match() { matched } else { unmatched };
+                if indices.is_empty() {
+                    let hint = if op_type.is_same_match() {
+                        "对比目录中没有同名文件"
+                    } else {
+                        "对比目录中没有非同名的文件"
+                    };
+                    return vec![hint.into()];
+                }
+
+                // 4. 执行操作
+                let target_dir = if op_type.needs_target_dir() {
+                    Some(Path::new(&compare_dir).parent().unwrap_or(Path::new(".")).join("batch_output"))
+                } else {
+                    None
+                };
+                photo_engine::batch_ops::execute(
+                    &source_captures,
+                    &indices,
+                    op_type,
+                    target_dir.as_deref(),
+                )
+            },
+            move |this, results, cx| {
+                this.batch_in_progress = false;
+                this.batch_results = results;
+                cx.notify();
+            },
+        );
     }
 
     pub fn apply_filter_and_sort(&mut self) {

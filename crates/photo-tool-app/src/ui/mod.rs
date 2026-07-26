@@ -1,4 +1,5 @@
 pub mod activity_rail;
+pub mod batch_ops;
 pub mod context_menu;
 pub mod controls;
 pub mod filmstrip;

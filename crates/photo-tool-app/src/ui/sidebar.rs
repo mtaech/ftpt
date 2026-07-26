@@ -8,7 +8,7 @@ use crate::state::app::RootView;
 use crate::ui::theme;
 
 /// 左侧边栏 tab 名称与索引
-const SIDEBAR_TABS: &[(&str, usize)] = &[("文件树", 0), ("收藏夹", 1), ("筛选", 2)];
+const SIDEBAR_TABS: &[(&str, usize)] = &[("文件树", 0), ("收藏夹", 1), ("筛选", 2), ("文件操作", 3)];
 
 /// Render the left sidebar with tab bar: 文件树 | 收藏夹 | 筛选
 pub fn render_sidebar(view: &RootView, cx: &mut Context<RootView>) -> impl IntoElement {
@@ -18,6 +18,7 @@ pub fn render_sidebar(view: &RootView, cx: &mut Context<RootView>) -> impl IntoE
     let content: gpui::AnyElement = match active_tab {
         1 => render_favorites_section(view, cx).into_any_element(),
         2 => render_filter_section(view, cx).into_any_element(),
+        3 => crate::ui::batch_ops::render_batch_ops_section(view, cx).into_any_element(),
         _ => render_directory_section(view, cx).into_any_element(),
     };
 

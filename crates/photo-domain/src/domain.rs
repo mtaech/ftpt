@@ -313,6 +313,69 @@ pub enum DeleteMode {
     Permanent,
 }
 
+/// 批量文件操作类型
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BatchOpType {
+    /// 复制同名文件到目标目录
+    CopySame,
+    /// 复制非同名文件到目标目录
+    CopyNotSame,
+    /// 删除同名文件
+    DeleteSame,
+    /// 删除非同名文件
+    DeleteNotSame,
+    /// 移动同名文件到目标目录
+    MoveSame,
+    /// 移动非同名文件到目标目录
+    MoveNotSame,
+}
+
+impl BatchOpType {
+    /// 全部操作类型（UI 下拉用）
+    pub fn all() -> &'static [BatchOpType] {
+        &[
+            Self::CopySame,
+            Self::CopyNotSame,
+            Self::DeleteSame,
+            Self::DeleteNotSame,
+            Self::MoveSame,
+            Self::MoveNotSame,
+        ]
+    }
+
+    /// 是否为"同名"匹配
+    pub fn is_same_match(&self) -> bool {
+        matches!(self, Self::CopySame | Self::DeleteSame | Self::MoveSame)
+    }
+
+    /// 是否需要目标目录（删除操作不需要）
+    pub fn needs_target_dir(&self) -> bool {
+        matches!(self, Self::CopySame | Self::CopyNotSame | Self::MoveSame | Self::MoveNotSame)
+    }
+
+    /// 执行的动作标签
+    pub fn action_label(&self) -> &'static str {
+        match self {
+            Self::CopySame | Self::CopyNotSame => "复制",
+            Self::DeleteSame | Self::DeleteNotSame => "删除",
+            Self::MoveSame | Self::MoveNotSame => "移动",
+        }
+    }
+}
+
+impl std::fmt::Display for BatchOpType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CopySame => write!(f, "复制同名文件"),
+            Self::CopyNotSame => write!(f, "复制非同名文件"),
+            Self::DeleteSame => write!(f, "删除同名文件"),
+            Self::DeleteNotSame => write!(f, "删除非同名文件"),
+            Self::MoveSame => write!(f, "移动同名文件"),
+            Self::MoveNotSame => write!(f, "移动非同名文件"),
+        }
+    }
+}
+
 // ============================================================================
 // Exif 数据类型（纯结构体，提取/读写机械在 photo-engine 中）
 // ============================================================================

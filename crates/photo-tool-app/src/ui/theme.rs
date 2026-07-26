@@ -221,6 +221,13 @@ pub fn accent_dim() -> Hsla {
     c
 }
 
+/// accent 色的悬浮版本：比 solid 稍亮/稍暗，取决于模式。
+pub fn accent_hover() -> Hsla {
+    let mut c = colors().text_accent;
+    c.a = 0.80;
+    c
+}
+
 // ═══════════════════════════════════════════════════════════════
 //  Theme Colors constructors
 // ═══════════════════════════════════════════════════════════════
