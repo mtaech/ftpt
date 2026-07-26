@@ -57,7 +57,7 @@ pub fn render_batch_ops_section(
                         .tooltip(if view.batch_compare_dir.is_empty() {
                             SharedString::default()
                         } else {
-                            SharedString::from(format!("对比目录: {}", view.batch_compare_dir))
+                            SharedString::from(view.batch_compare_dir.clone())
                         })
                         .label(if compare_dir.is_empty() {
                             SharedString::from("选择对比目录...")
