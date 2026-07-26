@@ -189,4 +189,134 @@ pub fn render_layout(
         .when(view.show_settings, |parent| {
             parent.child(render_settings_overlay(view, cx))
         })
+        // 批量操作进度弹窗
+        .when(view.batch_show_progress_popup, |parent| {
+            let vh = cx.entity().downgrade();
+            let (done, total) = view.batch_progress.unwrap_or((0, 1));
+            let pct = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+            let results = view.batch_results.clone();
+            parent.child(
+                // 半透明遮罩
+                div()
+                    .absolute()
+                    .size_full()
+                    .bg(hsla(0., 0., 0., 0.4))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        // 弹窗卡片
+                        div()
+                            .w(px(400.))
+                            .bg(theme::colors().surface_background)
+                            .rounded_md()
+                            .shadow_lg()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                // 标题栏
+                                h_flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .px_4()
+                                    .py_3()
+                                    .border_b_1()
+                                    .border_color(theme::colors().border_variant)
+                                    .child(div().font_weight(FontWeight::BOLD).text_sm().child("批量操作进度"))
+                                    .child(
+                                        div()
+                                            .id("close-progress-popup")
+                                            .text_color(theme::colors().text_muted)
+                                            .cursor_pointer()
+                                            .hover(|style| style.text_color(theme::colors().text))
+                                            .child("✕")
+                                            .on_click(move |_, _window, cx| {
+                                                if let Some(e) = vh.upgrade() {
+                                                    cx.update_entity(&e, |view, cx| {
+                                                        view.batch_show_progress_popup = false;
+                                                        cx.notify();
+                                                    });
+                                                }
+                                            }),
+                                    ),
+                            )
+                            .child(
+                                // 内容区
+                                div()
+                                    .px_4()
+                                    .py_3()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_3()
+                                    .child(
+                                        // 进度条
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .h(px(8.))
+                                                    .rounded_full()
+                                                    .bg(theme::colors().element_background)
+                                                    .overflow_hidden()
+                                                    .child(
+                                                        div()
+                                                            .h_full()
+                                                            .bg(theme::colors().text_accent)
+                                                            .w(px((200.0 * pct).max(2.0).min(200.0)))
+                                                            .rounded_full(),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme::colors().text)
+                                                    .font_family(theme::MONO_FONT_FAMILY)
+                                                    .child(format!("{done}/{total}")),
+                                            ),
+                                    )
+                                    .child(
+                                        // 状态消息
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme::colors().text_muted)
+                                            .child({
+                                                let msg = if view.batch_progress_msg.is_empty() {
+                                                    if view.batch_in_progress {
+                                                        format!("处理中: {done}/{total}")
+                                                    } else {
+                                                        "已完成".to_string()
+                                                    }
+                                                } else {
+                                                    view.batch_progress_msg.clone()
+                                                };
+                                                msg
+                                            }),
+                                    )
+                                    .child(
+                                        // 结果列表
+                                        div()
+                                            .flex_1()
+                                            .max_h(px(200.))
+                                            .overflow_y_scrollbar()
+                                            .children(results.iter().map(|msg| {
+                                                let is_err = msg.contains("失败");
+                                                div()
+                                                    .py_0p5()
+                                                    .text_xs()
+                                                    .text_color(if is_err {
+                                                        theme::colors().error
+                                                    } else {
+                                                        theme::colors().text
+                                                    })
+                                                    .child(msg.clone())
+                                                    .into_any_element()
+                                            })),
+                                    ),
+                            ),
+                    ),
+            )
+        })
 }

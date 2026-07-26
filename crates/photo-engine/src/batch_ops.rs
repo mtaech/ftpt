@@ -73,15 +73,17 @@ pub fn find_matching(
 /// 执行批量操作，返回每个文件的可读结果
 ///
 /// `target_dir` — 复制/移动的目标目录（删除操作时可为 None）
+/// `on_progress` — 处理完每个文件后回调 (completed, total)
 pub fn execute(
     source_captures: &[Capture],
     matched_indices: &[usize],
     op_type: BatchOpType,
     target_dir: Option<&Path>,
+    on_progress: impl Fn(u32, u32),
 ) -> Vec<String> {
     let mut results = Vec::new();
+    let total = matched_indices.len() as u32;
 
-    // 删除操作不需要目标目录
     let target_dir = if op_type.needs_target_dir() {
         match target_dir {
             Some(d) if !d.as_os_str().is_empty() => Some(d),
@@ -91,7 +93,7 @@ pub fn execute(
         None
     };
 
-    for &idx in matched_indices {
+    for (i, &idx) in matched_indices.iter().enumerate() {
         let Some(capture) = source_captures.get(idx) else { continue };
         let name = &capture.base_name;
         let verb = op_type.action_label();
@@ -115,6 +117,8 @@ pub fn execute(
             Ok(msg) => results.push(msg),
             Err(e) => results.push(format!("{verb}失败: {} — {e}", name)),
         }
+
+        on_progress(i as u32 + 1, total);
     }
 
     results
@@ -186,7 +190,7 @@ mod tests {
         create_files(&dir, &[("del_me", "RW2")]);
         let source = scanner::scan_directory(dir.path(), &[], &Default::default(), None).unwrap();
 
-        let results = execute(&source, &[0], BatchOpType::DeleteSame, None);
+        let results = execute(&source, &[0], BatchOpType::DeleteSame, None, |_, _| {});
         assert!(results.iter().any(|r| r.contains("删除")));
         assert!(results.iter().all(|r| !r.contains("失败")));
     }

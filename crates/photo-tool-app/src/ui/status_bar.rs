@@ -5,36 +5,38 @@ use crate::state::app::RootView;
 use crate::ui::theme;
 
 /// 底部状态栏：24px 三段 ticker 风格
-/// 左：目录路径 | 中：文件计数 | 右：扫描状态
+/// 左：目录路径 | 中：文件计数 | 右：扫描状态 + 进度
 pub fn render_status_bar(
     view: &RootView,
-    _cx: &mut Context<RootView>,
+    cx: &mut Context<RootView>,
 ) -> impl IntoElement {
+    let vh = cx.entity().downgrade();
     let total = view.captures.len();
     let selected_count = view.selected.len();
 
-    // 左段：目录路径（截断）
     let path_str = view
         .dir_path
         .as_ref()
         .and_then(|p| p.to_str())
         .unwrap_or("无目录");
-
     let truncated = if path_str.len() > 48 {
         format!("…{}", &path_str[path_str.len() - 45..])
     } else {
         path_str.to_string()
     };
-
-    // 中段：文件计数（等宽数字）
-    let file_count = if view.dir_path.is_some() {
-        total
-    } else {
-        0
-    };
-
-    // 右段：扫描状态
+    let file_count = if view.dir_path.is_some() { total } else { 0 };
     let scanning = view.scan_task.is_some();
+
+    let tooltip_text = if view.batch_in_progress {
+        if view.batch_progress_msg.is_empty() {
+            let (done, total) = view.batch_progress.unwrap_or((0, 1));
+            format!("处理中: {done}/{total}")
+        } else {
+            view.batch_progress_msg.clone()
+        }
+    } else {
+        String::new()
+    };
 
     h_flex()
         .h(px(24.))
@@ -99,20 +101,59 @@ pub fn render_status_bar(
                         .child("已选"),
                 ),
         )
-        // 右段：扫描状态
-        .child(
+        // 右段：扫描状态 + 批量操作进度
+        .child({
             h_flex()
                 .flex_1()
                 .items_center()
                 .justify_end()
-                .child(
+                .gap(px(6.))
+                .child(if view.batch_in_progress {
+                    let (done, total) = view.batch_progress.unwrap_or((0, 1));
+                    let pct = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+                    let tt = tooltip_text;
+                    h_flex()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .id("batch-progress-bar")
+                                .w(px(80.))
+                                .h(px(6.))
+                                .rounded_full()
+                                .bg(theme::colors().element_background)
+                                .overflow_hidden()
+                                .tooltip(move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(tt.clone()).build(window, cx)
+                                })
+                                .on_click(move |_, _window, cx| {
+                                    if let Some(e) = vh.upgrade() {
+                                        cx.update_entity(&e, |view, cx| {
+                                            view.batch_show_progress_popup = true;
+                                            cx.notify();
+                                        });
+                                    }
+                                })
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .bg(theme::colors().text_accent)
+                                        .w(px((80.0 * pct).max(2.0).min(80.0)))
+                                        .rounded_full(),
+                                ),
+                        )
+                        .child(div().text_color(theme::colors().text_accent).text_xs().child(done.to_string()))
+                        .child(div().text_color(theme::colors().text_muted).text_xs().child("/"))
+                        .child(div().text_color(theme::colors().text_muted).text_xs().child(total.to_string()))
+                        .into_any_element()
+                } else {
                     div()
                         .text_color(if scanning {
                             theme::colors().text_accent
                         } else {
                             theme::colors().text_muted
                         })
-                        .child(if scanning { "扫描中…" } else { "就绪" }),
-                ),
-        )
+                        .child(if scanning { "扫描中…" } else { "就绪" })
+                        .into_any_element()
+                })
+        })
 }

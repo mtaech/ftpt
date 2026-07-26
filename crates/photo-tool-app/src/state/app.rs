@@ -88,6 +88,9 @@ pub struct RootView {
     pub batch_compare_fmt_open: bool,
     pub batch_results: Vec<String>,
     pub batch_in_progress: bool,
+    pub batch_progress: Option<(u32, u32)>,
+    pub batch_progress_msg: String,
+    pub batch_show_progress_popup: bool,
 }
 
 impl RootView {
@@ -99,8 +102,6 @@ impl RootView {
         let thumbnail_cache = Some(ThumbnailCache::new(cache_dir));
 
         let worker = Worker::new();
-
-        // 字体选择下拉：系统字体列表 + 当前配置项 + 选中后写回配置
         let font_items: Vec<SharedString> = SYSTEM_FONTS
             .iter()
             .map(|f| SharedString::from(f.clone()))
@@ -165,6 +166,9 @@ impl RootView {
             batch_compare_fmt_open: false,
             batch_results: Vec::new(),
             batch_in_progress: false,
+            batch_progress: None,
+            batch_progress_msg: String::new(),
+            batch_show_progress_popup: false,
         };
 
         if let Some(last_dir) = &auto_dir {
@@ -351,6 +355,9 @@ impl RootView {
 
     /// 执行批量文件操作（在工作线程中运行，不阻塞 UI）
     pub fn execute_batch_ops(&mut self, cx: &mut Context<Self>) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
         let compare_dir = self.batch_compare_dir.clone();
         let source_format = self.batch_source_format.clone();
         let compare_format = self.batch_compare_format.clone();
@@ -370,13 +377,20 @@ impl RootView {
 
         self.batch_in_progress = true;
         self.batch_results.clear();
+        self.batch_progress = Some((0, 1));
+        self.batch_progress_msg = "正在扫描...".into();
         cx.notify();
 
         let src_dir = src_dir.clone();
+        let progress = Arc::new(AtomicU32::new(0));
+        let total = Arc::new(AtomicU32::new(0));
+        let progress_poll = progress.clone();
+        let total_poll = total.clone();
+
         self.worker.spawn(
             cx,
             move || {
-                // 1. 扫描源目录获取完整 Capture 列表
+                // 1. 扫描源目录
                 let source_captures = match photo_engine::scanner::scan_directory(
                     &src_dir,
                     &[],
@@ -384,11 +398,11 @@ impl RootView {
                     None,
                 ) {
                     Ok(caps) => caps,
-                    Err(e) => return vec![format!("扫描源目录失败: {e}")],
+                    Err(e) => return (vec![format!("扫描源目录失败: {e}")], progress, total),
                 };
 
                 if source_captures.is_empty() {
-                    return vec!["源目录无匹配文件".into()];
+                    return (vec!["源目录无匹配文件".into()], progress, total);
                 }
 
                 // 2. 查找匹配
@@ -399,10 +413,9 @@ impl RootView {
                     if compare_format.is_empty() { None } else { Some(compare_format.as_str()) },
                 ) {
                     Ok(result) => result,
-                    Err(e) => return vec![format!("匹配失败: {e}")],
+                    Err(e) => return (vec![format!("匹配失败: {e}")], progress, total),
                 };
 
-                // 3. 根据操作类型决定使用哪组索引
                 let indices = if op_type.is_same_match() { matched } else { unmatched };
                 if indices.is_empty() {
                     let hint = if op_type.is_same_match() {
@@ -410,28 +423,64 @@ impl RootView {
                     } else {
                         "对比目录中没有非同名的文件"
                     };
-                    return vec![hint.into()];
+                    return (vec![hint.into()], progress, total);
                 }
 
-                // 4. 执行操作
+                total.store(indices.len() as u32, Ordering::Relaxed);
+
                 let target_dir = if op_type.needs_target_dir() {
                     Some(Path::new(&compare_dir).parent().unwrap_or(Path::new(".")).join("batch_output"))
                 } else {
                     None
                 };
-                photo_engine::batch_ops::execute(
+
+                let p = progress.clone();
+                let results = photo_engine::batch_ops::execute(
                     &source_captures,
                     &indices,
                     op_type,
                     target_dir.as_deref(),
-                )
+                    move |done, _tot| {
+                        p.store(done, Ordering::Relaxed);
+                    },
+                );
+                (results, progress, total)
             },
-            move |this, results, cx| {
+            move |this, (results, progress, total), cx| {
                 this.batch_in_progress = false;
+                this.batch_progress = Some((total.load(Ordering::Relaxed), total.load(Ordering::Relaxed)));
                 this.batch_results = results;
+                this.batch_progress_msg.clear();
                 cx.notify();
             },
         );
+
+        // 轮询进度：每 300ms 检查 atomic 计数器并更新 UI
+        let vh = cx.entity().downgrade();
+        cx.spawn(|_: WeakEntity<RootView>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(300))
+                        .await;
+                    let done = progress_poll.load(Ordering::Relaxed);
+                    let tot = total_poll.load(Ordering::Relaxed);
+                    if let Some(view) = vh.upgrade() {
+                        let _ = cx.update_entity(&view, |view: &mut RootView, cx: &mut Context<RootView>| {
+                            if view.batch_in_progress {
+                                view.batch_progress = Some((done, tot));
+                                view.batch_progress_msg = format!("处理中: {done}/{tot}");
+                                cx.notify();
+                            }
+                        });
+                    } else {
+                        break;
+                    }
+                }
+            }
+        })
+        .detach();
     }
 
     pub fn apply_filter_and_sort(&mut self) {
