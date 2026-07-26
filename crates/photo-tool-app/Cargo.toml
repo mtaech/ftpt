@@ -1,0 +1,28 @@
+[package]
+name = "photo-tool-app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+photo-domain = { path = "../photo-domain" }
+photo-engine = { path = "../photo-engine" }
+photo-config = { path = "../photo-config" }
+
+chrono.workspace = true
+font-kit.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
+gpui-component.workspace = true
+gpui-component-assets.workspace = true
+image.workspace = true
+oneshot.workspace = true
+rayon.workspace = true
+rfd.workspace = true
+rust-embed.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[build-dependencies]
+embed-resource.workspace = true
+image.workspace = true

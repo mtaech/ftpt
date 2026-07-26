@@ -1,0 +1,23 @@
+{
+  "servers": {
+    "rust-analyzer": {
+      "capabilities": {
+        "flycheck": true,
+        "ssr": true,
+        "expandMacro": true,
+        "runnables": true,
+        "relatedTests": true
+      },
+      "settings": {
+        "rust-analyzer": {
+          "cargo": {
+            "features": "all"
+          },
+          "check": {
+            "command": "clippy"
+          }
+        }
+      }
+    }
+  }
+}

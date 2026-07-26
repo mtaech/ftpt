@@ -2,55 +2,67 @@
 
 ## 项目概述
 
-Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览、标记、导入和转换照片。Cargo workspace 含 2 个成员：
+Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览、标记、导入和转换照片。Cargo workspace 含 4 个成员：
 
-- `photo-tool-core` — 纯 Rust 领域逻辑库（**全同步**，无 async/tokio），9 个模块
+- `photo-domain` — 纯类型叶子 crate（Capture, ExifMetadata, XmpMetadata, 枚举），零外部依赖
+- `photo-engine` — 文件操作引擎（scanner, exif/xmp 读写, thumbnail, ops, convert, cache），**全同步**
+- `photo-config` — 配置读写（TOML + SQLite 持久化）
 - `photo-tool-app` — GPUI 前端（暗色主题，三栏布局，全键盘操作）
-核心工作流：**目录扫描 → RAW+JPEG 配对 → 浏览/标记/筛选 → 文件操作（删除/移动/复制/重命名）→ 导入 → 格式转换**。
+核心工作流：**目录扫描 → RAW+JPEG 配对 → 浏览/标记/筛选 → 文件操作（删除/移动/复制/重命名）→ 格式转换**。
 
 ---
 
 ## 架构与数据流
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                  photo-tool-core（全同步）             │
-│  scanner ──► Vec<Capture> ──► exif / ops / thumbnail │
-│                              / convert / import      │
-│  domain（Capture, SourceFile, ImageFormat, 枚举）      │
-│  xmp（pt: 命名空间附属文件）  config（TOML, 便携优先）   │
-└─────────────────────────────────────────────────────┘
+                    ┌─────────────────────────────────────┐
+                    │            photo-domain              │
+                    │  Capture, ExifMetadata, XmpMetadata  │
+                    │  ImageFormat, 枚举（纯数据，零依赖）   │
+                    └──────────┬──────────────────────────┘
+                               │
+              ┌────────────────┼────────────────┐
+              ▼                ▼                ▼
+     ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+     │ photo-engine │  │ photo-config │  │ photo-tool-app│
+     │ scanner,ops  │  │ TOML+SQLite  │  │ GPUI 前端     │
+     │ exif,xmp,    │  │ 便携配置     │  │ state/ ui/    │
+     │ thumbnail,   │  └──────────────┘  │ worker       │
+     │ convert,cache│                    └──────────────┘
+     └──────────────┘
+     所有模块全同步   独立，无内部依赖       依赖以上三者
 ```
 
 ### 核心数据流
 
 1. **scanner** → `Vec<Capture>`：walkdir 单层（`max_depth(1)`）扫描，按文件名 stem 小写归组，配对 JPEG+RAW+sidecar，`primary_index` 取 `display_priority()` 最小的非旁车文件
-2. **Capture** → **exif**：提取 EXIF（常规图 kamadak-exif，RAW 走 `rawlib::exif`）；`CaptureMeta::enrich_with_exif` 回填摘要
+2. **Capture** → **exif**：提取 EXIF（常规图 kamadak-exif，RAW 走 `rawlib::exif`）；`CaptureMeta::enrich_with_exif` 回填摘要（类型 `ExifMetadata` 定义在 domain，提取机械在 engine）
 3. **Capture** → **ops**：删除（回收站/永久）/移动（跨设备 copy+delete 回退）/复制/批量重命名
 4. **SourceFile** → **thumbnail**：磁盘缓存 JPEG 字节（缓存键 = `DefaultHasher(path+size)` 的 `{:016x}.jpg`）；RAW 提取内嵌预览，常规图优先 EXIF 内嵌缩略图
 5. **Capture** → **convert**：RAW 内嵌预览→JPEG、常规图缩放（Lanczos3）
-6. **import**：检测可移动设备（Linux 扫 `/media` 等，Windows 枚举 A-Z 跳过 C）→ DCIM 递归扫描 → 按 EXIF 日期建子目录 → 委托 **ops** 移动/复制
+6. **import**（近期移除，待重建）：检测可移动设备 → DCIM 递归扫描 → 按 EXIF 日期建子目录 → 委托 **ops** 移动/复制
 
 ### 模块依赖关系
 
-- `import` 依赖 `exif` + `ops`
-- `domain` ↔ `exif` 双向（`CaptureMeta::enrich_with_exif` 回调 `exif::extract_exif`）
-- `config` 独立，无 crate 内依赖；`lib.rs` 无逻辑
+- `photo-tool-app` 依赖 `photo-engine` + `photo-domain` + `photo-config`
+- `photo-engine` 依赖 `photo-domain`（单向 DAG，由 crate 边界强制）
+- `photo-config` 独立，无 crate 内依赖
+- `domain` 是纯叶子：依赖仅 `std` + `serde` + `chrono` + `thiserror`，不引用任何内部模块
 
 ---
 
 ## 关键目录
 
-| 路径 | 用途 |
-|---|---|
-| `photo-tool-core/src/` | 领域逻辑：9 个模块，全部同步 |
-| `photo-tool-app/src/` | GPUI 前端：`state/`（RootView + 15 方法）、`ui/`（14 组件）、`worker.rs`（rayon 桥接） |
-| `photo-tool-app/src/state/app.rs` | RootView：全局状态 + `dispatch_action()` 路由所有交互 |
-| `photo-tool-app/src/ui/layout.rs` | 三栏弹性布局（sidebar \| grid/preview \| info_panel） |
-| `photo-tool-app/src/ui/theme.rs` | Catppuccin Mocha 暗色主题常量 |
+|-|-|
+| `crates/photo-domain/src/domain.rs` | 纯类型（Capture, ExifMetadata, XmpMetadata, 枚举），零外部 crate 依赖 |
+| `crates/photo-engine/src/` | 文件机械：scanner, ops, exif, xmp, thumbnail, convert, cache（全部同步） |
+| `crates/photo-config/src/lib.rs` | 配置读写（TOML + SQLite 持久化）|
+| `crates/photo-tool-app/src/state/app.rs` | RootView：全局状态 + `dispatch_action()` 路由所有交互 |
+| `crates/photo-tool-app/src/ui/layout.rs` | 三栏弹性布局（sidebar \| grid/preview \| info_panel） |
+| `crates/photo-tool-app/src/ui/theme.rs` | Catppuccin Mocha 暗色主题常量 |
 | `local-lib/` | 预编译 Linux `libraw.so`/`libraw_r.so`（不纳入版本控制） |
 | `CONTEXT.md` | 中文领域术语表（泛在语言） |
-| `docs/adr/` | 架构决策记录（预留） |
+| `docs/adr/` | 架构决策记录 |
 
 ---
 
@@ -59,11 +71,11 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 | 操作 | 命令 |
 |---|---|
 | 全量构建 | `cargo build` |
-| 只构建核心库 | `cargo build -p photo-tool-core` |
-| 运行全部核心测试 | `cargo test -p photo-tool-core` |
-| 运行单个测试 | `cargo test -p photo-tool-core -- <test_name>` |
-| 按模块跑测试 | `cargo test -p photo-tool-core scanner::tests` |
-| 显示测试输出 | `cargo test -p photo-tool-core -- --nocapture` |
+| 只构建 | `cargo build -p photo-engine` |
+| 运行全部核心测试 | `cargo test` |
+| 运行单个包测试 | `cargo test -p photo-engine` |
+| 按模块跑测试 | `cargo test -p photo-engine -- scanner::tests` |
+| 显示测试输出 | `cargo test -- --nocapture` |
 | Clippy 检查 | `cargo clippy --all-targets` |
 
 ---
@@ -72,8 +84,10 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 
 ### 模块组织
 
-- `lib.rs` 仅 9 行 `pub mod` 声明（domain, config, scanner, thumbnail, exif, xmp, ops, import, convert），**无 re-export**、无 prelude
-- 消费者写全路径：`photo_tool_core::scanner::scan_directory`
+- `photo-domain/src/lib.rs` 声明 `pub mod domain` + `pub use domain::*`（re-export 让消费者直接 `photo_domain::Capture`）
+- `photo-engine/src/lib.rs` 声明 7 个 `pub mod`（scanner, ops, exif, xmp, thumbnail, convert, cache）
+- `photo-config/src/lib.rs` 即库根——config 模块就是 lib.rs 本身
+- 消费者写全路径：`photo_engine::scanner::scan_directory`
 
 ### 错误处理
 
@@ -110,9 +124,9 @@ pub enum OpError {
 
 ### 已知陷阱
 
-- `quick-xml`、`log` 在 `photo-tool-core/Cargo.toml` 声明但 src 中无引用
-- `scanner::apply_filter` 当前**仅实现 `text_search`**，`FilterCriteria` 其余字段未生效
-- 使用了 let-chains（edition 2024 特性），如 `config.rs` 便携路径判断
+- `quick-xml` 在根 `Cargo.toml` 的 `[workspace.dependencies]` 中声明但 `photo-engine` src 中无引用
+- `scanner::apply_filter` 当前**仅实现 `text_search`**，`FilterCriteria` 其余字段未生效（`paired_only`, `date_range`, `flag_filter`, `unflagged_filter` 等被 scanner 忽略）
+- 使用了 let-chains（edition 2024 特性），如 `photo-config/config.rs` 便携路径判断
 
 ### 调试：GPUI 事件处理器无声失败
 
@@ -164,10 +178,10 @@ app.run(move |cx| {
 
 | 文件 | 作用 |
 |---|---|
-| `Cargo.toml` | workspace：resolver v2，1 个成员，version 0.1.0，edition 2024，无 profile 配置 |
+| `Cargo.toml` | workspace：resolver v2，4 个成员，`[workspace.dependencies]` 集中管理所有版本 |
 | `rust-toolchain.toml` | 固定 nightly 频道（edition 2024 需要） |
 | `.cargo/config.toml` | 仅 Linux target：`rustflags = ["-L", "local-lib"]` + `[env] LD_LIBRARY_PATH=local-lib`（libraw.so 链接） |
-| `photo-tool-app/Cargo.toml` | gpui + gpui-component + rayon + tracing + rfd |
+| `crates/photo-tool-app/Cargo.toml` | gpui + gpui-component + rayon + tracing + rfd |
 | `CONTEXT.md` | 领域术语表（Capture/Stack/Rating 等泛在语言） |
 | `.gitignore` | 含 `libraw.so`、`local-lib/`、`nul`（Windows 保留名产物） |
 
@@ -216,26 +230,25 @@ gpui-component 项目位于 `D:\Dev\Code\gpui-component`，含完整源码和本
 
 ## 测试与 QA
 
-- 全部 **64 个 `#[test]`** 为 `photo-tool-core/src/*.rs` 文件末尾的内联 `#[cfg(test)] mod tests`
+- 全部 **83 个 `#[test]`** 分布在 3 个 crate 的源文件末尾内联 `#[cfg(test)] mod tests`
 - 无外部 `tests/` 目录、无异步测试、无第三方测试框架（唯一 dev-dep：`tempfile`）
 
 ### 测试分布
 
-| 模块 | 测试数 | 覆盖内容 |
+| 模块（新 crate） | 测试数 | 覆盖内容 |
 |---|---|---|
-| `domain.rs` | 9 | 扩展名解析（大小写不敏感）、RAW 白名单、display_priority、is_viewable |
-| `config.rs` | 3 | 默认值、TOML 保存/加载往返、配置路径 |
-| `scanner.rs` | 8 | JPEG+RAW 配对、大小写、sidecar 分离、忽略视频 |
-| `ops.rs` | 8 | 移动/复制/重命名/删除（含 sidecar）、命名冲突、批量跳过缺失 |
-| `thumbnail.rs` | 6 | 缓存命中、键唯一性、stats/clear、prune 淘汰最旧、错误路径 |
-| `exif.rs` | 7 | 无 EXIF 报错、summary 格式、不存在文件、file_size 始终填充 |
-| `import.rs` | 8 | date_subfolder 三种格式与回落、设备检测不崩溃、空导入 |
-| `convert.rs` | 7 | resize 三分支、格式分发、RAW 错误、输出路径命名 |
-| `xmp.rs` | 8 | 默认值、枚举↔字符串转换、读写往返、重复写更新 |
+| `photo-domain::domain.rs` | 15 | 扩展名解析、RAW 白名单、enrich_with_xmp、ExifMetadata 默认/摘要、XmpMetadata 枚举转换 |
+| `photo-config::lib.rs` (config) | 3 | 默认值、TOML 保存/加载往返、配置路径 |
+| `photo-engine::scanner.rs` | 8 | JPEG+RAW 配对、大小写、sidecar 分离、忽略视频 |
+| `photo-engine::ops.rs` | 8 | 移动/复制/重命名/删除（含 sidecar）、命名冲突、批量跳过缺失 |
+| `photo-engine::thumbnail.rs` | 6 | 缓存命中、键唯一性、stats/clear、prune 淘汰最旧、错误路径 |
+| `photo-engine::exif.rs` | 5 | 无 EXIF 报错、不存在文件、file_size 始终填充（summary 测试移至 domain）|
+| `photo-engine::convert.rs` | 7 | resize 三分支、格式分发、RAW 错误、输出路径命名 |
+| `photo-engine::xmp.rs` | 6 | xmp_path、读写往返、不存在的文件返回默认值、更新已有文件 |
 
 ### 测试辅助
 
-- 各模块私有 helper + `tempfile::TempDir` 做 FS 隔离：`create_test_files`（scanner）、`make_test_capture`（ops）、`create_test_jpeg`（convert/thumbnail）、`create_test_jpeg_with_exif`（exif）
+- 各模块私有 helper + `tempfile::TempDir` 做 FS 隔离
 - 断言用 `assert!`/`assert_eq!`，Result 直接 `unwrap()`；无共享 fixture
 - 命名：`test_<subject>_<scenario>`，一个测试验证一个行为或边界
 

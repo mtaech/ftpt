@@ -3219,7 +3219,6 @@ dependencies = [
  "qoi",
  "ravif",
  "rayon",
- "rgb",
  "tiff",
  "zune-core 0.5.1",
  "zune-jpeg 0.5.15",
@@ -4852,29 +4851,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "photo-tool-app"
+name = "photo-config"
 version = "0.1.0"
 dependencies = [
- "chrono",
- "embed-resource 2.5.2",
- "gpui",
- "gpui-component",
- "gpui-component-assets",
- "gpui_platform",
- "image",
- "oneshot",
- "photo-tool-core",
- "rayon",
- "rfd",
- "rust-embed",
+ "dirs",
+ "rusqlite",
+ "rusqlite_migration",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
- "tracing",
- "tracing-subscriber",
- "zed-font-kit",
+ "toml 0.8.23",
 ]
 
 [[package]]
-name = "photo-tool-core"
+name = "photo-domain"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "photo-engine"
 version = "0.1.0"
 dependencies = [
  "chrono",
@@ -4882,6 +4883,7 @@ dependencies = [
  "image",
  "kamadak-exif",
  "parking_lot",
+ "photo-domain",
  "quick-xml 0.37.5",
  "rawlib",
  "regex-lite",
@@ -4898,6 +4900,30 @@ dependencies = [
  "winreg 0.52.0",
  "zune-core 0.5.1",
  "zune-jpeg 0.5.15",
+]
+
+[[package]]
+name = "photo-tool-app"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "embed-resource 2.5.2",
+ "gpui",
+ "gpui-component",
+ "gpui-component-assets",
+ "gpui_platform",
+ "image",
+ "oneshot",
+ "photo-config",
+ "photo-domain",
+ "photo-engine",
+ "rayon",
+ "rfd",
+ "rust-embed",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "zed-font-kit",
 ]
 
 [[package]]

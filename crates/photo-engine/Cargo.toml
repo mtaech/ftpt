@@ -1,0 +1,33 @@
+[package]
+name = "photo-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+photo-domain = { path = "../photo-domain" }
+
+chrono.workspace = true
+dirs.workspace = true
+image.workspace = true
+kamadak-exif.workspace = true
+parking_lot.workspace = true
+quick-xml.workspace = true
+rawlib.workspace = true
+regex-lite.workspace = true
+rusqlite.workspace = true
+rusqlite_migration.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+trash.workspace = true
+tracing.workspace = true
+walkdir.workspace = true
+zune-core.workspace = true
+zune-jpeg.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winreg.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
