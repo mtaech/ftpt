@@ -1,7 +1,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{h_flex, v_flex};
-
 use photo_domain::BatchOpType;
 
 use crate::state::app::RootView;
@@ -52,21 +52,14 @@ pub fn render_batch_ops_section(
                 .gap_1()
                 .child(label("对比目录"))
                 .child(
-                    div()
-                        .id("batch-compare-dir")
-                        .flex_1()
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .bg(theme::colors().element_background)
-                        .text_xs()
-                        .text_color(if compare_dir.is_empty() {
-                            theme::colors().text_muted
+                    Button::new("batch-compare-dir")
+                        .ghost()
+                        .tooltip("点击选择要对比的目录")
+                        .label(if compare_dir.is_empty() {
+                            SharedString::from("选择对比目录...")
                         } else {
-                            theme::colors().text
+                            compare_dir.clone()
                         })
-                        .child(compare_dir)
-                        .cursor_pointer()
                         .on_click(move |_, _window, cx| {
                             if let Some(e) = vh.upgrade() {
                                 cx.update_entity(&e, |view, cx| {
