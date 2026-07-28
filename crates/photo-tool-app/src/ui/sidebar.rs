@@ -179,9 +179,18 @@ fn render_folder_groups(
         .cloned()
         .collect();
 
+    // 分区之间：分隔线 + pt_3 拉开层次（border_variant 是设计系统的弱边框色）
+    let divider = || {
+        div()
+            .h(px(1.))
+            .w_full()
+            .bg(theme::colors().border_variant)
+    };
+
     v_flex()
         .gap_1()
-        .child(div().pt_2().child(crate::ui::controls::section_header("收藏")))
+        .child(div().pt_3().child(divider()))
+        .child(crate::ui::controls::section_header("收藏"))
         .child(if favs.is_empty() {
             div()
                 .text_xs()
@@ -196,7 +205,8 @@ fn render_folder_groups(
                 }))
                 .into_any_element()
         })
-        .child(div().pt_2().child(crate::ui::controls::section_header("最近打开")))
+        .child(div().pt_3().child(divider()))
+        .child(crate::ui::controls::section_header("最近打开"))
         .child(if recents.is_empty() {
             div()
                 .text_xs()
