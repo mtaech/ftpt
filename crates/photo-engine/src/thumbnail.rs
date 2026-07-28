@@ -341,7 +341,6 @@ mod tests {
         let source = SourceFile {
             path: img_path,
             format: ImageFormat::Jpeg,
-            is_sidecar: false,
             file_size: None,
         };
 
@@ -360,7 +359,6 @@ mod tests {
         let source = SourceFile {
             path: img_path.clone(),
             format: ImageFormat::Jpeg,
-            is_sidecar: false,
             file_size: None,
         };
 
@@ -380,7 +378,6 @@ mod tests {
         let source = SourceFile {
             path: img_path,
             format: ImageFormat::Jpeg,
-            is_sidecar: false,
             file_size: None,
         };
 
@@ -404,7 +401,6 @@ mod tests {
         let source = SourceFile {
             path: img_path,
             format: ImageFormat::Jpeg,
-            is_sidecar: false,
             file_size: None,
         };
 
@@ -430,8 +426,7 @@ mod tests {
             let source = SourceFile {
                 path: img_path,
                 format: ImageFormat::Jpeg,
-                is_sidecar: false,
-                file_size: None,
+                    file_size: None,
             };
             let _ = cache.get_or_generate(&source, 64, None).unwrap();
         }
@@ -451,7 +446,6 @@ mod tests {
         let source = SourceFile {
             path: PathBuf::from("/nonexistent/path.jpg"),
             format: ImageFormat::Jpeg,
-            is_sidecar: false,
             file_size: None,
         };
 
@@ -476,7 +470,6 @@ mod tests {
         let source = SourceFile {
             path,
             format: ImageFormat::Jpeg,
-            is_sidecar: false,
             file_size: None,
         };
         let bytes = cache.get_or_generate(&source, 128, None).unwrap();
@@ -506,7 +499,6 @@ mod tests {
 
         let captures = crate::scanner::scan_directory(
             dir.path(),
-            &["xmp".to_string()],
             &photo_domain::FilterCriteria::default(),
             None,
         )

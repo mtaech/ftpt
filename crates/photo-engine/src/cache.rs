@@ -7,9 +7,8 @@ use rusqlite_migration::{Migrations, M};
 use photo_domain::ImageFormat;
 
 use photo_domain::ExifMetadata;
-use photo_domain::XmpMetadata;
 
-/// EXIF 缓存表 + XMP 元数据表迁移
+/// EXIF 缓存表迁移
 fn cache_migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(
@@ -39,14 +38,6 @@ fn cache_migrations() -> Migrations<'static> {
                 gps_lon_min  REAL,
                 gps_lon_sec  REAL,
                 gps_altitude REAL
-            );",
-        ),
-        M::up(
-            "CREATE TABLE IF NOT EXISTS xmp_meta (
-                path        TEXT PRIMARY KEY,
-                rating      INTEGER NOT NULL DEFAULT 0,
-                color_label TEXT NOT NULL DEFAULT '',
-                flag        TEXT NOT NULL DEFAULT ''
             );",
         ),
     ])
@@ -145,48 +136,6 @@ impl ExifCache {
         Ok(exif)
     }
 
-    /// 获取 XMP 缓存。返回 `None` 表示未缓存。
-    pub fn get_xmp(&self, path: &Path) -> Result<Option<XmpMetadata>, CacheError> {
-        let path_str = path.to_string_lossy();
-        let conn = self.conn.lock();
-        match conn.query_row(
-            "SELECT rating, color_label, flag FROM xmp_meta WHERE path = ?1",
-            rusqlite::params![path_str.as_ref()],
-            |row| {
-                Ok(XmpMetadata {
-                    rating: row.get::<_, i32>(0)? as u8,
-                    color_label: row.get(1)?,
-                    flag: row.get(2)?,
-                })
-            },
-        ) {
-            Ok(m) => Ok(Some(m)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// 写入 XMP 缓存。
-    pub fn put_xmp(&self, path: &Path, meta: &XmpMetadata) -> Result<(), CacheError> {
-        let path_str = path.to_string_lossy();
-        let conn = self.conn.lock();
-        conn.execute(
-            "INSERT OR REPLACE INTO xmp_meta (path, rating, color_label, flag) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![path_str.as_ref(), meta.rating as i32, meta.color_label, meta.flag],
-        )?;
-        Ok(())
-    }
-
-    /// 获取或从文件读取 XMP：缓存命中直接返回；未命中则从旁车文件读取并缓存。
-    pub fn get_or_read_xmp(&self, path: &Path) -> Result<XmpMetadata, CacheError> {
-        if let Some(cached) = self.get_xmp(path)? {
-            return Ok(cached);
-        }
-        let xp = crate::xmp::xmp_path(path);
-        let meta = crate::xmp::read_xmp(&xp).unwrap_or_default();
-        let _ = self.put_xmp(path, &meta);
-        Ok(meta)
-    }
 }
 fn file_fingerprint(path: &Path) -> std::io::Result<(u64, u64)> {
     let meta = std::fs::metadata(path)?;

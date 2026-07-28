@@ -47,7 +47,6 @@ impl ThumbnailCacheMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppConfig {
-    pub sidecar_extensions: Vec<String>,
     pub thumbnail_size: u32,
     pub favorite_dirs: Vec<String>,
     pub last_directory: Option<String>,
@@ -81,7 +80,6 @@ fn default_font_family() -> String {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            sidecar_extensions: vec!["xmp".to_string()],
             thumbnail_size: 220,
             favorite_dirs: vec![],
             last_directory: None,
@@ -215,7 +213,6 @@ mod tests {
     #[test]
     fn test_default_config() {
         let cfg = AppConfig::default();
-        assert!(cfg.sidecar_extensions.contains(&"xmp".to_string()));
         assert_eq!(cfg.thumbnail_size, 220);
         assert_eq!(cfg.theme, Theme::Light);
     }

@@ -37,9 +37,9 @@ pub fn find_matching(
         return Err(BatchOpError::CompareDirNotFound(compare_dir.to_path_buf()));
     }
 
-    // 扫描对比目录（不走 sidecar 配对——batch 匹配只认文件名）
+    // 扫描对比目录（batch 匹配只认文件名）
     let compare_captures =
-        scanner::scan_directory(compare_dir, &[], &Default::default(), None)?;
+        scanner::scan_directory(compare_dir, &Default::default(), None)?;
 
     // 构建对比目录的 base_name 集合（按需过滤格式）
     let compare_names: HashSet<String> = compare_captures
@@ -127,7 +127,7 @@ pub fn execute(
 /// 判断 capture 是否包含指定格式（大小写不敏感，接受 "jpg"/"jpeg"/"JPG" 等）
 fn capture_has_format(capture: &Capture, format: &str) -> bool {
     let Some(target) = ImageFormat::from_extension(format) else { return false };
-    capture.source_files.iter().any(|f| !f.is_sidecar && f.format == target)
+    capture.source_files.iter().any(|f| f.format == target)
 }
 
 #[cfg(test)]
@@ -151,7 +151,7 @@ mod tests {
         // 对比目录: IMG_001.jpg, IMG_002.jpg (IMG_003 不在)
         create_files(&cmp_dir, &[("IMG_001", "jpg"), ("IMG_002", "jpg")]);
 
-        let source = scanner::scan_directory(src_dir.path(), &[], &Default::default(), None).unwrap();
+        let source = scanner::scan_directory(src_dir.path(), &Default::default(), None).unwrap();
 
         let (matched, unmatched) = find_matching(&source, cmp_dir.path(), None, None).unwrap();
 
@@ -167,7 +167,7 @@ mod tests {
         create_files(&src_dir, &[("A", "RW2"), ("B", "RW2"), ("C", "jpg")]);
         create_files(&cmp_dir, &[("A", "jpg"), ("B", "jpg"), ("C", "jpg")]);
 
-        let source = scanner::scan_directory(src_dir.path(), &[], &Default::default(), None).unwrap();
+        let source = scanner::scan_directory(src_dir.path(), &Default::default(), None).unwrap();
 
         // 仅找源目录中的 RW2，对比目录中的 JPG
         let (matched, _unmatched) =
@@ -188,7 +188,7 @@ mod tests {
     fn test_execute_delete_requires_no_target() {
         let dir = TempDir::new().unwrap();
         create_files(&dir, &[("del_me", "RW2")]);
-        let source = scanner::scan_directory(dir.path(), &[], &Default::default(), None).unwrap();
+        let source = scanner::scan_directory(dir.path(), &Default::default(), None).unwrap();
 
         let results = execute(&source, &[0], BatchOpType::DeleteSame, None, |_, _| {});
         assert!(results.iter().any(|r| r.contains("删除")));

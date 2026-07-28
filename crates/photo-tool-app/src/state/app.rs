@@ -14,7 +14,7 @@ use photo_domain::{
 };
 use photo_recognize::Recognizer;
 use photo_engine::thumbnail::ThumbnailCache;
-use photo_engine::{scanner, xmp, folder_db::FolderDb};
+use photo_engine::{scanner, folder_db::FolderDb};
 
 use crate::worker::Worker;
 
@@ -268,19 +268,17 @@ impl RootView {
         // 在照片目录中打开中心数据库（.pt/data.db）
         let folder_db = FolderDb::open_in_dir(&path)
             .ok();
-        let sidecar_exts = self.config.sidecar_extensions.clone();
         let filter = self.filter.clone();
 
         self.worker.spawn(
             cx,
             move || {
-                scanner::scan_directory(&path, &sidecar_exts, &filter, None)
+                scanner::scan_directory(&path, &filter, None)
                     .map(|captures| {
                         // 供扫描完成后同步 folder_db 的文件清单（全部非旁车源文件）
                         let entries: Vec<photo_engine::folder_db::FileEntry> = captures
                             .iter()
                             .flat_map(|c| c.source_files.iter())
-                            .filter(|f| !f.is_sidecar)
                             .filter_map(|f| {
                                 let rel = f.path.strip_prefix(&path).ok()?;
                                 let m = std::fs::metadata(&f.path).ok()?;
@@ -310,18 +308,12 @@ impl RootView {
                                 if let Some(cache) = &folder_db {
                                     let primary = &c.source_files[c.primary_index];
                                     let xmp = cache
-                                        .get_or_read_xmp(&primary.path)
+                                        .get_xmp(&primary.path)
+                                        .unwrap_or(None)
                                         .unwrap_or_default();
                                     meta.rating = xmp.rating();
                                     meta.color_label = xmp.color_label();
                                     meta.flag = xmp.flag();
-                                } else if meta.has_xmp {
-                                    let primary = &c.source_files[c.primary_index];
-                                    if let Ok(xmp) = xmp::read_xmp(
-                                        &xmp::xmp_path(&primary.path)
-                                    ) {
-                                        meta.enrich_with_xmp(&xmp);
-                                    }
                                 }
                                 if let Some(cache) = &folder_db {
                                     let primary = &c.source_files[c.primary_index];
@@ -566,7 +558,6 @@ impl RootView {
                 // 1. 扫描源目录
                 let source_captures = match photo_engine::scanner::scan_directory(
                     &src_dir,
-                    &[],
                     &Default::default(),
                     None,
                 ) {
@@ -720,13 +711,12 @@ impl RootView {
                 }
                 // unflagged_filter
                 if filter.unflagged_filter {
-                    // Proxy: no XMP sidecar likely means no flag set
-                    if meta.has_xmp {
+                    // no flag in DB means no flag set
+                    if meta.flag.is_none() {
                         return false;
                     }
                 }
-                // min_rating, color_label, flag_filter require XMP data
-                // not available in CaptureMeta — pass through for now.
+                // min_rating, color_label, flag_filter available via xmp_meta DB now
                 true
             })
             .map(|(i, _)| i)
@@ -824,7 +814,7 @@ impl RootView {
         let source = SourceFile {
             path,
             format: DomainFormat::from_extension(&ext).unwrap_or(DomainFormat::Jpeg),
-            is_sidecar: false,
+
             file_size: meta.file_size,
         };
         self.worker.spawn(
@@ -894,7 +884,7 @@ impl RootView {
         let source = photo_domain::SourceFile {
             path,
             format,
-            is_sidecar: false,
+
             file_size: meta.file_size,
         };
 
@@ -958,7 +948,7 @@ impl RootView {
             let source = SourceFile {
                 path: primary_path,
                 format,
-                is_sidecar: false,
+
                 file_size: capture.file_size,
             };
 
@@ -1072,20 +1062,17 @@ impl RootView {
         self.apply_filter_and_sort();
         cx.notify();
 
+        let folder_db = self.folder_db.clone();
         self.worker.spawn(
             cx,
             move || {
+                let Some(db) = &folder_db else { return vec![]; };
                 let mut results = Vec::new();
                 for (path, _old) in &paths {
-                    let xp = xmp::xmp_path(path);
-                    let result = (|| -> Result<(), xmp::XmpError> {
-                        let mut meta = if xp.exists() {
-                            xmp::read_xmp(&xp)?
-                        } else {
-                            photo_domain::XmpMetadata::default()
-                        };
+                    let result = (|| -> Result<(), photo_engine::folder_db::FolderDbError> {
+                        let mut meta = db.get_xmp(path)?.unwrap_or_default();
                         meta.set_rating(rating);
-                        xmp::write_xmp(&xp, &meta)?;
+                        db.put_xmp(path, &meta)?;
                         Ok(())
                     })();
                     results.push((path.clone(), result));
@@ -1121,24 +1108,20 @@ impl RootView {
         if paths.is_empty() {
             return;
         }
-
         self.apply_filter_and_sort();
         cx.notify();
 
+        let folder_db = self.folder_db.clone();
         self.worker.spawn(
             cx,
             move || {
+                let Some(db) = &folder_db else { return vec![]; };
                 let mut results = Vec::new();
                 for (path, _old) in &paths {
-                    let xp = xmp::xmp_path(path);
-                    let result = (|| -> Result<(), xmp::XmpError> {
-                        let mut meta = if xp.exists() {
-                            xmp::read_xmp(&xp)?
-                        } else {
-                            photo_domain::XmpMetadata::default()
-                        };
+                    let result = (|| -> Result<(), photo_engine::folder_db::FolderDbError> {
+                        let mut meta = db.get_xmp(path)?.unwrap_or_default();
                         meta.set_flag(flag);
-                        xmp::write_xmp(&xp, &meta)?;
+                        db.put_xmp(path, &meta)?;
                         Ok(())
                     })();
                     results.push((path.clone(), result));
@@ -1175,24 +1158,20 @@ impl RootView {
         if paths.is_empty() {
             return;
         }
-
         self.apply_filter_and_sort();
         cx.notify();
 
+        let folder_db = self.folder_db.clone();
         self.worker.spawn(
             cx,
             move || {
+                let Some(db) = &folder_db else { return vec![]; };
                 let mut results = Vec::new();
                 for (path, _old) in &paths {
-                    let xp = xmp::xmp_path(path);
-                    let result = (|| -> Result<(), xmp::XmpError> {
-                        let mut meta = if xp.exists() {
-                            xmp::read_xmp(&xp)?
-                        } else {
-                            photo_domain::XmpMetadata::default()
-                        };
+                    let result = (|| -> Result<(), photo_engine::folder_db::FolderDbError> {
+                        let mut meta = db.get_xmp(path)?.unwrap_or_default();
                         meta.set_color_label(label);
-                        xmp::write_xmp(&xp, &meta)?;
+                        db.put_xmp(path, &meta)?;
                         Ok(())
                     })();
                     results.push((path.clone(), result));
@@ -1239,10 +1218,8 @@ impl RootView {
         let paths: Vec<PathBuf> = capture_indices
             .iter()
             .filter_map(|&i| self.captures.get(i))
-            .flat_map(|meta| {
-                let primary = PathBuf::from(&meta.primary_path);
-                let xp = xmp::xmp_path(&primary);
-                vec![primary, xp]
+            .map(|meta| {
+                PathBuf::from(&meta.primary_path)
             })
             .collect();
 
@@ -1608,7 +1585,7 @@ impl RootView {
         let source = photo_domain::SourceFile {
             path: primary_path.to_path_buf(),
             format,
-            is_sidecar: false,
+
             file_size: meta.file_size,
         };
         Some(photo_domain::Capture {

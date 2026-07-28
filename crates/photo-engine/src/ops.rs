@@ -171,6 +171,25 @@ pub fn sync_rename_recognition(db: &FolderDb, old_rel: &str, new_rel: &str) -> R
     db.rename_recognition(old_rel, new_rel)
 }
 
+// ── xmp_meta 同步（评分/色标/旗标，键为完整路径）──
+
+/// 删除文件后同步删除对应评分/色标/旗标行。
+pub fn sync_delete_xmp(db: &FolderDb, paths: &[String]) -> Result<(), FolderDbError> {
+    db.delete_xmp_rows(paths)
+}
+
+/// 移动文件后同步迁移 xmp_meta 行到目标库。
+pub fn sync_move_xmp(src_db: &FolderDb, dst_db: &mut FolderDb, entries: &[(String, String)]) -> Result<(), FolderDbError> {
+    src_db.copy_xmp_rows_to(dst_db, entries)?;
+    let src_paths: Vec<String> = entries.iter().map(|(s, _)| s.clone()).collect();
+    src_db.delete_xmp_rows(&src_paths)
+}
+
+/// 重命名文件后同步重命名对应 xmp_meta 行。
+pub fn sync_rename_xmp(db: &FolderDb, old_path: &str, new_path: &str) -> Result<(), FolderDbError> {
+    db.rename_xmp(old_path, new_path)
+}
+
 /// 生成不会冲突的文件名：如果 path 已存在，追加 _1/_2/... 后缀
 pub fn resolve_name_conflict(path: &Path) -> PathBuf {
     if !path.exists() {
@@ -212,34 +231,32 @@ mod tests {
         let mut source_files = Vec::new();
         for ext in exts {
             let path = dir.path().join(format!("{}.{}", base, ext));
-            // 创建文件
             std::fs::write(&path, b"test data").unwrap();
-            let is_sidecar = *ext == "xmp";
-            let format = if is_sidecar || *ext == "jpg" || *ext == "jpeg" {
+            let format = if *ext == "jpg" || *ext == "jpeg" {
                 ImageFormat::Jpeg
             } else if *ext == "NEF" || *ext == "nef" {
                 ImageFormat::Raw("NEF".into())
             } else {
-                ImageFormat::Jpeg
+                match ImageFormat::from_extension(ext) {
+                    Some(f) => f,
+                    None => ImageFormat::Jpeg, // 测试中用 Jpeg 兜底
+                }
             };
             source_files.push(SourceFile {
                 path,
                 format,
-                is_sidecar,
                 file_size: None,
             });
         }
-        // 主显示图片取第一个非旁车
-        let primary_index = source_files.iter().position(|f| !f.is_sidecar).unwrap_or(0);
         Capture {
             base_name: base.to_string(),
             source_files,
-            primary_index,
+            primary_index: 0,
         }
     }
 
     #[test]
-    fn test_move_capture_with_sidecar() {
+    fn test_move_capture_all_files() {
         let src = TempDir::new().unwrap();
         let dst = TempDir::new().unwrap();
         let capture = make_test_capture(&src, "img", &["jpg", "NEF", "xmp"]);
@@ -356,19 +373,16 @@ mod tests {
                 SourceFile {
                     path: path.clone(),
                     format: ImageFormat::Jpeg,
-                    is_sidecar: false,
                     file_size: None,
                 },
                 SourceFile {
                     path: dir.path().join("nonexistent.jpg"),
                     format: ImageFormat::Jpeg,
-                    is_sidecar: false,
                     file_size: None,
                 },
             ],
             primary_index: 0,
         };
-
         // delete_capture should succeed despite one missing file
         let result = delete_capture(&capture, DeleteMode::Permanent);
         assert!(result.is_ok());

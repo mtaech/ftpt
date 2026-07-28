@@ -1,10 +1,11 @@
 //! 照片文件夹级中心数据库（`.pt/data.db`），管理三类表：
 //!
-//! - **exif_cache** / **xmp_meta**：缓存表，EXIF 与 XMP 元数据的 LRU 风格缓存。
+//! - **exif_cache**：缓存表，EXIF 元数据的 LRU 风格缓存。
 //!   缓存表**可被清除**（清空释放空间）——丢失后只会触发重新提取。
 //!
-//! - **recognition**：真相表，存储每张照片的鸟类识别结果。
-//!   **任何清理缓存的操作都不得触碰 recognition 表**——识别结果不可重新计算（需要 YOLO + 模型推理）。
+//! - **xmp_meta** / **recognition**：真相表，存储 XMP 元数据与鸟类识别结果。
+//!   **任何清理缓存的操作都不得触碰 xmp_meta 与 recognition 表**——
+//!   识别结果不可重新计算（需要 YOLO + 模型推理），XMP 元数据为用户手动编辑。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -228,17 +229,6 @@ impl FolderDb {
         Ok(())
     }
 
-    /// 获取或从文件读取 XMP：缓存命中直接返回；未命中则从旁车文件读取并缓存。
-    pub fn get_or_read_xmp(&self, path: &Path) -> Result<XmpMetadata, FolderDbError> {
-        if let Some(cached) = self.get_xmp(path)? {
-            return Ok(cached);
-        }
-        let xp = crate::xmp::xmp_path(path);
-        let meta = crate::xmp::read_xmp(&xp).unwrap_or_default();
-        let _ = self.put_xmp(path, &meta);
-        Ok(meta)
-    }
-
     // ── 识别真相表 ──
 
     /// UPSERT 一条识别结果。rel_path 使用正斜杠归一化。
@@ -358,8 +348,54 @@ impl FolderDb {
         }
         Ok(())
     }
-}
+    // ── xmp_meta 真相表（评分/色标/旗标持久化，不可当缓存清除）──
 
+    /// 批量删除评分/色标/旗标行。
+    pub fn delete_xmp_rows(&self, paths: &[String]) -> Result<(), FolderDbError> {
+        let conn = self.conn.lock();
+        for p in paths {
+            conn.execute("DELETE FROM xmp_meta WHERE path = ?1", rusqlite::params![p])?;
+        }
+        Ok(())
+    }
+
+    /// 重命名 xmp_meta 行的键（文件移动/重命名后同步）。
+    pub fn rename_xmp(&self, old_path: &str, new_path: &str) -> Result<(), FolderDbError> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE xmp_meta SET path = ?1 WHERE path = ?2",
+            rusqlite::params![new_path, old_path],
+        )?;
+        Ok(())
+    }
+
+    /// 将一批 xmp_meta 行复制到目标库（跨文件夹移动/复制用）。
+    /// entries: (源路径, 目标路径)
+    pub fn copy_xmp_rows_to(
+        &self,
+        target_db: &mut FolderDb,
+        entries: &[(String, String)],
+    ) -> Result<(), FolderDbError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT rating, color_label, flag FROM xmp_meta WHERE path = ?1",
+        )?;
+        for (src, dst) in entries {
+            match stmt.query_row(rusqlite::params![src], |row| {
+                Ok(XmpMetadata {
+                    rating: row.get::<_, i32>(0)? as u8,
+                    color_label: row.get(1)?,
+                    flag: row.get(2)?,
+                })
+            }) {
+                Ok(meta) => target_db.put_xmp(std::path::Path::new(dst), &meta)?,
+                Err(rusqlite::Error::QueryReturnedNoRows) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
+    }
+}
 /// 文件条目信息（由 app 层扫描产生，传给 sync_with_scan 做三表同步）。
 pub struct FileEntry {
     pub full_path: PathBuf,
@@ -383,9 +419,9 @@ pub struct SyncStats {
 impl FolderDb {
     /// 以扫描结果同步三表（exif_cache / xmp_meta / recognition）：
     ///
-    /// - **exif_cache / xmp_meta**：删除文件已不存在的行；对新增/文件大小或 mtime 变化的文件，
-    ///   调用 `crate::exif::extract_exif` 与 `crate::xmp::read_xmp` 更新缓存。
-    /// - **recognition**：仅删除文件已不存在的行，**不重新识别**。
+    /// - **exif_cache**：删除文件已不存在的行；对新增/文件大小或 mtime 变化的文件，
+    ///   调用 `crate::exif::extract_exif` 更新缓存。
+    /// - **xmp_meta** / **recognition**：仅删除文件已不存在的行，**不重新识别/不重新读取**。
     pub fn sync_with_scan(
         &self,
         entries: &[FileEntry],
@@ -484,29 +520,7 @@ impl FolderDb {
                     }
                 }
             }
-            // xmp：旁车文件存在且缓存缺失 → 读取入库
-            let sidecar = crate::xmp::xmp_path(&entry.full_path);
-            if sidecar.exists() {
-                let path_str = entry.full_path.to_string_lossy();
-                let missing = {
-                    let mut stmt = conn.prepare_cached("SELECT 1 FROM xmp_meta WHERE path = ?1")?;
-                    !stmt.exists(rusqlite::params![path_str.as_ref()])?
-                };
-                if missing {
-                    match crate::xmp::read_xmp(&sidecar) {
-                        Ok(meta) => {
-                            conn.execute(
-                                "INSERT OR REPLACE INTO xmp_meta (path, rating, color_label, flag) VALUES (?1, ?2, ?3, ?4)",
-                                rusqlite::params![path_str.as_ref(), meta.rating as i32, meta.color_label, meta.flag],
-                            )?;
-                        }
-                        Err(e) => {
-                            tracing::warn!("同步 XMP 读取失败 {}: {e}", sidecar.display());
-                            stats.cache_failed += 1;
-                        }
-                    }
-                }
-            }
+
             on_progress(i + 1, entries.len());
         }
         Ok(stats)

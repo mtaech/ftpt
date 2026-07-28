@@ -47,7 +47,6 @@ fn main() {
             path: image_path.clone(),
             format,
             file_size,
-            is_sidecar: false,
         }],
         primary_index: 0,
     };

@@ -11,12 +11,11 @@ pub enum ScanError {
     Io(#[from] std::io::Error),
 }
 
-/// 扫描目录，将所有图片文件按配对规则归并为 Capture 列表
+/// 扫描目录，将所有图片文件按 stem 归并为 Capture 列表
 ///
 /// `on_progress` — 可选进度回调，接收 0-100 表示扫描+归并的百分比
 pub fn scan_directory(
     dir: &Path,
-    sidecar_extensions: &[String],
     filter: &FilterCriteria,
     on_progress: Option<Box<dyn Fn(u32) + Send>>,
 ) -> Result<Vec<Capture>, ScanError> {
@@ -30,7 +29,6 @@ pub fn scan_directory(
     struct Entry {
         path: PathBuf,
         stem: String,
-        is_sidecar: bool,
         format: ImageFormat,
         file_size: Option<u64>,
     }
@@ -54,20 +52,11 @@ pub fn scan_directory(
         };
 
         let ext_lower = ext.to_lowercase();
-        let is_sidecar = sidecar_extensions
-            .iter()
-            .any(|s| s.to_lowercase() == ext_lower);
-        if !is_sidecar && !ImageFormat::is_viewable(&ext_lower) {
+        if !ImageFormat::is_viewable(&ext_lower) {
             continue;
         }
-
-        let format = if is_sidecar {
-            ImageFormat::Jpeg
-        } else {
-            match ImageFormat::from_extension(&ext_lower) {
-                Some(f) => f,
-                None => continue,
-            }
+        let Some(format) = ImageFormat::from_extension(&ext_lower) else {
+            continue;
         };
 
         // 从目录项元数据获取文件大小（NTFS 目录项已缓存，零额外开销）
@@ -76,7 +65,6 @@ pub fn scan_directory(
         entries.push(Entry {
             path: path.to_path_buf(),
             stem: stem.to_string(),
-            is_sidecar,
             format,
             file_size,
         });
@@ -96,7 +84,6 @@ pub fn scan_directory(
         let sf = SourceFile {
             path: e.path,
             format: e.format,
-            is_sidecar: e.is_sidecar,
             file_size: e.file_size,
         };
         base_map.entry(base_key).or_default().push(sf);
@@ -112,7 +99,6 @@ pub fn scan_directory(
             let primary_index = source_files
                 .iter()
                 .enumerate()
-                .filter(|(_, f)| !f.is_sidecar)
                 .min_by_key(|(_, f)| f.format.display_priority())
                 .map(|(i, _)| i)
                 .unwrap_or(0);
@@ -161,13 +147,13 @@ fn apply_filter(captures: &mut Vec<Capture>, filter: &FilterCriteria) {
     }
 }
 
-/// 计算堆叠数：除主显示图片外的非旁车图像文件数量
+/// 计算堆叠数：除主显示图片外的图像文件数量
 pub fn stack_count(capture: &Capture) -> usize {
     capture
         .source_files
         .iter()
         .enumerate()
-        .filter(|(i, f)| *i != capture.primary_index && !f.is_sidecar)
+        .filter(|(i, _f)| *i != capture.primary_index)
         .count()
 }
 
@@ -192,7 +178,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         create_test_files(&dir, &["DSC_0001.jpg", "DSC_0001.NEF"]);
 
-        let captures = scan_directory(dir.path(), &[], &FilterCriteria::default(), None).unwrap();
+        let captures = scan_directory(dir.path(), &FilterCriteria::default(), None).unwrap();
         assert_eq!(captures.len(), 1);
         let c = &captures[0];
         assert_eq!(c.base_name, "DSC_0001");
@@ -205,7 +191,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         create_test_files(&dir, &["photo.JPG", "Photo.NEF"]);
 
-        let captures = scan_directory(dir.path(), &[], &FilterCriteria::default(), None).unwrap();
+        let captures = scan_directory(dir.path(), &FilterCriteria::default(), None).unwrap();
         assert_eq!(captures.len(), 1);
         assert_eq!(captures[0].source_files.len(), 2);
     }
@@ -215,7 +201,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         create_test_files(&dir, &["solo.jpg"]);
 
-        let captures = scan_directory(dir.path(), &[], &FilterCriteria::default(), None).unwrap();
+        let captures = scan_directory(dir.path(), &FilterCriteria::default(), None).unwrap();
         assert_eq!(captures.len(), 1);
         assert_eq!(captures[0].source_files.len(), 1);
     }
@@ -225,7 +211,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         create_test_files(&dir, &["raw_only.NEF"]);
 
-        let captures = scan_directory(dir.path(), &[], &FilterCriteria::default(), None).unwrap();
+        let captures = scan_directory(dir.path(), &FilterCriteria::default(), None).unwrap();
         assert_eq!(captures.len(), 1);
         assert!(matches!(
             captures[0].source_files[captures[0].primary_index].format,
@@ -238,30 +224,23 @@ mod tests {
         let dir = TempDir::new().unwrap();
         create_test_files(&dir, &["img.jpg", "img.NEF", "img.DNG"]);
 
-        let captures = scan_directory(dir.path(), &[], &FilterCriteria::default(), None).unwrap();
+        let captures = scan_directory(dir.path(), &FilterCriteria::default(), None).unwrap();
         assert_eq!(captures.len(), 1);
         assert_eq!(captures[0].source_files.len(), 3);
     }
 
     #[test]
-    fn test_sidecar_files_separate() {
+    fn test_xmp_files_ignored() {
         let dir = TempDir::new().unwrap();
         create_test_files(&dir, &["img.jpg", "img.NEF", "img.xmp"]);
 
-        let captures = scan_directory(
-            dir.path(),
-            &["xmp".to_string()],
-            &FilterCriteria::default(),
-            None,
-        )
-        .unwrap();
+        let captures = scan_directory(dir.path(), &FilterCriteria::default(), None).unwrap();
         assert_eq!(captures.len(), 1);
-        let sidecars: Vec<_> = captures[0]
-            .source_files
-            .iter()
-            .filter(|f| f.is_sidecar)
-            .collect();
-        assert_eq!(sidecars.len(), 1);
+        // .xmp 不再被当作旁车文件——非 viewable 扩展名被忽略
+        assert_eq!(captures[0].source_files.len(), 2);
+        for sf in &captures[0].source_files {
+            assert!(!sf.path.extension().unwrap().to_str().unwrap().eq_ignore_ascii_case("xmp"));
+        }
     }
 
     #[test]
@@ -269,7 +248,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         create_test_files(&dir, &["img.jpg", "img.mp4"]);
 
-        let captures = scan_directory(dir.path(), &[], &FilterCriteria::default(), None).unwrap();
+        let captures = scan_directory(dir.path(), &FilterCriteria::default(), None).unwrap();
         assert_eq!(captures.len(), 1);
         // mp4 不被当作图片源文件
         assert_eq!(captures[0].source_files.len(), 1);
@@ -280,7 +259,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         create_test_files(&dir, &["a.jpg", "a.NEF", "b.jpg", "b.CR2", "c.jpg"]);
 
-        let captures = scan_directory(dir.path(), &[], &FilterCriteria::default(), None).unwrap();
+        let captures = scan_directory(dir.path(), &FilterCriteria::default(), None).unwrap();
         assert_eq!(captures.len(), 3);
     }
 }

@@ -17,7 +17,6 @@
 //! | 表 | 性质 | 内容 |
 //! |---|---|---|
 //! | `exif_cache` | **缓存** | EXIF 元数据（可从源文件重算，可清） |
-//! | `xmp_cache` | **缓存** | XMP 元数据（可从旁车重算，可清） |
 //! | `recognition` | **真相** | 识别结果（不可当缓存清） |
 //!
 //! 本 crate **不直接读写 `data.db`**——recognition 表的写入/读取由 `photo-engine`
@@ -344,7 +343,6 @@ mod tests {
                 path: img_path,
                 format: ImageFormat::Jpeg,
                 file_size: None,
-                is_sidecar: false,
             }],
         };
 
@@ -362,7 +360,6 @@ mod tests {
                 path: PathBuf::from("/nonexistent/photo.jpg"),
                 format: ImageFormat::Jpeg,
                 file_size: None,
-                is_sidecar: false,
             }],
         };
 
@@ -387,7 +384,6 @@ mod tests {
                 path: bad_path,
                 format: ImageFormat::Jpeg,
                 file_size: None,
-                is_sidecar: false,
             }],
         };
 
@@ -438,7 +434,6 @@ mod tests {
                 path: img_path,
                 format: ImageFormat::Jpeg,
                 file_size: None,
-                is_sidecar: false,
             }],
         };
 

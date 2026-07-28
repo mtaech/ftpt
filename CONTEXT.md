@@ -11,33 +11,29 @@
 
 一次快门产生的拍摄。一个 **stem** 下的所有源文件聚合成一个 Capture。
 
-- 属性：`base_name`（不含扩展名的文件名）、`directory`（所在目录）、`source_files`（至少一个）
-- 示例：`DSC_0001.jpg` + `DSC_0001.NEF` + `DSC_0001.xmp` → 一个 Capture
+- 示例：`DSC_0001.jpg` + `DSC_0001.NEF` → 一个 Capture
 
 ### SourceFile（源文件）
 
-组成一次拍摄的单个物理文件。
 
-- 属性：路径、格式（ImageFormat）、是否为**旁车文件**、文件大小
+- 属性：路径、格式（ImageFormat）、文件大小
 - 一个 Capture 包含 1..n 个 SourceFile
 
 ### ImageFormat（图片格式）
 
 文件所属于的图片格式分类。包括 7 种标准格式（JPEG, PNG, TIFF, HEIF, WebP, BMP, GIF）和 RAW 变体（44 种扩展名白名单）。
 
-- 每种格式有 `display_priority`：数字越小越优先。Jpeg(0) > Png(1) > … > Raw(7)
-- **主显示文件**：所有非旁车 SourceFile 中 `display_priority` 最低的那个
+- **主显示文件**：所有 SourceFile 中 `display_priority` 最低的那个
 
 ### CaptureMeta（拍摄摘要）
 
-发送到 UI 层的轻量摘要，不含完整 SourceFile 列表。
 
-- 包含：base_name, primary_path, primary_format, stack_count, file_size, date_taken, has_xmp, extensions
+- 包含：base_name, primary_path, primary_format, stack_count, file_size, date_taken, extensions
 - 设计目的：避免 UI 层加载完整文件路径列表（批量展示 5000+ 条目时节省内存和 FFI 开销）
 
 ### Stack（堆叠）
 
-一个 Capture 中除主显示文件外的非旁车文件。`stack_count` 表示额外源文件的数量。
+一个 Capture 中除主显示文件外的文件。`stack_count` 表示额外源文件的数量。
 
 - 示例：`DSC_0001.jpg`（主）+ `DSC_0001.NEF` → stack_count = 1
 
@@ -45,27 +41,20 @@
 
 ## 标记
 
-### Rating（评分）
 
-1-5 星评分，或 None（未评分）。持久化到 XMP 旁车文件的 `pt:Rating` 属性。
+1-5 星评分，或 None（未评分）。持久化到文件夹数据库 `xmp_meta` 表。
 
-### ColorLabel（颜色标签）
+5 种颜色标记：Red、Yellow、Green、Blue、Purple，或 None。持久化到 `xmp_meta` 表。
 
-5 种颜色标记：Red、Yellow、Green、Blue、Purple，或 None。持久化到 `pt:ColorLabel`。
-
-### Flag（旗标）
-
-Pick（入选）或 Reject（淘汰）。持久化到 `pt:Flag`。
+Pick（入选）或 Reject（淘汰）。持久化到 `xmp_meta` 表。
 
 ---
 
 ## 文件操作
 
-### Sidecar / 旁车文件
-
-与图片文件同 stem、不同扩展名的附属文件（如 `.xmp`）。扫描时与图片文件配对到同一个 Capture。
 
 ### DeleteMode（删除模式）
+
 
 - **Trash**：移到操作系统回收站
 - **Permanent**：永久删除（不可恢复）
@@ -147,12 +136,10 @@ Ascending（升序）或 Descending（降序）。
 
 鸟种参考数据：全分类体系的物种信息（中文名/学名/拼音/首字母）+ 分类器类别号到学名的映射表。只读，随应用分发。
 
-### 文件夹数据目录（.pt/）
-
-照片文件夹内的应用私有数据目录，存放该文件夹的 SQLite 库（data.db）：EXIF/XMP **缓存表**（可从源文件重算，可删）与 recognition **真相表**（识别结果，不可当缓存清）同居一库。
+照片文件夹内的应用私有数据目录，存放该文件夹的 SQLite 库（data.db）：EXIF **缓存表**（可从源文件重算，可删）、xmp_meta **真相表**（评分/色标/旗标，不可当缓存清）与 recognition **真相表**（识别结果，不可当缓存清）同居一库。
 
 - 记录以主显示文件**相对文件夹根的路径**为键，文件夹整体搬移时库随目录走、记录全保持有效
-- 文件操作（删除/移动/复制/重命名）时识别记录**随文件走**
+- 文件操作（删除/移动/复制/重命名）时评分/旗标与识别记录均**随文件走**
 
 ---
 
@@ -185,6 +172,5 @@ Ascending（升序）或 Descending（降序）。
                      ▼
               CaptureMeta → UI 层
 
-文件夹数据目录（.pt/data.db）：识别结果写入/读取，
-EXIF/XMP 缓存表与 recognition 真相表同居一库。
-```
+   文件夹数据目录（.pt/data.db）：识别结果与评分/旗标写入/读取，
+   EXIF 缓存表、xmp_meta 真相表与 recognition 真相表同居一库。

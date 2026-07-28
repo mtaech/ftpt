@@ -118,7 +118,6 @@ pub struct SourceFile {
     pub path: PathBuf,
     pub format: ImageFormat,
     pub file_size: Option<u64>,
-    pub is_sidecar: bool,
 }
 
 /// 一次快门产生的拍摄
@@ -141,7 +140,6 @@ pub struct CaptureMeta {
     pub stack_count: usize,
     pub file_size: Option<u64>,
     pub date_taken: Option<String>,
-    pub has_xmp: bool,
     pub extensions: Vec<String>,
     // --- EXIF 摘要字段（可延迟填充） ---
     pub camera_make: Option<String>,
@@ -153,7 +151,7 @@ pub struct CaptureMeta {
     pub focal_length: Option<String>,
     pub image_width: Option<u32>,
     pub image_height: Option<u32>,
-    // --- XMP 元数据字段（从旁车文件填充） ---
+    // --- 评分/色标/旗标字段（从文件夹数据库 xmp_meta 表填充） ---
     pub rating: Rating,
     pub color_label: ColorLabel,
     pub flag: Option<Flag>,
@@ -170,7 +168,6 @@ impl From<&Capture> for CaptureMeta {
         let ext_list: Vec<String> = c
             .source_files
             .iter()
-            .filter(|f| !f.is_sidecar)
             .map(|f| {
                 f.path
                     .extension()
@@ -188,11 +185,10 @@ impl From<&Capture> for CaptureMeta {
                 .source_files
                 .iter()
                 .enumerate()
-                .filter(|(i, f)| *i != c.primary_index && !f.is_sidecar)
+                .filter(|(i, _f)| *i != c.primary_index)
                 .count(),
             file_size: primary.file_size,
             date_taken: None,
-            has_xmp: c.source_files.iter().any(|f| f.is_sidecar),
             extensions: ext_list,
             camera_make: None,
             camera_model: None,
@@ -235,11 +231,8 @@ impl CaptureMeta {
         }
     }
 
-    /// 从 XMP 元数据填充评分/颜色标签/旗标（由调用方负责读取 XMP 文件）
+    /// 填充评分/颜色标签/旗标（由调用方负责从文件夹数据库读取 XmpMetadata）
     pub fn enrich_with_xmp(&mut self, xmp: &XmpMetadata) {
-        if !self.has_xmp {
-            return;
-        }
         self.rating = xmp.rating();
         self.color_label = xmp.color_label();
         self.flag = xmp.flag();
@@ -788,7 +781,7 @@ mod tests {
     }
 
     #[test]
-    fn test_enrich_with_xmp_reads_sidecar() {
+    fn test_enrich_with_xmp_fills_fields() {
         let mut xmp = XmpMetadata::default();
         xmp.set_rating(Rating::Three);
         xmp.set_color_label(ColorLabel::Green);
@@ -802,7 +795,6 @@ mod tests {
             stack_count: 0,
             file_size: None,
             date_taken: None,
-            has_xmp: true,
             extensions: vec![],
             camera_make: None,
             camera_model: None,
@@ -825,42 +817,6 @@ mod tests {
         assert_eq!(cm.rating, Rating::Three);
         assert_eq!(cm.color_label, ColorLabel::Green);
         assert_eq!(cm.flag, Some(Flag::Pick));
-    }
-
-    #[test]
-    fn test_enrich_with_xmp_no_sidecar_keeps_defaults() {
-        let xmp = XmpMetadata::default();
-        let mut cm = CaptureMeta {
-            index: 0,
-            base_name: "NO_XMP".into(),
-            primary_path: "/nonexistent/NO_XMP.jpg".into(),
-            primary_format: "JPEG".into(),
-            stack_count: 0,
-            file_size: None,
-            date_taken: None,
-            has_xmp: false,
-            extensions: vec![],
-            camera_make: None,
-            camera_model: None,
-            lens: None,
-            exposure_time: None,
-            f_number: None,
-            iso: None,
-            focal_length: None,
-            image_width: None,
-            image_height: None,
-            rating: Rating::None,
-            color_label: ColorLabel::None,
-            flag: None,
-            bird_name: None,
-            bird_confidence: None,
-            recognition_status: None,
-            bird_bbox: None,
-        };
-        cm.enrich_with_xmp(&xmp);
-        assert_eq!(cm.rating, Rating::None);
-        assert_eq!(cm.color_label, ColorLabel::None);
-        assert_eq!(cm.flag, None);
     }
 
     #[test]
@@ -984,7 +940,6 @@ mod tests {
             source_files: vec![SourceFile {
                 path: std::path::PathBuf::from("/photos/DSC_0001.jpg"),
                 format: ImageFormat::Jpeg,
-                is_sidecar: false,
                 file_size: Some(1024),
             }],
             primary_index: 0,
@@ -1013,7 +968,6 @@ mod tests {
             source_files: vec![SourceFile {
                 path: std::path::PathBuf::from("/photos/DSC_0002.jpg"),
                 format: ImageFormat::Jpeg,
-                is_sidecar: false,
                 file_size: Some(1024),
             }],
             primary_index: 0,
