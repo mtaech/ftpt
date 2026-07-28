@@ -3,6 +3,10 @@ name = "photo-tool-app"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "ftpt"
+path = "src/main.rs"
+
 [dependencies]
 photo-domain = { path = "../photo-domain" }
 photo-engine = { path = "../photo-engine" }
