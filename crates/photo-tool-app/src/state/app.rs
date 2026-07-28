@@ -874,6 +874,8 @@ impl RootView {
         let capture_idx = self.display_order[index];
         // 鼠标点击即移动焦点，预览/信息面板/双击进入预览都依赖 focus_index
         self.focus_index = Some(index);
+        // 焦点变化 → 右侧识别卡片同步刷新（廉价 SQLite 点查）
+        self.refresh_focused_recognition();
 
         if range {
             if let Some(anchor) = self.anchor {
@@ -916,6 +918,7 @@ impl RootView {
             return;
         };
         self.focus_index = Some(display_idx);
+        self.refresh_focused_recognition();
         if !self.selected.contains(&ci) {
             self.selected.clear();
             self.selected.insert(ci);
