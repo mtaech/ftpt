@@ -181,17 +181,23 @@ fn render_recent_directories(
             .child(crate::ui::controls::section_header("最近打开"))
             .into_any_element(),
     );
-    for dir in recents {
-        let display = std::path::Path::new(&dir)
+    for (i, dir) in recents.iter().enumerate() {
+        let display = std::path::Path::new(dir)
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or(&dir)
+            .unwrap_or(dir)
             .to_string();
         let dir_open = dir.clone();
+        let dir_remove = dir.clone();
         let vh_open = vh.clone();
+        let vh_remove = vh.clone();
         elements.push(
             div()
-                .id(ElementId::Name(SharedString::from(format!("recent-{dir}"))))
+                .id(ElementId::Name(SharedString::from(format!("recent-{i}"))))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
                 .px_2()
                 .py_0p5()
                 .rounded_sm()
@@ -199,10 +205,38 @@ fn render_recent_directories(
                 .hover(|style| style.bg(theme::colors().element_hover))
                 .child(
                     div()
+                        .flex_1()
                         .text_sm()
                         .text_color(theme::colors().text_muted)
                         .truncate()
                         .child(display),
+                )
+                .child(
+                    // hover 时浮现的移除按钮（与常用目录同款交互）
+                    div()
+                        .id(ElementId::Name(SharedString::from(format!("recent-rm-{i}"))))
+                        .invisible()
+                        .group_hover("", |this| this.visible())
+                        .cursor_pointer()
+                        .child(
+                            Icon::new(IconName::Close)
+                                .xsmall()
+                                .text_color(theme::colors().text_muted),
+                        )
+                        .on_click(move |_event: &ClickEvent, _window, cx| {
+                            // 阻止冒泡，避免触发外层「打开目录」
+                            cx.stop_propagation();
+                            if let Some(view) = vh_remove.upgrade() {
+                                let _ = cx.update_entity(&view, |root_view, root_cx| {
+                                    root_view
+                                        .config
+                                        .recent_directories
+                                        .retain(|d| d != &dir_remove);
+                                    root_view.save_config();
+                                    root_cx.notify();
+                                });
+                            }
+                        }),
                 )
                 .on_click(move |_, _window, cx| {
                     if let Some(view) = vh_open.upgrade() {
