@@ -116,6 +116,8 @@ pub struct RootView {
     pub batch_counts: (usize, usize, usize),
     /// 批量取消标志
     pub batch_cancel: Arc<AtomicBool>,
+    /// DB 同步进度 (done, total)；None = 未在同步
+    pub sync_progress: Option<(usize, usize)>,
     /// 检测框显隐
     pub bbox_visible: bool,
     /// 显示全量识别确认对话框
@@ -125,7 +127,7 @@ pub struct RootView {
 }
 
 impl RootView {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>, config_path: PathBuf, config: AppConfig) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>, config_path: PathBuf, mut config: AppConfig) -> Self {
         let cache_dir = config_path
             .parent()
             .unwrap_or(Path::new("."))
@@ -155,6 +157,14 @@ impl RootView {
         })
         .detach();
 
+        // 旧配置 left_panel_width==0 是旧的「收起」语义：恢复默认宽度，启动时隐藏侧栏
+        let sidebar_visible = config.left_panel_width > 0;
+        if config.left_panel_width == 0 {
+            config.left_panel_width = 260;
+        }
+        if config.right_panel_width == 0 {
+            config.right_panel_width = 280;
+        }
         // 启动后自动扫描上次打开的目录
         let auto_dir = config.last_directory.clone();
         let mut this = Self {
@@ -185,7 +195,7 @@ impl RootView {
             font_select,
             show_settings: false,
             sidebar_section: 0,
-            sidebar_visible: true,
+            sidebar_visible,
             grid_scroll_handle: UniformListScrollHandle::new(),
             filmstrip_scroll: ScrollHandle::default(),
             batch_compare_dir: String::new(),
@@ -207,6 +217,7 @@ impl RootView {
             batch_current_file: String::new(),
             batch_counts: (0, 0, 0),
             batch_cancel: Arc::new(AtomicBool::new(false)),
+            sync_progress: None,
             bbox_visible: true,
             show_recognize_all_confirm: false,
             focused_recognition: None,
@@ -265,6 +276,29 @@ impl RootView {
             move || {
                 scanner::scan_directory(&path, &sidecar_exts, &filter, None)
                     .map(|captures| {
+                        // 供扫描完成后同步 folder_db 的文件清单（全部非旁车源文件）
+                        let entries: Vec<photo_engine::folder_db::FileEntry> = captures
+                            .iter()
+                            .flat_map(|c| c.source_files.iter())
+                            .filter(|f| !f.is_sidecar)
+                            .filter_map(|f| {
+                                let rel = f.path.strip_prefix(&path).ok()?;
+                                let m = std::fs::metadata(&f.path).ok()?;
+                                let mtime_ns = m
+                                    .modified()
+                                    .ok()
+                                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                    .map(|d| d.as_nanos() as i64)
+                                    .unwrap_or(0);
+                                Some(photo_engine::folder_db::FileEntry {
+                                    full_path: f.path.clone(),
+                                    rel_path: rel.to_string_lossy().replace('\\', "/"),
+                                    file_size: m.len(),
+                                    mtime_ns,
+                                    format: f.format.clone(),
+                                })
+                            })
+                            .collect();
                         let metas: Vec<CaptureMeta> = captures
                             .iter()
                             .enumerate()
@@ -299,12 +333,12 @@ impl RootView {
                                 meta
                             })
                             .collect();
-                        (path, metas, folder_db)
+                        (path, metas, folder_db, entries)
                     })
             },
             |this, result, cx| {
                 match result {
-                    Ok((dir, metas, cache)) => {
+                    Ok((dir, metas, cache, entries)) => {
                         this.captures = metas;
                         this.folder_db = cache;
                         this.dir_path = Some(dir.clone());
@@ -345,6 +379,87 @@ impl RootView {
                         // 后台逐步提取 EXIF（RAW 文件的 LibRaw unpack 较慢）
                         this.spawn_enrich_tasks(cx);
                         this.preload_thumbnails(cx);
+                        // 同步 folder_db 三表：删多余行、新/改文件入库、清识别孤儿行
+                        if let Some(db) = this.folder_db.clone() {
+                            if !entries.is_empty() {
+                                let total = entries.len();
+                                this.sync_progress = Some((0, total));
+                                let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                                let counter_work = counter.clone();
+                                this.worker.spawn(
+                                    cx,
+                                    move || {
+                                        db.sync_with_scan(&entries, &|done, _| {
+                                            counter_work
+                                                .store(done, std::sync::atomic::Ordering::Relaxed);
+                                        })
+                                    },
+                                    |this, result, cx| {
+                                        this.sync_progress = None;
+                                        match result {
+                                            Ok(stats) => {
+                                                tracing::info!(
+                                                    "DB 同步完成：清理缓存 {} / 识别 {}，更新 {}，失败 {}",
+                                                    stats.cache_deleted,
+                                                    stats.recognition_deleted,
+                                                    stats.cache_updated,
+                                                    stats.cache_failed
+                                                );
+                                                if stats.cache_deleted
+                                                    + stats.recognition_deleted
+                                                    + stats.cache_updated
+                                                    > 0
+                                                {
+                                                    this.show_toast(
+                                                        format!(
+                                                            "同步完成：清理 {} 条缓存、{} 条识别记录，更新 {} 条",
+                                                            stats.cache_deleted,
+                                                            stats.recognition_deleted,
+                                                            stats.cache_updated
+                                                        ),
+                                                        cx,
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => tracing::error!("DB 同步失败: {e}"),
+                                        }
+                                        cx.notify();
+                                    },
+                                );
+                                // 轮询进度计数器，刷新状态栏 done/total
+                                let counter_poll = counter.clone();
+                                cx.spawn(|weak: WeakEntity<RootView>, cx: &mut AsyncApp| {
+                                    let mut cx = cx.clone();
+                                    async move {
+                                        loop {
+                                            cx.background_executor()
+                                                .timer(std::time::Duration::from_millis(200))
+                                                .await;
+                                            let done = counter_poll
+                                                .load(std::sync::atomic::Ordering::Relaxed);
+                                            let Some(view) = weak.upgrade() else {
+                                                break;
+                                            };
+                                            let running = cx
+                                                .update_entity(&view, |this, cx| {
+                                                    match this.sync_progress {
+                                                        Some((_, total)) => {
+                                                            this.sync_progress = Some((done, total));
+                                                            cx.notify();
+                                                            true
+                                                        }
+                                                        None => false,
+                                                    }
+                                                });
+                                            if !running {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                })
+                                .detach();
+                            }
+                        }
                         cx.notify();
                     }
                     Err(e) => {
@@ -1422,16 +1537,14 @@ impl RootView {
                 }
             }
             Action::ToggleLeftPanel => {
-                // Toggle left panel width (show/hide)
-                if self.config.left_panel_width > 0 {
-                    self.config.left_panel_width = 0;
-                } else {
-                    self.config.left_panel_width = 260;
-                }
+                // 切显隐（不动宽度，展开时恢复拖拽后的宽度）
+                self.sidebar_visible = !self.sidebar_visible;
+                self.save_config();
                 cx.notify();
             }
             Action::ToggleRightPanel => {
                 self.config.right_panel_visible = !self.config.right_panel_visible;
+                self.save_config();
                 cx.notify();
             }
             Action::ToggleSettings => {

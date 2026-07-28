@@ -126,9 +126,10 @@ pub fn render_toolbar(
                 .child(
                     Button::new("refresh-btn")
                         .icon(gpui_component::Icon::empty().path("icons/refresh-cw.svg"))
+                        .label("同步")
                         .ghost()
                         .small()
-                        .tooltip("重新扫描")
+                        .tooltip("重新扫描目录并同步数据库缓存")
                         .on_click({
                             let vh = vh.clone();
                             move |_, _window, cx| {

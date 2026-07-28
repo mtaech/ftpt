@@ -6,7 +6,7 @@
 //! - **recognition**：真相表，存储每张照片的鸟类识别结果。
 //!   **任何清理缓存的操作都不得触碰 recognition 表**——识别结果不可重新计算（需要 YOLO + 模型推理）。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use parking_lot::Mutex;
 use thiserror::Error;
@@ -357,6 +357,159 @@ impl FolderDb {
             target_db.upsert_recognition(dst_rel, rec)?;
         }
         Ok(())
+    }
+}
+
+/// 文件条目信息（由 app 层扫描产生，传给 sync_with_scan 做三表同步）。
+pub struct FileEntry {
+    pub full_path: PathBuf,
+    /// 相对目录的正斜杠路径（用于 recognition 表键）
+    pub rel_path: String,
+    pub file_size: u64,
+    pub mtime_ns: i64,
+    pub format: ImageFormat,
+}
+
+/// 同步操作统计。
+#[derive(Debug, Clone, Default)]
+pub struct SyncStats {
+    pub cache_deleted: usize,
+    pub cache_inserted: usize,
+    pub cache_updated: usize,
+    pub cache_failed: usize,
+    pub recognition_deleted: usize,
+}
+
+impl FolderDb {
+    /// 以扫描结果同步三表（exif_cache / xmp_meta / recognition）：
+    ///
+    /// - **exif_cache / xmp_meta**：删除文件已不存在的行；对新增/文件大小或 mtime 变化的文件，
+    ///   调用 `crate::exif::extract_exif` 与 `crate::xmp::read_xmp` 更新缓存。
+    /// - **recognition**：仅删除文件已不存在的行，**不重新识别**。
+    pub fn sync_with_scan(
+        &self,
+        entries: &[FileEntry],
+        on_progress: &dyn Fn(usize, usize),
+    ) -> Result<SyncStats, FolderDbError> {
+        let entry_paths: std::collections::HashSet<String> = entries
+            .iter()
+            .map(|e| e.full_path.to_string_lossy().to_string())
+            .collect();
+        let entry_rel_paths: std::collections::HashSet<String> =
+            entries.iter().map(|e| e.rel_path.clone()).collect();
+
+        let mut stats = SyncStats::default();
+        let conn = self.conn.lock();
+
+        // ── 1. 三表删除多余行 ──
+        {
+            let mut stmt = conn.prepare_cached("SELECT path FROM exif_cache")?;
+            let db_paths: Vec<String> = stmt.query_map([], |row| row.get(0))?
+                .filter_map(|r| r.ok()).collect();
+            let total = db_paths.len();
+            for (i, p) in db_paths.iter().enumerate() {
+                if !entry_paths.contains(p.as_str()) {
+                    conn.execute("DELETE FROM exif_cache WHERE path = ?1", rusqlite::params![p])?;
+                    stats.cache_deleted += 1;
+                }
+                on_progress(i + 1, total);
+            }
+        }
+        {
+            let mut stmt = conn.prepare_cached("SELECT path FROM xmp_meta")?;
+            let db_paths: Vec<String> = stmt.query_map([], |row| row.get(0))?
+                .filter_map(|r| r.ok()).collect();
+            for p in &db_paths {
+                if !entry_paths.contains(p.as_str()) {
+                    conn.execute("DELETE FROM xmp_meta WHERE path = ?1", rusqlite::params![p])?;
+                }
+            }
+        }
+        {
+            let mut stmt = conn.prepare_cached("SELECT rel_path FROM recognition")?;
+            let db_rel_paths: Vec<String> = stmt.query_map([], |row| row.get(0))?
+                .filter_map(|r| r.ok()).collect();
+            for rp in &db_rel_paths {
+                if !entry_rel_paths.contains(rp.as_str()) {
+                    conn.execute("DELETE FROM recognition WHERE rel_path = ?1", rusqlite::params![rp])?;
+                    stats.recognition_deleted += 1;
+                }
+            }
+        }
+
+        // ── 2. 新增/指纹变化 → 提取 exif ──
+        for (i, entry) in entries.iter().enumerate() {
+            let changed = {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT file_size, mtime_ns FROM exif_cache WHERE path = ?1",
+                )?;
+                match stmt.query_row(
+                    rusqlite::params![entry.full_path.to_string_lossy().as_ref()],
+                    |row| {
+                        let db_size: i64 = row.get(0)?;
+                        let db_mtime: i64 = row.get(1)?;
+                        Ok(db_size != entry.file_size as i64 || db_mtime != entry.mtime_ns)
+                    },
+                ) {
+                    Ok(changed) => changed,
+                    Err(rusqlite::Error::QueryReturnedNoRows) => true,
+                    Err(e) => return Err(e.into()),
+                }
+            };
+            if changed {
+                stats.cache_updated += 1;
+                match crate::exif::extract_exif(&entry.full_path, &entry.format) {
+                    Ok(exif) => {
+                        let path_str = entry.full_path.to_string_lossy();
+                        let params = exif_to_params(
+                            path_str.as_ref(),
+                            entry.file_size,
+                            entry.mtime_ns as u64,
+                            &exif,
+                        );
+                        conn.execute(
+                            "INSERT OR REPLACE INTO exif_cache
+                             (path, file_size, mtime_ns, make, model, lens, exposure_time, f_number, iso,
+                              focal_length, exposure_compensation, white_balance, date_time_original,
+                              image_width, image_height, file_size_cache, color_space, orientation,
+                              gps_lat_deg, gps_lat_min, gps_lat_sec,
+                              gps_lon_deg, gps_lon_min, gps_lon_sec, gps_altitude)
+                             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)",
+                             rusqlite::params_from_iter(params.iter().map(|b| b.as_ref())),
+                        )?;
+                    }
+                    Err(e) => {
+                        tracing::warn!("同步 EXIF 提取失败 {}: {e}", entry.full_path.display());
+                        stats.cache_failed += 1;
+                    }
+                }
+            }
+            // xmp：旁车文件存在且缓存缺失 → 读取入库
+            let sidecar = crate::xmp::xmp_path(&entry.full_path);
+            if sidecar.exists() {
+                let path_str = entry.full_path.to_string_lossy();
+                let missing = {
+                    let mut stmt = conn.prepare_cached("SELECT 1 FROM xmp_meta WHERE path = ?1")?;
+                    !stmt.exists(rusqlite::params![path_str.as_ref()])?
+                };
+                if missing {
+                    match crate::xmp::read_xmp(&sidecar) {
+                        Ok(meta) => {
+                            conn.execute(
+                                "INSERT OR REPLACE INTO xmp_meta (path, rating, color_label, flag) VALUES (?1, ?2, ?3, ?4)",
+                                rusqlite::params![path_str.as_ref(), meta.rating as i32, meta.color_label, meta.flag],
+                            )?;
+                        }
+                        Err(e) => {
+                            tracing::warn!("同步 XMP 读取失败 {}: {e}", sidecar.display());
+                            stats.cache_failed += 1;
+                        }
+                    }
+                }
+            }
+            on_progress(i + 1, entries.len());
+        }
+        Ok(stats)
     }
 }
 
@@ -728,5 +881,60 @@ mod tests {
         assert_eq!(got.status, RecognitionStatus::NeedsReview);
         assert_eq!(got.class_index, Some(123));
         assert!(got.bbox.is_some());
+    }
+
+    #[test]
+    fn test_sync_with_scan_stale_delete_and_fingerprint() {
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        let exif = make_exif();
+        let rec = make_recognition();
+        let xmp = XmpMetadata::default();
+
+        // keep：磁盘存在且已入库（指纹匹配）
+        let keep = tmp.path().join("keep.jpg");
+        std::fs::write(&keep, b"fake").unwrap();
+        db.put_exif(&keep, &exif).unwrap();
+
+        // gone：先入库再从磁盘删除 → 三表行都是垃圾
+        let gone = tmp.path().join("gone.jpg");
+        std::fs::write(&gone, b"fake").unwrap();
+        db.put_exif(&gone, &exif).unwrap();
+        db.put_xmp(&gone, &xmp).unwrap();
+        db.upsert_recognition("gone.jpg", &rec).unwrap();
+        std::fs::remove_file(&gone).unwrap();
+
+        let (ksize, kmtime) = file_fingerprint(&keep).unwrap();
+        let entries = vec![FileEntry {
+            full_path: keep.clone(),
+            rel_path: "keep.jpg".into(),
+            file_size: ksize,
+            mtime_ns: kmtime as i64,
+            format: ImageFormat::Jpeg,
+        }];
+
+        let stats = db.sync_with_scan(&entries, &|_, _| {}).unwrap();
+        // gone 的三表行被删；keep 指纹未变 → 不重提取
+        assert_eq!(stats.cache_deleted, 1);
+        assert_eq!(stats.recognition_deleted, 1);
+        assert_eq!(stats.cache_updated, 0);
+        assert_eq!(stats.cache_failed, 0);
+        assert!(db.get_exif(&keep).unwrap().is_some());
+        assert!(db.get_xmp(&gone).unwrap().is_none());
+        assert!(db.get_recognition("gone.jpg").unwrap().is_none());
+
+        // keep 内容变化（指纹不同）→ 触发重提取；伪 jpg 提取失败 → failed 计数
+        std::fs::write(&keep, b"changed data here").unwrap();
+        let (ksize2, kmtime2) = file_fingerprint(&keep).unwrap();
+        let entries2 = vec![FileEntry {
+            full_path: keep.clone(),
+            rel_path: "keep.jpg".into(),
+            file_size: ksize2,
+            mtime_ns: kmtime2 as i64,
+            format: ImageFormat::Jpeg,
+        }];
+        let stats2 = db.sync_with_scan(&entries2, &|_, _| {}).unwrap();
+        assert_eq!(stats2.cache_updated, 1);
+        assert_eq!(stats2.cache_failed, 1);
     }
 }

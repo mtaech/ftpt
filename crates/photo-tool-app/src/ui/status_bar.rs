@@ -109,7 +109,15 @@ pub fn render_status_bar(
                 .items_center()
                 .justify_end()
                 .gap(px(6.))
-                .child(if view.batch_recognizing {
+                .child(if let Some((done, total)) = view.sync_progress {
+                    h_flex()
+                        .gap(px(4.))
+                        .child(div().text_color(theme::colors().text_accent).child("⟳ 同步中"))
+                        .child(div().font_family(theme::MONO_FONT_FAMILY).text_color(theme::colors().text_accent).child(done.to_string()))
+                        .child(div().text_color(theme::colors().text_muted).child("/"))
+                        .child(div().font_family(theme::MONO_FONT_FAMILY).text_color(theme::colors().text_muted).child(total.to_string()))
+                        .into_any_element()
+                } else if view.batch_recognizing {
                     let (done, total) = view.batch_progress_rc;
                     let (confirmed, unrecognized, needs_review) = view.batch_counts;
                     let file = &view.batch_current_file;
