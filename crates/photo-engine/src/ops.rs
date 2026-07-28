@@ -4,6 +4,8 @@ use thiserror::Error;
 
 use photo_domain::{Capture, DeleteMode};
 
+use crate::folder_db::{FolderDb, FolderDbError};
+
 #[derive(Error, Debug)]
 pub enum OpError {
     #[error("IO error: {0}")]
@@ -141,6 +143,32 @@ pub fn rename_captures(
     }
 
     results
+}
+
+/// 删除文件后同步删除对应识别行。
+/// rel_paths 是相对于文件夹根路径的路径列表（正斜杠）。
+pub fn sync_delete_recognitions(db: &FolderDb, rel_paths: &[String]) -> Result<(), FolderDbError> {
+    db.delete_recognitions(rel_paths)
+}
+
+/// 复制文件后同步复制对应识别行到目标库。
+/// entries: (源 rel_path, 目标 rel_path)
+pub fn sync_copy_recognitions(src_db: &FolderDb, dst_db: &mut FolderDb, entries: &[(String, String)]) -> Result<(), FolderDbError> {
+    src_db.copy_recognitions_to(dst_db, entries)
+}
+
+/// 移动文件后同步迁移识别行到目标库。
+/// 等价于 sync_copy_recognitions + sync_delete_recognitions（源库的删除由调用方负责，
+/// 因为 move 的语义是先复制到目标再删除源）。
+pub fn sync_move_recognitions(src_db: &FolderDb, dst_db: &mut FolderDb, entries: &[(String, String)]) -> Result<(), FolderDbError> {
+    src_db.copy_recognitions_to(dst_db, entries)?;
+    let src_paths: Vec<String> = entries.iter().map(|(s, _)| s.clone()).collect();
+    src_db.delete_recognitions(&src_paths)
+}
+
+/// 重命名文件后同步重命名对应识别行。
+pub fn sync_rename_recognition(db: &FolderDb, old_rel: &str, new_rel: &str) -> Result<(), FolderDbError> {
+    db.rename_recognition(old_rel, new_rel)
 }
 
 /// 生成不会冲突的文件名：如果 path 已存在，追加 _1/_2/... 后缀

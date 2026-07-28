@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::path::{Path, PathBuf};
 
 use gpui::*;
@@ -7,12 +9,18 @@ use gpui_component::select::{SearchableVec, SelectEvent, SelectState};
 use std::sync::LazyLock;
 use photo_config::AppConfig;
 use photo_domain::{
-    BatchOpType, CaptureMeta, ColorLabel, DeleteMode, FilterCriteria, Flag, Rating, SortBy, SortDirection,
+    BatchOpType, CaptureMeta, ColorLabel, DeleteMode, FilterCriteria, Flag, Rating,
+    SortBy, SortDirection,
 };
+use photo_recognize::Recognizer;
 use photo_engine::thumbnail::ThumbnailCache;
-use photo_engine::{scanner, xmp};
+use photo_engine::{scanner, xmp, folder_db::FolderDb};
 
 use crate::worker::Worker;
+
+/// 全局通知回调（dispatch_action 通过它弹出 toast）
+/// 由 main.rs 在 RootView 创建后设置，避免 Context 类型转换。
+
 
 /// 系统已安装字体家族（排序去重，LazyLock 只枚举一次）
 pub static SYSTEM_FONTS: LazyLock<Vec<String>> = LazyLock::new(|| {
@@ -34,7 +42,7 @@ pub struct RootView {
     pub config: AppConfig,
     pub config_path: PathBuf,
     pub worker: Worker,
-    pub exif_cache: Option<photo_engine::cache::ExifCache>,
+    pub folder_db: Option<FolderDb>,
     pub thumbnail_cache: Option<ThumbnailCache>,
     pub dir_path: Option<PathBuf>,
     pub captures: Vec<CaptureMeta>,
@@ -91,6 +99,27 @@ pub struct RootView {
     pub batch_progress: Option<(u32, u32)>,
     pub batch_progress_msg: String,
     pub batch_show_progress_popup: bool,
+    // ── 识别 ──
+    /// 单张识别中的 capture index（None=空闲）
+    pub recognizing_single: Option<usize>,
+    /// 当前识别阶段文本（检测中/分类中/名录映射中）
+    pub recognize_stage: Option<String>,
+    /// 批量识别进行中
+    pub batch_recognizing: bool,
+    /// 批量识别进度 (已处理, 总数)
+    pub batch_progress_rc: (usize, usize),
+    /// 批量识别当前处理的文件名
+    pub batch_current_file: String,
+    /// 识别统计数据 (已识别, 无鸟, 待复核)
+    pub batch_counts: (usize, usize, usize),
+    /// 批量取消标志
+    pub batch_cancel: Arc<AtomicBool>,
+    /// 检测框显隐
+    pub bbox_visible: bool,
+    /// 显示全量识别确认对话框
+    pub show_recognize_all_confirm: bool,
+    /// 焦点图片的完整识别记录
+    pub focused_recognition: Option<photo_domain::Recognition>,
 }
 
 impl RootView {
@@ -129,7 +158,7 @@ impl RootView {
         let mut this = Self {
             config,
             config_path,
-            exif_cache: None,
+            folder_db: None,
             worker,
             thumbnail_cache,
             dir_path: None,
@@ -169,6 +198,16 @@ impl RootView {
             batch_progress: None,
             batch_progress_msg: String::new(),
             batch_show_progress_popup: false,
+            recognizing_single: None,
+            recognize_stage: None,
+            batch_recognizing: false,
+            batch_progress_rc: (0, 0),
+            batch_current_file: String::new(),
+            batch_counts: (0, 0, 0),
+            batch_cancel: Arc::new(AtomicBool::new(false)),
+            bbox_visible: true,
+            show_recognize_all_confirm: false,
+            focused_recognition: None,
         };
 
         if let Some(last_dir) = &auto_dir {
@@ -212,8 +251,8 @@ impl RootView {
         if let Some(task) = self.scan_task.take() {
             drop(task);
         }
-        // 在照片目录中打开 EXIF 缓存（.pt-cache.db）
-        let exif_cache = photo_engine::cache::ExifCache::open_in_dir(&path)
+        // 在照片目录中打开中心数据库（.pt/data.db）
+        let folder_db = FolderDb::open_in_dir(&path)
             .ok();
         let sidecar_exts = self.config.sidecar_extensions.clone();
         let filter = self.filter.clone();
@@ -231,7 +270,7 @@ impl RootView {
                                 // CaptureMeta::from 占位 index=0，必须用 captures 中的实际位置，
                                 // 预览图/EXIF 回填/缩略图缓存都以它为键
                                 meta.index = i;
-                                if let Some(cache) = &exif_cache {
+                                if let Some(cache) = &folder_db {
                                     let primary = &c.source_files[c.primary_index];
                                     let xmp = cache
                                         .get_or_read_xmp(&primary.path)
@@ -247,24 +286,24 @@ impl RootView {
                                         meta.enrich_with_xmp(&xmp);
                                     }
                                 }
-                                if let Some(cache) = &exif_cache {
+                                if let Some(cache) = &folder_db {
                                     let primary = &c.source_files[c.primary_index];
                                     let exif = cache
-                                        .get_or_extract(&primary.path, &primary.format)
+                                        .get_or_extract_exif(&primary.path, &primary.format)
                                         .unwrap_or_default();
                                     meta.enrich_with_exif(&exif);
                                 }
                                 meta
                             })
                             .collect();
-                        (path, metas, exif_cache)
+                        (path, metas, folder_db)
                     })
             },
             |this, result, cx| {
                 match result {
                     Ok((dir, metas, cache)) => {
                         this.captures = metas;
-                        this.exif_cache = cache;
+                        this.folder_db = cache;
                         this.dir_path = Some(dir.clone());
                         // 记住最后打开的目录，下次启动自动恢复
                         let dir_str = dir.to_string_lossy().to_string();
@@ -277,6 +316,22 @@ impl RootView {
                         this.thumbnail_data.clear();
                         this.preview_data.clear();
                         this.preview_order.clear();
+                        this.apply_filter_and_sort();
+                        // 扫描完成后，用 folder_db 中已有的识别记录 enrich CaptureMeta
+                        if let Some(ref db) = this.folder_db {
+                            if let Ok(recs) = db.all_recognitions() {
+                                for meta in this.captures.iter_mut() {
+                                    // rel_path = primary_path 相对 dir 的路径，正斜杠
+                                    let primary_path = std::path::Path::new(&meta.primary_path);
+                                    if let Ok(rel) = primary_path.strip_prefix(&dir) {
+                                        let rel_str = rel.to_string_lossy().replace('\\', "/");
+                                        if let Some(rec) = recs.iter().find(|(p, _)| *p == rel_str) {
+                                            meta.enrich_with_recognition(&rec.1);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         this.apply_filter_and_sort();
                         tracing::info!(
                             "扫描完成：{} 找到 {} 个 capture，过滤后 {} 个",
@@ -446,7 +501,7 @@ impl RootView {
                 );
                 (results, progress, total)
             },
-            move |this, (results, progress, total), cx| {
+            move |this, (results, _progress, total), cx| {
                 this.batch_in_progress = false;
                 this.batch_progress = Some((total.load(Ordering::Relaxed), total.load(Ordering::Relaxed)));
                 this.batch_results = results;
@@ -1040,6 +1095,26 @@ impl RootView {
             return;
         }
 
+        // 收集被删除文件的唯一主路径（去重）
+        let path_set: Vec<PathBuf> = capture_indices
+            .iter()
+            .filter_map(|&i| self.captures.get(i))
+            .map(|meta| PathBuf::from(&meta.primary_path))
+            .collect();
+
+        // 计算 rel_paths 用于删除后的识别行同步
+        let dir_clone = self.dir_path.clone();
+        let rel_paths: Vec<String> = path_set
+            .iter()
+            .filter_map(|primary| {
+                dir_clone.as_ref().and_then(|d| {
+                    primary.strip_prefix(d).ok().map(|rel| {
+                        rel.to_string_lossy().replace('\\', "/")
+                    })
+                })
+            })
+            .collect();
+
         let paths: Vec<PathBuf> = capture_indices
             .iter()
             .filter_map(|&i| self.captures.get(i))
@@ -1061,7 +1136,7 @@ impl RootView {
                 }
                 results
             },
-            |this, results, cx| {
+            move |this, results, cx| {
                 let mut deleted = HashSet::new();
                 for (path, result) in &results {
                     match result {
@@ -1074,6 +1149,12 @@ impl RootView {
                         }
                     }
                 }
+                // 同步删除识别行
+                if let Some(ref db) = this.folder_db {
+                    if !rel_paths.is_empty() {
+                        let _ = photo_engine::ops::sync_delete_recognitions(db, &rel_paths);
+                    }
+                }
                 // Remove deleted captures from the list
                 this.captures.retain(|meta| {
                     let primary = PathBuf::from(&meta.primary_path);
@@ -1083,6 +1164,7 @@ impl RootView {
                 for (i, meta) in this.captures.iter_mut().enumerate() {
                     meta.index = i;
                 }
+                this.refresh_focused_recognition();
                 this.apply_filter_and_sort();
                 cx.notify();
             },
@@ -1144,6 +1226,10 @@ impl RootView {
                         }
                     }
                     _ => unreachable!(),
+                }
+                // 焦点变化时刷新 focused_recognition
+                if self.focus_index != old_idx {
+                    self.refresh_focused_recognition();
                 }
                 self.preview_zoom = 1.0;
                 self.preview_pan = (0.0, 0.0);
@@ -1214,6 +1300,94 @@ impl RootView {
             Action::PermanentDelete => {
                 self.delete_selected(DeleteMode::Permanent, cx);
             }
+            // Recognition
+            Action::Recognize => {
+                self.recognize_single(cx);
+            }
+            Action::ToggleBbox => {
+                self.bbox_visible = !self.bbox_visible;
+                tracing::info!("检测框显隐切换: {}", self.bbox_visible);
+                cx.notify();
+            }
+            Action::RecognizeUnrecognized => {
+                let dir = self.dir_path.clone();
+                let folder_db = self.folder_db.clone();
+                let Some(dir) = dir else { return };
+                let Some(ref _db) = folder_db else { return };
+
+                // 收集无识别记录的 capture
+                let mut targets: Vec<(usize, photo_domain::Capture)> = Vec::new();
+                for meta in &self.captures {
+                    if meta.recognition_status.is_some() {
+                        continue;
+                    }
+                    if let Some(cap) = self.build_capture_from_meta(meta) {
+                        targets.push((meta.index, cap));
+                    }
+                }
+                if targets.is_empty() {
+                    self.show_toast("所有图片已有识别结果", cx);
+                    return;
+                }
+
+                let total = targets.len();
+                self.batch_recognizing = true;
+                self.batch_progress_rc = (0, total);
+                self.batch_current_file = String::new();
+                self.batch_counts = (0, 0, 0);
+                self.batch_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+                cx.notify();
+
+                self.spawn_batch_recognize(targets, dir, cx);
+            }
+            Action::RecognizeAll => {
+                self.show_recognize_all_confirm = true;
+                tracing::info!("显示全量识别确认对话框");
+                cx.notify();
+            }
+            Action::ConfirmRecognizeAll => {
+                self.show_recognize_all_confirm = false;
+                let dir = self.dir_path.clone();
+                let folder_db = self.folder_db.clone();
+                let Some(dir) = dir else { return };
+
+                // 先清空目标范围的所有旧识别行
+                if let Some(ref db) = folder_db {
+                    let rel_paths: Vec<String> = self.captures.iter().filter_map(|meta| {
+                        let primary = std::path::Path::new(&meta.primary_path);
+                        primary.strip_prefix(&dir).ok().map(|rel| {
+                            rel.to_string_lossy().replace('\\', "/")
+                        })
+                    }).collect();
+                    let _ = photo_engine::ops::sync_delete_recognitions(db, &rel_paths);
+                }
+
+                let mut targets: Vec<(usize, photo_domain::Capture)> = Vec::new();
+                for meta in &self.captures {
+                    if let Some(cap) = self.build_capture_from_meta(meta) {
+                        targets.push((meta.index, cap));
+                    }
+                }
+                let total = targets.len();
+                self.batch_recognizing = true;
+                self.batch_progress_rc = (0, total);
+                self.batch_current_file = String::new();
+                self.batch_counts = (0, 0, 0);
+                self.batch_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+                cx.notify();
+
+                self.spawn_batch_recognize(targets, dir, cx);
+            }
+            Action::CancelBatchRecognize => {
+                self.batch_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                tracing::info!("批量识别取消已请求");
+            }
+            Action::SetRecognitionFilter(filter) => {
+                self.filter.recognition_filter = filter;
+                self.apply_filter_and_sort();
+                tracing::info!("设置识别筛选: {:?}", filter);
+                cx.notify();
+            }
             // Other
             Action::Refresh => {
                 if let Some(ref dir) = self.dir_path.clone() {
@@ -1248,6 +1422,261 @@ impl RootView {
             }
             self.ensure_filmstrip_thumbs_loaded(cx);
         }
+    }
+
+    // ========================================================================
+    // 识别相关方法
+    // ========================================================================
+
+    /// 弹出 toast 通知（右下角浮层，自动消失；Root 已注册，直接走 gpui-component 通知层）
+    fn show_toast(&self, msg: impl std::fmt::Display, cx: &mut Context<Self>) {
+        use gpui_component::{notification::Notification, WindowExt as _};
+        let msg = msg.to_string();
+        tracing::info!("Toast: {}", msg);
+        // App 级拿窗口句柄：dispatch_action 链路不传 Window，这里从 App 取当前窗口
+        if let Some(handle) = cx.windows().first() {
+            let _ = handle.update(cx, |_, window, cx| {
+                window.push_notification(Notification::new().message(msg), cx);
+            });
+        }
+    }
+
+    /// 从 folder_db 刷新焦点图片的识别记录
+    fn refresh_focused_recognition(&mut self) {
+        self.focused_recognition = None;
+        let Some(meta) = self.get_focused_capture() else { return };
+        let Some(ref db) = self.folder_db else { return };
+        let Some(ref dir) = self.dir_path else { return };
+        let primary = std::path::Path::new(&meta.primary_path);
+        let rel = primary.strip_prefix(dir).ok().map(|p| p.to_string_lossy().replace('\\', "/"));
+        if let Some(rel_str) = rel {
+            if let Ok(Some(rec)) = db.get_recognition(&rel_str) {
+                self.focused_recognition = Some(rec);
+            }
+        }
+    }
+
+    /// 从 CaptureMeta 构建 Capture（供识别管线使用）
+    fn build_capture_from_meta(&self, meta: &CaptureMeta) -> Option<photo_domain::Capture> {
+        let primary_path = std::path::Path::new(&meta.primary_path);
+        let ext = primary_path.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let format = photo_domain::ImageFormat::from_extension(&ext)
+            .unwrap_or(photo_domain::ImageFormat::Jpeg);
+        let source = photo_domain::SourceFile {
+            path: primary_path.to_path_buf(),
+            format,
+            is_sidecar: false,
+            file_size: meta.file_size,
+        };
+        Some(photo_domain::Capture {
+            base_name: meta.base_name.clone(),
+            source_files: vec![source],
+            primary_index: 0,
+        })
+    }
+
+    /// 单张识别（Recognize action）
+    fn recognize_single(&mut self, cx: &mut Context<Self>) {
+        if self.recognizing_single.is_some() || self.batch_recognizing {
+            tracing::info!("识别忽略：已有识别任务进行中");
+            return;
+        }
+        let Some(focus_di) = self.focus_index else {
+            tracing::info!("识别忽略：无焦点图片");
+            return;
+        };
+        let Some(&capture_idx) = self.display_order.get(focus_di) else { return };
+        let Some(meta) = self.captures.get(capture_idx) else { return };
+        let dir = match self.dir_path.clone() { Some(d) => d, None => return };
+        if self.folder_db.is_none() { return };
+
+        let primary_path = std::path::PathBuf::from(&meta.primary_path);
+        let rel_path = primary_path.strip_prefix(&dir)
+            .ok()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        let rel_path_clone = rel_path.clone();
+
+        let Some(capture) = self.build_capture_from_meta(meta) else {
+            tracing::error!("构建 Capture 失败: {}", meta.base_name);
+            return;
+        };
+
+        self.recognizing_single = Some(capture_idx);
+        self.recognize_stage = Some("检测中".into());
+        cx.notify();
+
+        self.worker.spawn(
+            cx,
+            move || {
+                // 工作线程侧懒加载 Recognizer
+                let rec_result = (|| -> Result<photo_domain::Recognition, String> {
+                    let exe_dir = std::env::current_exe()
+                        .map_err(|e| format!("获取 exe 路径失败: {e}"))?
+                        .parent()
+                        .ok_or_else(|| "无法确定 exe 目录".to_string())?
+                        .to_path_buf();
+                    let models_dir = exe_dir.join("models");
+                    let catalog_db = exe_dir.join("data").join("pica_ref.db");
+                    let mut recognizer = photo_recognize::Recognizer::new(&models_dir, &catalog_db)
+                        .map_err(|e| format!("加载识别模型失败: {e}"))?;
+                    recognizer.recognize(&capture, None)
+                        .map_err(|e| format!("识别失败: {e}"))
+                })();
+                (rec_result, rel_path_clone, capture_idx, dir)
+            },
+            move |this, (result, rel, idx, _scan_dir), cx| {
+                match result {
+                    Ok(rec) => {
+                        // upsert 到 FolderDb
+                        if let Some(ref db) = this.folder_db {
+                            if let Err(e) = db.upsert_recognition(&rel, &rec) {
+                                tracing::error!("写入识别结果失败 {}: {e}", rel);
+                            }
+                        }
+                        // enrich CaptureMeta
+                        if let Some(meta) = this.captures.iter_mut().find(|m| m.index == idx) {
+                            meta.enrich_with_recognition(&rec);
+                        }
+                        // 刷新 focused_recognition
+                        this.refresh_focused_recognition();
+                        this.recognizing_single = None;
+                        this.recognize_stage = None;
+                        this.apply_filter_and_sort();
+                        cx.notify();
+
+                        // toast
+                        match rec.status {
+                            photo_domain::RecognitionStatus::Confirmed => {
+                                let bird_name = rec.bird.as_ref().map(|b| b.cn_name.as_str()).unwrap_or("未知");
+                                let conf = rec.confidence.unwrap_or(0.0);
+                                this.show_toast(format!("{} · 置信度 {:.1}%", bird_name, conf), cx);
+                            }
+                            photo_domain::RecognitionStatus::Unrecognized => {
+                                this.show_toast("未检测到鸟类", cx);
+                            }
+                            photo_domain::RecognitionStatus::NeedsReview => {
+                                let reason = rec.failure_stage.user_message();
+                                this.show_toast(format!("待复核·{}", reason), cx);
+                            }
+                        }
+                        tracing::info!("单张识别完成: {} 状态={:?}", rel, rec.status);
+                    }
+                    Err(e) => {
+                        tracing::error!("识别错误 {}: {e}", rel);
+                        this.recognizing_single = None;
+                        this.recognize_stage = None;
+                        this.show_toast(format!("识别失败: {e}"), cx);
+                        cx.notify();
+                    }
+                }
+            },
+        );
+    }
+
+    /// 启动批量识别（RecognizeUnrecognized / ConfirmRecognizeAll 共用）
+    fn spawn_batch_recognize(
+        &mut self,
+        targets: Vec<(usize, photo_domain::Capture)>,
+        dir: std::path::PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        use std::sync::atomic::Ordering;
+
+        let cancel = self.batch_cancel.clone();
+        let total = targets.len();
+
+        self.worker.spawn(
+            cx,
+            move || {
+                // 工作线程侧懒加载 Recognizer
+                let mut recognizer = (|| -> Result<Recognizer, String> {
+                    let exe_dir = std::env::current_exe()
+                        .map_err(|e| format!("获取 exe 路径失败: {e}"))?
+                        .parent()
+                        .ok_or_else(|| "无法确定 exe 目录".to_string())?
+                        .to_path_buf();
+                    let models_dir = exe_dir.join("models");
+                    let catalog_db = exe_dir.join("data").join("pica_ref.db");
+                    Recognizer::new(&models_dir, &catalog_db)
+                        .map_err(|e| format!("加载识别模型失败: {e}"))
+                })();
+
+                let mut results: Vec<(usize, String, Result<photo_domain::Recognition, String>)> = Vec::new();
+
+                for (i, (capture_idx, cap)) in targets.iter().enumerate() {
+                    if cancel.load(Ordering::Relaxed) {
+                        tracing::info!("批量识别被取消，已完成 {i}/{} 张", total);
+                        break;
+                    }
+
+                    let primary = &cap.source_files[cap.primary_index];
+                    let rel = primary.path.strip_prefix(&dir)
+                        .map(|p| p.to_string_lossy().replace('\\', "/"))
+                        .unwrap_or_default();
+
+                    let rec_result = match &mut recognizer {
+                        Ok(rec) => rec.recognize(cap, None).map_err(|e| format!("识别失败: {e}")),
+                        Err(e) => Err(e.clone()),
+                    };
+
+                    results.push((*capture_idx, rel, rec_result));
+                }
+
+                results
+            },
+            move |this, results, cx| {
+                let mut confirmed = 0usize;
+                let mut unrecognized = 0usize;
+                let mut needs_review = 0usize;
+                let done = results.len();
+
+                for (capture_idx, rel, rec_result) in &results {
+                    match rec_result {
+                        Ok(rec) => {
+                            if let Some(ref db) = this.folder_db {
+                                let _ = db.upsert_recognition(rel, rec);
+                            }
+                            if let Some(meta) = this.captures.iter_mut().find(|m| m.index == *capture_idx) {
+                                meta.enrich_with_recognition(rec);
+                            }
+                            match rec.status {
+                                photo_domain::RecognitionStatus::Confirmed => confirmed += 1,
+                                photo_domain::RecognitionStatus::Unrecognized => unrecognized += 1,
+                                photo_domain::RecognitionStatus::NeedsReview => needs_review += 1,
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("批量识别错误 {}: {e}", rel);
+                            needs_review += 1;
+                        }
+                    }
+                }
+
+                if let Some(last) = results.last() {
+                    this.batch_current_file = last.1.clone();
+                }
+                this.batch_progress_rc = (done, total);
+                this.batch_counts = (confirmed, unrecognized, needs_review);
+                this.batch_recognizing = false;
+                this.apply_filter_and_sort();
+                this.refresh_focused_recognition();
+
+                this.show_toast(format!(
+                    "识别完成：确认 {} · 无鸟 {} · 待复核 {}",
+                    confirmed, unrecognized, needs_review
+                ), cx);
+
+                tracing::info!(
+                    "批量识别结束：完成 {} / {} 张，确认 {} 无鸟 {} 待复核 {}",
+                    done, total, confirmed, unrecognized, needs_review
+                );
+                cx.notify();
+            },
+        );
     }
 
     fn apply_rating(&mut self, rating: Rating, cx: &mut Context<Self>) {

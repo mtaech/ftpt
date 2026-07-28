@@ -2,7 +2,7 @@ use gpui::{prelude::FluentBuilder, *};
 use std::path::PathBuf;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{h_flex, v_flex, Icon, IconName, Sizable};
-use photo_domain::{Flag, Rating};
+use photo_domain::{Flag, Rating, RecognitionFilter};
 
 use crate::state::app::RootView;
 use crate::ui::theme;
@@ -319,6 +319,7 @@ fn render_filter_section(
         .child(render_text_search(view, cx))
         .child(render_rating_filter(view, cx))
         .child(render_flag_filter(view, cx))
+        .child(render_recognition_filter(view, cx))
 }
 
 fn render_text_search(
@@ -600,4 +601,131 @@ fn filter_chip(
         .cursor_pointer()
         .child(label.to_string())
         .on_click(on_click)
+}
+
+// ── Recognition Filter ────────────────────────────────────────────────
+
+/// 识别状态筛选 chip 组：全部/已识别/待复核/未检测到/未识别
+fn render_recognition_filter(
+    view: &RootView,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let current = view.filter.recognition_filter;
+    let vh = cx.entity().downgrade();
+
+    div()
+        .child(crate::ui::controls::section_header("识别状态"))
+        .child(
+            // chip 组：横排换行，沿用 flag/rating 筛选 chip 样式
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .gap_1()
+                .child({
+                    let active = current == RecognitionFilter::All;
+                    let vh = vh.clone();
+                    filter_chip(
+                        "recognition-chip-all",
+                        "全部",
+                        active,
+                        move |_, _window, cx| {
+                            if let Some(view) = vh.upgrade() {
+                                let _ = cx.update_entity(&view, |root_view, root_cx| {
+                                    root_view.dispatch_action(
+                                        crate::action::Action::SetRecognitionFilter(
+                                            RecognitionFilter::All,
+                                        ),
+                                        root_cx,
+                                    );
+                                });
+                            }
+                        },
+                    )
+                })
+                .child({
+                    let active = current == RecognitionFilter::Confirmed;
+                    let vh = vh.clone();
+                    filter_chip(
+                        "recognition-chip-confirmed",
+                        "已识别",
+                        active,
+                        move |_, _window, cx| {
+                            if let Some(view) = vh.upgrade() {
+                                let _ = cx.update_entity(&view, |root_view, root_cx| {
+                                    root_view.dispatch_action(
+                                        crate::action::Action::SetRecognitionFilter(
+                                            RecognitionFilter::Confirmed,
+                                        ),
+                                        root_cx,
+                                    );
+                                });
+                            }
+                        },
+                    )
+                })
+                .child({
+                    let active = current == RecognitionFilter::NeedsReview;
+                    let vh = vh.clone();
+                    filter_chip(
+                        "recognition-chip-needs-review",
+                        "待复核",
+                        active,
+                        move |_, _window, cx| {
+                            if let Some(view) = vh.upgrade() {
+                                let _ = cx.update_entity(&view, |root_view, root_cx| {
+                                    root_view.dispatch_action(
+                                        crate::action::Action::SetRecognitionFilter(
+                                            RecognitionFilter::NeedsReview,
+                                        ),
+                                        root_cx,
+                                    );
+                                });
+                            }
+                        },
+                    )
+                })
+                .child({
+                    let active = current == RecognitionFilter::Unrecognized;
+                    let vh = vh.clone();
+                    filter_chip(
+                        "recognition-chip-unrecognized",
+                        "未检测到",
+                        active,
+                        move |_, _window, cx| {
+                            if let Some(view) = vh.upgrade() {
+                                let _ = cx.update_entity(&view, |root_view, root_cx| {
+                                    root_view.dispatch_action(
+                                        crate::action::Action::SetRecognitionFilter(
+                                            RecognitionFilter::Unrecognized,
+                                        ),
+                                        root_cx,
+                                    );
+                                });
+                            }
+                        },
+                    )
+                })
+                .child({
+                    let active = current == RecognitionFilter::NotRecognized;
+                    let vh = vh.clone();
+                    filter_chip(
+                        "recognition-chip-not-recognized",
+                        "未识别",
+                        active,
+                        move |_, _window, cx| {
+                            if let Some(view) = vh.upgrade() {
+                                let _ = cx.update_entity(&view, |root_view, root_cx| {
+                                    root_view.dispatch_action(
+                                        crate::action::Action::SetRecognitionFilter(
+                                            RecognitionFilter::NotRecognized,
+                                        ),
+                                        root_cx,
+                                    );
+                                });
+                            }
+                        },
+                    )
+                }),
+        )
 }

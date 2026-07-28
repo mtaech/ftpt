@@ -1,3 +1,5 @@
+use photo_domain::RecognitionFilter;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     // Navigation
@@ -34,6 +36,14 @@ pub enum Action {
     // File ops
     Delete,
     PermanentDelete,
+    // Recognition
+    Recognize,
+    ToggleBbox,
+    RecognizeUnrecognized,
+    RecognizeAll,
+    ConfirmRecognizeAll,
+    CancelBatchRecognize,
+    SetRecognitionFilter(RecognitionFilter),
     // Other
     Refresh,
     ToggleLeftPanel,

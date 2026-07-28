@@ -138,11 +138,26 @@ pub fn scan_directory(
     Ok(captures)
 }
 
-/// 应用筛选条件（当前仅支持 text_search）
+/// 应用筛选条件：当前操作在 Capture 层面（无 enrich_with_recognition），
+/// text_search 只能匹配 base_name；recognition_filter 在 Capture 层面
+/// 全部为未识别（recognition_status=None），所以只 All/NotRecognized 保留。
+///
+/// 待扫描完成后，在 `apply_filter_and_sort`（app.rs）中对 CaptureMeta
+/// 做更精确的识别筛选和 bird_name 文本搜索。
 fn apply_filter(captures: &mut Vec<Capture>, filter: &FilterCriteria) {
     if let Some(ref text) = filter.text_search {
         let text_lower = text.to_lowercase();
-        captures.retain(|c| c.base_name.to_lowercase().contains(&text_lower));
+        captures.retain(|c| {
+            c.base_name.to_lowercase().contains(&text_lower)
+        });
+    }
+    // recognition_filter：Capture 层面全部为未识别
+    if filter.recognition_filter != photo_domain::RecognitionFilter::All
+        && filter.recognition_filter != photo_domain::RecognitionFilter::NotRecognized
+    {
+        // 对 Capture 而言，Confirmed/NeedsReview/Unrecognized 都不可能有，
+        // 因为识别扫描还没跑——直接清空
+        captures.clear();
     }
 }
 

@@ -1,7 +1,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::{h_flex, v_flex};
+use gpui_component::v_flex;
 use photo_domain::BatchOpType;
 
 use crate::state::app::RootView;

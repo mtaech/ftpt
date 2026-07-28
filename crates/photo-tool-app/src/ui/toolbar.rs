@@ -1,9 +1,9 @@
 use gpui::*;
-use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::button::{Button, ButtonVariants as _, DropdownButton};
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
-use gpui_component::{h_flex, v_flex, IconName, Sizable};
+use gpui_component::{h_flex, v_flex, Disableable, IconName, Sizable};
 
-use crate::action::Action;
+use crate::action::{Action, ContextMenuAction};
 use crate::state::app::{RootView, SYSTEM_FONTS};
 use crate::ui::theme;
 /// 交易终端风格：近黑底色、下划线 tab、等宽计数、icon-only 按钮
@@ -107,6 +107,21 @@ pub fn render_toolbar(
                                 .text_color(theme::colors().text)
                                 .child("排序: 文件名")
                         ),
+                )
+                .child(
+                    DropdownButton::new("recognize-btn")
+                        .button(
+                            Button::new("recognize-inner")
+                                .label("识别")
+                                .ghost()
+                                .small()
+                        )
+                        .disabled(view.batch_recognizing)
+                        .dropdown_menu(move |menu, _, _| {
+                            menu
+                                .menu("识别未识别照片  ctrl+b", Box::new(ContextMenuAction(Action::RecognizeUnrecognized)))
+                                .menu("重新识别全部…  ctrl+shift+b", Box::new(ContextMenuAction(Action::RecognizeAll)))
+                        }),
                 )
                 .child(
                     Button::new("refresh-btn")

@@ -2,13 +2,14 @@
 
 ## 项目概述
 
-Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览、标记、导入和转换照片。Cargo workspace 含 4 个成员：
+Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览、标记、识别和转换照片。Cargo workspace 含 5 个成员：
 
-- `photo-domain` — 纯类型叶子 crate（Capture, ExifMetadata, XmpMetadata, 枚举），零外部依赖
-- `photo-engine` — 文件操作引擎（scanner, exif/xmp 读写, thumbnail, ops, convert, cache），**全同步**
+- `photo-domain` — 纯类型叶子 crate（Capture, ExifMetadata, XmpMetadata, Recognition 类型, 枚举），零外部依赖
+- `photo-engine` — 文件操作引擎（scanner, exif/xmp 读写, thumbnail, ops, convert, folder_db），**全同步**
+- `photo-recognize` — 鸟类识别管线（YOLO 检测 → 鸟种分类 → 名录映射，ONNX Runtime），**全同步**
 - `photo-config` — 配置读写（TOML + SQLite 持久化）
 - `photo-tool-app` — GPUI 前端（暗色主题，三栏布局，全键盘操作）
-核心工作流：**目录扫描 → RAW+JPEG 配对 → 浏览/标记/筛选 → 文件操作（删除/移动/复制/重命名）→ 格式转换**。
+核心工作流：**目录扫描 → RAW+JPEG 配对 → 浏览/标记/筛选 → 鸟类识别（单张/批量）→ 文件操作（删除/移动/复制/重命名）→ 格式转换**。识别子系统设计见 `docs/adr/0003-recognition-subsystem.md`。
 
 ---
 
@@ -24,14 +25,21 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
               ┌────────────────┼────────────────┐
               ▼                ▼                ▼
      ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-     │ photo-engine │  │ photo-config │  │ photo-tool-app│
-     │ scanner,ops  │  │ TOML+SQLite  │  │ GPUI 前端     │
-     │ exif,xmp,    │  │ 便携配置     │  │ state/ ui/    │
-     │ thumbnail,   │  └──────────────┘  │ worker       │
-     │ convert,cache│                    └──────────────┘
-     └──────────────┘
-     所有模块全同步   独立，无内部依赖       依赖以上三者
+     │ photo-engine │  │photo-recognize│ │ photo-config │
+     │ scanner,ops  │  │ detect,classify│ │ TOML+SQLite │
+     │ exif,xmp,    │  │ catalog,     │  │ 便携配置     │
+     │ thumbnail,   │  │ pipeline     │  └──────────────┘
+     │ convert,     │  └──────────────┘         ▲
+     │ folder_db    │         ▲                 │
+     └──────────────┘         │        ┌──────────────┐
+     所有模块全同步            └────────│ photo-tool-app│
+                            依赖      │ GPUI 前端     │
+                                      │ state/ ui/    │
+                                      │ worker        │
+                                      └──────────────┘
 ```
+
+- `photo-tool-app` 依赖其余四者；`photo-recognize` 依赖 `photo-domain`（RAW 输入解码调用 `photo_engine::thumbnail::decode_raw_preview`）
 
 ### 核心数据流
 
@@ -40,12 +48,14 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 3. **Capture** → **ops**：删除（回收站/永久）/移动（跨设备 copy+delete 回退）/复制/批量重命名
 4. **SourceFile** → **thumbnail**：磁盘缓存 JPEG 字节（缓存键 = `DefaultHasher(path+size)` 的 `{:016x}.jpg`）；RAW 提取内嵌预览，常规图优先 EXIF 内嵌缩略图
 5. **Capture** → **convert**：RAW 内嵌预览→JPEG、常规图缩放（Lanczos3）
-6. **import**（近期移除，待重建）：检测可移动设备 → DCIM 递归扫描 → 按 EXIF 日期建子目录 → 委托 **ops** 移动/复制
+6. **Capture** → **recognize**：`photo-recognize` 管线（YOLO 检测鸟体 → bird_model 分类 Top-5 → `sp_cls_map` JOIN `animal_info` 名录映射）→ `Recognition` 三态（Confirmed/NeedsReview/Unrecognized）→ `folder_db` upsert 到文件夹级 `.pt/data.db`
+7. **import**（近期移除，待重建）：检测可移动设备 → DCIM 递归扫描 → 按 EXIF 日期建子目录 → 委托 **ops** 移动/复制
 
 ### 模块依赖关系
 
-- `photo-tool-app` 依赖 `photo-engine` + `photo-domain` + `photo-config`
+- `photo-tool-app` 依赖其余四个 crate
 - `photo-engine` 依赖 `photo-domain`（单向 DAG，由 crate 边界强制）
+- `photo-recognize` 依赖 `photo-domain`（RAW 输入解码复用 `photo_engine::thumbnail::decode_raw_preview`，不反向依赖）
 - `photo-config` 独立，无 crate 内依赖
 - `domain` 是纯叶子：依赖仅 `std` + `serde` + `chrono` + `thiserror`，不引用任何内部模块
 
@@ -55,7 +65,9 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 
 |-|-|
 | `crates/photo-domain/src/domain.rs` | 纯类型（Capture, ExifMetadata, XmpMetadata, 枚举），零外部 crate 依赖 |
-| `crates/photo-engine/src/` | 文件机械：scanner, ops, exif, xmp, thumbnail, convert, cache（全部同步） |
+| `crates/photo-engine/src/` | 文件机械：scanner, ops, exif, xmp, thumbnail, convert, folder_db（全部同步） |
+| `crates/photo-engine/src/folder_db.rs` | 文件夹级 SQLite（`.pt/data.db`）：exif_cache / xmp_meta / **recognition** 三表，rusqlite_migration 版本化 |
+| `crates/photo-recognize/src/` | 识别管线：lib.rs(Recognizer 门面), detect(YOLO), classify(bird_model), catalog(名录映射), pipeline |
 | `crates/photo-config/src/lib.rs` | 配置读写（TOML + SQLite 持久化）|
 | `crates/photo-tool-app/src/state/app.rs` | RootView：全局状态 + `dispatch_action()` 路由所有交互 |
 | `crates/photo-tool-app/src/ui/layout.rs` | 三栏弹性布局（sidebar \| grid/preview \| info_panel） |
@@ -85,13 +97,13 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 ### 模块组织
 
 - `photo-domain/src/lib.rs` 声明 `pub mod domain` + `pub use domain::*`（re-export 让消费者直接 `photo_domain::Capture`）
-- `photo-engine/src/lib.rs` 声明 7 个 `pub mod`（scanner, ops, exif, xmp, thumbnail, convert, cache）
+- `photo-engine/src/lib.rs` 声明 7 个 `pub mod`（scanner, ops, exif, xmp, thumbnail, convert, folder_db）
 - `photo-config/src/lib.rs` 即库根——config 模块就是 lib.rs 本身
 - 消费者写全路径：`photo_engine::scanner::scan_directory`
 
 ### 错误处理
 
-- 每模块一个 `thiserror::Error` 枚举（共 8 个：`ConfigError`/`ScanError`/`OpError`/`ThumbnailError`/`ExifError`/`XmpError`/`ImportError`/`ConvertError`），均以 `Io(#[from] std::io::Error)` 起步；外部错误多数 `#[from]`，rawlib/kamadak-exif 错误转成 `String` 变体
+- 每模块一个 `thiserror::Error` 枚举（`ConfigError`/`ScanError`/`OpError`/`ThumbnailError`/`ExifError`/`XmpError`/`ConvertError`/`FolderDbError`/`RecognizeError`），均以 `Io(#[from] std::io::Error)` 起步；外部错误多数 `#[from]`，rawlib/kamadak-exif 错误转成 `String` 变体
 - 批量操作返回 `Vec<(PathBuf, Result<(), Error>)>`，逐文件报告
 
 ```rust
@@ -125,7 +137,7 @@ pub enum OpError {
 ### 已知陷阱
 
 - `quick-xml` 在根 `Cargo.toml` 的 `[workspace.dependencies]` 中声明但 `photo-engine` src 中无引用
-- `scanner::apply_filter` 当前**仅实现 `text_search`**，`FilterCriteria` 其余字段未生效（`paired_only`, `date_range`, `flag_filter`, `unflagged_filter` 等被 scanner 忽略）
+- `scanner::apply_filter` 当前仅实现 `text_search`（已扩展为同时匹配文件名与 `bird_name`）与 `recognition_filter`；`FilterCriteria` 其余字段未生效（`paired_only`, `date_range`, `flag_filter`, `unflagged_filter` 等被 scanner 忽略）
 - 使用了 let-chains（edition 2024 特性），如 `photo-config/config.rs` 便携路径判断
 
 ### 调试：GPUI 事件处理器无声失败
@@ -178,7 +190,7 @@ app.run(move |cx| {
 
 | 文件 | 作用 |
 |---|---|
-| `Cargo.toml` | workspace：resolver v2，4 个成员，`[workspace.dependencies]` 集中管理所有版本 |
+| `Cargo.toml` | workspace：resolver v2，5 个成员，`[workspace.dependencies]` 集中管理所有版本 |
 | `rust-toolchain.toml` | 固定 nightly 频道（edition 2024 需要） |
 | `.cargo/config.toml` | 仅 Linux target：`rustflags = ["-L", "local-lib"]` + `[env] LD_LIBRARY_PATH=local-lib`（libraw.so 链接） |
 | `crates/photo-tool-app/Cargo.toml` | gpui + gpui-component + rayon + tracing + rfd |
@@ -204,7 +216,7 @@ gpui-component 项目位于 `D:\Dev\Code\gpui-component`，含完整源码和本
 ## 运行时与工具链偏好
 
 - **Rust**：nightly 频道，edition 2024；包管理 Cargo（workspace）
-- **无 CI/CD**（无 `.github/`）、**无 rustfmt/clippy 配置**（用默认）、**无任何构建脚本**（无 Makefile/justfile/sh/ps1/bat）
+- **无 CI/CD**（无 `.github/`）、**无 rustfmt/clippy 配置**（用默认）；唯一脚本是 `scripts/package.ps1`（发布打包：release 构建 + 收集 exe/DLL/模型/名录库 → zip，非日常构建依赖）
 
 ### 关键外部依赖
 
@@ -217,34 +229,40 @@ gpui-component 项目位于 `D:\Dev\Code\gpui-component`，含完整源码和本
 | `trash 4` | 移到回收站（跨平台） |
 | `walkdir 2` | 单层目录扫描 |
 | `chrono 0.4` / `toml 0.8` / `serde 1` | 日期 / 配置 / 序列化 |
+| `ort 2.0.0-rc.10`（photo-recognize） | ONNX Runtime 绑定；`download-binaries` 静态链接运行时，Windows 走 DirectML EP（失败回退 CPU），仅需随包携带 `DirectML.dll` |
 | `regex-lite 0.1` | XMP 属性重写 |
 | `thiserror 2` | 错误 derive |
 | `tempfile 3`（dev） | 测试临时目录 |
 
 ### 平台要求
 
-- **Linux**：需 `libraw.so` 可链接/可加载——放 `local-lib/` 或系统安装；`.cargo/config.toml` 已配 `-L local-lib` 与 `LD_LIBRARY_PATH`
-- **Windows**：无特殊配置（Windows 11 为开发/测试环境）；`import.rs` 有 `#[cfg(target_os)]` 分支
+- **Linux**：需 `libraw.so` 可链接/可加载——放 `local-lib/` 或系统安装；`.cargo/config.toml` 已配 `-L local-lib` 与 `LD_LIBRARY_PATH`；识别管线在 Linux 走 CPU EP
+- **Windows**：无特殊配置（Windows 11 为开发/测试环境）；识别走 DirectML（系统内置），发布包需附带 `DirectML.dll`
+- **识别资产**：`models/`（yolo26l.onnx + bird_model.onnx，约 250MB）与 `data/pica_ref.db`（名录库）必须位于 **exe 同级目录**（便携约定，不入库，`.gitignore` 已排除）；开发时即 `target/debug/` 或 `target/release/` 下
 
 ---
 
 ## 测试与 QA
 
-- 全部 **83 个 `#[test]`** 分布在 3 个 crate 的源文件末尾内联 `#[cfg(test)] mod tests`
+- 全部 **123 个 `#[test]`**（+ 1 个 `#[ignore]` 真机冒烟）分布在 4 个 crate 的源文件末尾内联 `#[cfg(test)] mod tests
 - 无外部 `tests/` 目录、无异步测试、无第三方测试框架（唯一 dev-dep：`tempfile`）
+- 真机识别冒烟：`cargo test -p photo-recognize -- --ignored`（需 worktree/发布根有 `models/` 与 `data/pica_ref.db`）；单文件手动识别工具：`cargo run -p photo-recognize --example recognize_file -- <图片路径>`
 
 ### 测试分布
 
 | 模块（新 crate） | 测试数 | 覆盖内容 |
 |---|---|---|
-| `photo-domain::domain.rs` | 15 | 扩展名解析、RAW 白名单、enrich_with_xmp、ExifMetadata 默认/摘要、XmpMetadata 枚举转换 |
-| `photo-config::lib.rs` (config) | 3 | 默认值、TOML 保存/加载往返、配置路径 |
+| `photo-domain::domain.rs` | 25 | 扩展名解析、RAW 白名单、enrich_with_xmp/recognition、ExifMetadata 默认/摘要、XmpMetadata 枚举转换、BBox/RecognitionStatus/RecognitionFilter 序列化与状态映射 |
+| `photo-config::lib.rs` (config) | 6 | 默认值、TOML 保存/加载往返、配置路径 |
 | `photo-engine::scanner.rs` | 8 | JPEG+RAW 配对、大小写、sidecar 分离、忽略视频 |
-| `photo-engine::ops.rs` | 8 | 移动/复制/重命名/删除（含 sidecar）、命名冲突、批量跳过缺失 |
+| `photo-engine::ops.rs` | 8+ | 移动/复制/重命名/删除（含 sidecar）、命名冲突、批量跳过缺失、识别行同步（sync_delete/copy/rename） |
 | `photo-engine::thumbnail.rs` | 6 | 缓存命中、键唯一性、stats/clear、prune 淘汰最旧、错误路径 |
-| `photo-engine::exif.rs` | 5 | 无 EXIF 报错、不存在文件、file_size 始终填充（summary 测试移至 domain）|
+| `photo-engine::exif.rs` | 5 | 无 EXIF 报错、不存在文件、file_size 始终填充 |
 | `photo-engine::convert.rs` | 7 | resize 三分支、格式分发、RAW 错误、输出路径命名 |
 | `photo-engine::xmp.rs` | 6 | xmp_path、读写往返、不存在的文件返回默认值、更新已有文件 |
+| `photo-engine::folder_db.rs` | 7 | 识别表建表/迁移、upsert/get/delete、rename/copy 同步、all_recognitions、旧版 cache.db 迁移 |
+| `photo-recognize::lib.rs/pipeline.rs` | 22 | 阶段→状态映射、输入源解析（JPEG/RAW）、检测框变换、softmax/Top-5、名录映射 0/1/多、进度回调；另 1 个 `#[ignore]` 真机冒烟 |
+| `photo-tool-app` | 9 | action/状态工具函数 |
 
 ### 测试辅助
 
