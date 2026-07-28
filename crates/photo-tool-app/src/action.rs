@@ -44,6 +44,9 @@ pub enum Action {
     ConfirmRecognizeAll,
     CancelBatchRecognize,
     SetRecognitionFilter(RecognitionFilter),
+    // Sidebar 文件夹卡片（作用于 folder_menu_dir 指向的右键目标）
+    ToggleContextDirFavorite,
+    RemoveContextDir,
     // Other
     Refresh,
     ToggleLeftPanel,

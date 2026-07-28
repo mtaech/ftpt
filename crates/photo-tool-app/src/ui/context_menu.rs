@@ -72,3 +72,15 @@ pub fn capture_menu(
         .menu("删除（移至回收站）", cmd(Action::Delete))
         .menu("永久删除", cmd(Action::PermanentDelete))
 }
+
+/// 构建侧栏文件夹卡片的右键菜单。
+/// 菜单命令作用于 `RootView::folder_menu_dir`（卡片 context_menu 闭包先行设置）。
+/// `is_fav` 决定首项文案：已收藏显示「取消收藏」，否则「加入收藏」。
+pub fn folder_menu(menu: PopupMenu, is_fav: bool) -> PopupMenu {
+    menu.menu(
+        if is_fav { "取消收藏" } else { "加入收藏" },
+        cmd(Action::ToggleContextDirFavorite),
+    )
+    .separator()
+    .menu("从列表移除", cmd(Action::RemoveContextDir))
+}

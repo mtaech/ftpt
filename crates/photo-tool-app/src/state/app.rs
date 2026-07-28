@@ -110,6 +110,8 @@ pub struct RootView {
     pub batch_progress_rc: (usize, usize),
     /// 批量识别当前处理的文件名
     pub batch_current_file: String,
+    /// 侧栏文件夹卡片右键菜单的目标目录（由卡片 context_menu 闭包设置）
+    pub folder_menu_dir: Option<String>,
     /// 识别统计数据 (已识别, 无鸟, 待复核)
     pub batch_counts: (usize, usize, usize),
     /// 批量取消标志
@@ -208,6 +210,7 @@ impl RootView {
             bbox_visible: true,
             show_recognize_all_confirm: false,
             focused_recognition: None,
+            folder_menu_dir: None,
         };
 
         if let Some(last_dir) = &auto_dir {
@@ -1311,6 +1314,27 @@ impl RootView {
                 self.bbox_visible = !self.bbox_visible;
                 tracing::info!("检测框显隐切换: {}", self.bbox_visible);
                 cx.notify();
+            }
+            // 文件夹卡片右键：加入/取消收藏（作用于 folder_menu_dir）
+            Action::ToggleContextDirFavorite => {
+                if let Some(dir) = self.folder_menu_dir.clone() {
+                    if self.config.favorite_dirs.iter().any(|d| d == &dir) {
+                        self.config.favorite_dirs.retain(|d| d != &dir);
+                    } else {
+                        self.config.favorite_dirs.push(dir);
+                    }
+                    self.save_config();
+                    cx.notify();
+                }
+            }
+            // 文件夹卡片右键：从列表移除（同时清出最近打开与收藏夹）
+            Action::RemoveContextDir => {
+                if let Some(dir) = self.folder_menu_dir.clone() {
+                    self.config.recent_directories.retain(|d| d != &dir);
+                    self.config.favorite_dirs.retain(|d| d != &dir);
+                    self.save_config();
+                    cx.notify();
+                }
             }
             Action::RecognizeUnrecognized => {
                 let dir = self.dir_path.clone();

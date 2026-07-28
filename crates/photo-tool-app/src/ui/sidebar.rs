@@ -1,24 +1,24 @@
 use gpui::{prelude::FluentBuilder, *};
 use std::path::PathBuf;
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::menu::ContextMenuExt as _;
 use gpui_component::{h_flex, v_flex, Icon, IconName, Sizable};
 use photo_domain::{Flag, Rating, RecognitionFilter};
 
 use crate::state::app::RootView;
 use crate::ui::theme;
 
-/// 左侧边栏 tab 名称与索引
-const SIDEBAR_TABS: &[(&str, usize)] = &[("文件树", 0), ("收藏夹", 1), ("筛选", 2), ("文件操作", 3)];
+/// 左侧边栏 tab 名称与索引（收藏夹已并入文件树 tab）
+const SIDEBAR_TABS: &[(&str, usize)] = &[("文件树", 0), ("筛选", 1), ("文件操作", 2)];
 
-/// Render the left sidebar with tab bar: 文件树 | 收藏夹 | 筛选
+/// Render the left sidebar with tab bar: 文件树 | 筛选 | 文件操作
 pub fn render_sidebar(view: &RootView, cx: &mut Context<RootView>) -> impl IntoElement {
     let vh = cx.entity().downgrade();
     let active_tab = view.sidebar_section;
 
     let content: gpui::AnyElement = match active_tab {
-        1 => render_favorites_section(view, cx).into_any_element(),
-        2 => render_filter_section(view, cx).into_any_element(),
-        3 => crate::ui::batch_ops::render_batch_ops_section(view, cx).into_any_element(),
+        1 => render_filter_section(view, cx).into_any_element(),
+        2 => crate::ui::batch_ops::render_batch_ops_section(view, cx).into_any_element(),
         _ => render_directory_section(view, cx).into_any_element(),
     };
 
@@ -151,213 +151,150 @@ fn render_directory_section(
                         }),
                 ),
         )
-        .children(render_recent_directories(view, cx))
+        .child(render_folder_groups(view, cx))
 }
 
-// ── Recent Directories ──────────────────────────────────────────────────
+// ── 收藏与最近打开（合并文件树 tab）─────────────────────────────────────
 
-fn render_recent_directories(
+fn render_folder_groups(
     view: &RootView,
     cx: &mut Context<RootView>,
-) -> impl IntoIterator<Item = impl IntoElement> {
+) -> impl IntoElement {
     let vh = cx.entity().downgrade();
     let current = view.dir_path.as_ref().map(|p| p.to_string_lossy().to_string());
+    // 收藏置前；最近打开排除当前目录与已收藏（同一目录只出现一次）
+    let favs: Vec<String> = view
+        .config
+        .favorite_dirs
+        .iter()
+        .filter(|d| Some(*d) != current.as_ref())
+        .cloned()
+        .collect();
     let recents: Vec<String> = view
         .config
         .recent_directories
         .iter()
         .filter(|d| Some(*d) != current.as_ref())
+        .filter(|d| !favs.contains(*d))
         .cloned()
         .collect();
 
-    let mut elements: Vec<AnyElement> = Vec::new();
-    if recents.is_empty() {
-        return elements;
-    }
-
-    elements.push(
-        div()
-            .pt_2()
-            .child(crate::ui::controls::section_header("最近打开"))
-            .into_any_element(),
-    );
-    for (i, dir) in recents.iter().enumerate() {
-        let display = std::path::Path::new(dir)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(dir)
-            .to_string();
-        let dir_open = dir.clone();
-        let dir_remove = dir.clone();
-        let vh_open = vh.clone();
-        let vh_remove = vh.clone();
-        elements.push(
-            // 复用当前文件夹卡片的双行结构：目录名 + 完整路径（等宽），右侧 hover 浮现 ×
+    v_flex()
+        .gap_1()
+        .child(div().pt_2().child(crate::ui::controls::section_header("收藏")))
+        .child(if favs.is_empty() {
             div()
-                .id(ElementId::Name(SharedString::from(format!("recent-{i}"))))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .rounded_sm()
-                .cursor_pointer()
-                .hover(|style| style.bg(theme::colors().element_hover))
+                .text_xs()
+                .text_color(theme::colors().text_muted)
+                .child("右键文件夹卡片可加入收藏")
+                .into_any_element()
+        } else {
+            v_flex()
+                .gap_0p5()
+                .children(favs.iter().enumerate().map(|(i, dir)| {
+                    folder_card(format!("fav-{i}"), dir, true, vh.clone())
+                }))
+                .into_any_element()
+        })
+        .child(div().pt_2().child(crate::ui::controls::section_header("最近打开")))
+        .child(if recents.is_empty() {
+            div()
+                .text_xs()
+                .text_color(theme::colors().text_muted)
+                .child("暂无历史记录")
+                .into_any_element()
+        } else {
+            v_flex()
+                .gap_0p5()
+                .children(recents.iter().enumerate().map(|(i, dir)| {
+                    folder_card(format!("recent-{i}"), dir, false, vh.clone())
+                }))
+                .into_any_element()
+        })
+}
+
+/// 文件夹卡片：双行（目录名 + 完整路径），收藏带星标。
+/// 左键打开目录；右键菜单「加入/取消收藏」「从列表移除」。
+fn folder_card(
+    id: String,
+    dir: &str,
+    is_fav: bool,
+    vh: gpui::WeakEntity<RootView>,
+) -> AnyElement {
+    let display = std::path::Path::new(dir)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(dir)
+        .to_string();
+    let path_text = dir.to_string();
+    let dir_open = dir.to_string();
+    let dir_menu = dir.to_string();
+    let vh_open = vh.clone();
+    let vh_menu = vh;
+
+    div()
+        .id(ElementId::Name(SharedString::from(id)))
+        .flex()
+        .flex_row()
+        .items_center()
+        .rounded_sm()
+        .cursor_pointer()
+        .hover(|style| style.bg(theme::colors().element_hover))
+        .child(
+            div()
+                .flex_1()
+                .px_2()
+                .py_1()
                 .child(
-                    div()
-                        .flex_1()
-                        .px_2()
-                        .py_1()
+                    v_flex()
                         .child(
-                            v_flex()
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .when(is_fav, |d| {
+                                    d.child(
+                                        Icon::new(IconName::StarFill)
+                                            .xsmall()
+                                            .text_color(theme::colors().text_accent),
+                                    )
+                                })
                                 .child(
                                     div()
                                         .text_sm()
                                         .text_color(theme::colors().text)
                                         .truncate()
                                         .child(display),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme::colors().text_muted)
-                                        .font_family(theme::MONO_FONT_FAMILY)
-                                        .truncate()
-                                        .child(dir.clone()),
                                 ),
-                        ),
-                )
-                .child(
-                    // hover 时浮现的移除按钮（与常用目录同款交互）
-                    div()
-                        .id(ElementId::Name(SharedString::from(format!("recent-rm-{i}"))))
-                        .invisible()
-                        .group_hover("", |this| this.visible())
-                        .cursor_pointer()
-                        .pr_2()
-                        .child(
-                            Icon::new(IconName::Close)
-                                .xsmall()
-                                .text_color(theme::colors().text_muted),
                         )
-                        .on_click(move |_event: &ClickEvent, _window, cx| {
-                            // 阻止冒泡，避免触发外层「打开目录」
-                            cx.stop_propagation();
-                            if let Some(view) = vh_remove.upgrade() {
-                                let _ = cx.update_entity(&view, |root_view, root_cx| {
-                                    root_view
-                                        .config
-                                        .recent_directories
-                                        .retain(|d| d != &dir_remove);
-                                    root_view.save_config();
-                                    root_cx.notify();
-                                });
-                            }
-                        }),
-                )
-                .on_click(move |_, _window, cx| {
-                    if let Some(view) = vh_open.upgrade() {
-                        let path = dir_open.clone();
-                        let _ = cx.update_entity(&view, |root_view, root_cx| {
-                            root_view.scan_directory(PathBuf::from(&path), root_cx);
-                        });
-                    }
-                })
-                .into_any_element(),
-        );
-    }
-    elements
-}
-
-// ── Favorites Section ────────────────────────────────────────────────────
-
-fn render_favorites_section(
-    view: &RootView,
-    cx: &mut Context<RootView>,
-) -> impl IntoElement {
-    let favs = &view.config.favorite_dirs;
-    let vh = cx.entity().downgrade();
-
-    v_flex()
-        .gap_1()
-        .child(crate::ui::controls::section_header("常用目录"))
-        .child(
-            if favs.is_empty() {
-                div()
-                    .text_sm()
-                    .text_color(theme::colors().text_muted)
-                    .child("暂无常用目录")
-                    .into_any_element()
-            } else {
-                v_flex()
-                    .gap_0p5()
-                    .children(favs.iter().enumerate().map(|(i, dir)| {
-                        let display = std::path::Path::new(dir)
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("?")
-                            .to_string();
-                        let dir_open = dir.clone();
-                        let dir_remove = dir.clone();
-                        let id = format!("fav-{i}");
-                        let vh_open = vh.clone();
-                        let vh_remove = vh.clone();
-
-                        // 单行常用目录，hover 时右侧浮现移除按钮
-                        div()
-                            .id(ElementId::Name(SharedString::from(id.clone())))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_1()
-                            .px_2()
-                            .py_0p5()
-                            .rounded_sm()
-                            .hover(|style| style.bg(theme::colors().element_hover))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_sm()
-                                    .truncate()
-                                    .child(display),
-                            )
-                            .child(
-                                // hover 时浮现的移除按钮（group_hover 控制 visible）
-                                div()
-                                    .id(ElementId::Name(SharedString::from(format!("fav-rm-{i}"))))
-                                    .invisible()
-                                    .group_hover("", |this| this.visible())
-                                    .cursor_pointer()
-                                    .child(
-                                        Icon::new(IconName::Close)
-                                            .xsmall()
-                                            .text_color(theme::colors().text_muted),
-                                    )
-                                    .on_click(move |_event: &ClickEvent, _window, cx| {
-                                        // 阻止冒泡，避免触发外层「打开目录」
-                                        cx.stop_propagation();
-                                        if let Some(view) = vh_remove.upgrade() {
-                                            let _ = cx.update_entity(&view, |root_view, root_cx| {
-                                                root_view.config.favorite_dirs.retain(|d| d != &dir_remove);
-                                                root_view.save_config();
-                                                root_cx.notify();
-                                            });
-                                        }
-                                    }),
-                            )
-                            .on_click(move |_, _window, cx| {
-                                if let Some(view) = vh_open.upgrade() {
-                                    let path = dir_open.clone();
-                                    let _ = cx.update_entity(&view, |root_view, root_cx| {
-                                        root_view.scan_directory(PathBuf::from(&path), root_cx);
-                                    });
-                                }
-                            })
-                    }))
-                    .into_any_element()
-            },
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::colors().text_muted)
+                                .font_family(theme::MONO_FONT_FAMILY)
+                                .truncate()
+                                .child(path_text),
+                        ),
+                ),
         )
+        .on_click(move |_, _window, cx| {
+            if let Some(view) = vh_open.upgrade() {
+                let path = dir_open.clone();
+                let _ = cx.update_entity(&view, |root_view, root_cx| {
+                    root_view.scan_directory(PathBuf::from(&path), root_cx);
+                });
+            }
+        })
+        .context_menu(move |menu, _window, cx| {
+            // 右键先记录目标目录，菜单命令统一作用于 folder_menu_dir
+            if let Some(view) = vh_menu.upgrade() {
+                let _ = cx.update_entity(&view, |root_view, _cx| {
+                    root_view.folder_menu_dir = Some(dir_menu.clone());
+                });
+            }
+            crate::ui::context_menu::folder_menu(menu, is_fav)
+        })
+        .into_any_element()
 }
-
 
 fn render_filter_section(
     view: &RootView,
