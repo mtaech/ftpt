@@ -31,14 +31,19 @@ pub fn render_grid(
     const COLS: usize = 4;
     let viewport_w: f32 = window.viewport_size().width.into();
     let right_w = if view.config.right_panel_visible {
-        crate::ui::layout::RIGHT_PANEL_WIDTH
+        view.config.right_panel_width as f32
     } else {
         0.
     };
     const SCROLLBAR_PAD: f32 = 16.;
+    let left_w = if view.sidebar_visible {
+        view.config.left_panel_width as f32
+    } else {
+        0.
+    };
     let available_w = (viewport_w
         - crate::ui::layout::RAIL_WIDTH
-        - view.config.left_panel_width as f32
+        - left_w
         - right_w
         - SCROLLBAR_PAD)
         .max(cell_size * COLS as f32);

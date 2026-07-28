@@ -59,12 +59,19 @@ pub struct AppConfig {
     pub window_height: u32,
     pub left_panel_width: u32,
     pub right_panel_visible: bool,
+    /// 右侧信息面板宽度（px）。旧配置无此字段时默认 280。
+    #[serde(default = "default_right_panel_width")]
+    pub right_panel_width: u32,
     pub thumbnail_cache_mode: ThumbnailCacheMode,
     pub max_cache_size_mb: u64,
     pub font_family: String,
     /// 自定义缩略图缓存目录。None 时用 config 所在目录的 thumbnails/ 子目录。
     #[serde(default)]
     pub cache_directory: Option<String>,
+}
+
+fn default_right_panel_width() -> u32 {
+    280
 }
 
 fn default_font_family() -> String {
@@ -85,6 +92,7 @@ impl Default for AppConfig {
             window_height: 900,
             left_panel_width: 260,
             right_panel_visible: true,
+            right_panel_width: 280,
             thumbnail_cache_mode: ThumbnailCacheMode::default(),
             max_cache_size_mb: 500,
             font_family: default_font_family(),

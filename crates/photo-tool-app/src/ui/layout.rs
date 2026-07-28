@@ -1,4 +1,5 @@
 use gpui_component::{h_flex, v_flex};
+use gpui_component::resizable::{h_resizable, resizable_panel};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{Icon, IconName};
@@ -10,9 +11,8 @@ use crate::state::app::RootView;
 use crate::ui::toolbar::render_settings_overlay;
 use crate::ui::theme;
 
-/// 右侧信息面板固定宽度（px），网格列宽计算依赖该值
+/// 左侧 Activity Rail 固定宽度（px），网格列宽计算依赖该值
 pub const RAIL_WIDTH: f32 = 48.0;
-pub const RIGHT_PANEL_WIDTH: f32 = 280.0;
 
 /// Render the three-panel layout: sidebar | content | info_panel.
 pub fn render_layout(
@@ -117,81 +117,113 @@ pub fn render_layout(
                     crate::ui::activity_rail::render_activity_rail(view, cx),
                 )
                 .child(
-                    // Left sidebar（按 sidebar_visible 条件显隐）
-                    if view.sidebar_visible {
-                        v_flex()
-                            .h_full()
-                            .w(px(view.config.left_panel_width as f32))
-                            .bg(theme::colors().surface_background)
-                            .border_color(theme::colors().border_variant)
-                            .overflow_y_scrollbar()
-                            .child(crate::ui::sidebar::render_sidebar(view, cx))
-                            .into_any_element()
-                    } else {
-                        div().into_any_element()
-                    }
-                )
-                .child(
-                    // Center content area (grid, preview, or empty state)
-                    v_flex()
-                        .h_full()
-                        .flex_grow(1.0)
-                        // 允许缩到 0：否则内容（如预览大图）的固有宽度会撑开此列，顶移左右面板
-                        .min_w_0()
-                        .overflow_hidden()
-                        .child(if view.dir_path.is_none() {
-                            // Empty state: no directory loaded
-                            v_flex()
-                                .h_full()
-                                .flex_grow(1.0)
-                                .items_center()
-                                .justify_center()
-                                .gap_3()
+                    // 三栏可拖拽布局：左栏 | 内容区 | 右栏（gpui-component h_resizable）
+                    h_resizable("main-panels")
+                        .child(
+                            resizable_panel()
+                                .size(px(view.config.left_panel_width as f32))
+                                .size_range(px(200.)..px(480.))
+                                .flex_none()
+                                .visible(view.sidebar_visible)
                                 .child(
-                                    Icon::new(IconName::GalleryVerticalEnd)
-                                        .text_color(theme::colors().text_muted.opacity(0.2)),
-                                )
+                                    v_flex()
+                                        .size_full()
+                                        .bg(theme::colors().surface_background)
+                                        .border_color(theme::colors().border_variant)
+                                        .overflow_y_scrollbar()
+                                        .child(crate::ui::sidebar::render_sidebar(view, cx))
+                                        .into_any_element(),
+                                ),
+                        )
+                        .child(
+                            resizable_panel()
+                                .min_w_0()
                                 .child(
-                                    div()
-                                        .text_color(theme::colors().text_muted)
-                                        .child("打开目录开始浏览照片"),
-                                )
+                                    // Center content area (grid, preview, or empty state)
+                                    v_flex()
+                                        .h_full()
+                                        .w_full()
+                                        .overflow_hidden()
+                                        .child(if view.dir_path.is_none() {
+                                            // Empty state: no directory loaded
+                                            v_flex()
+                                                .h_full()
+                                                .flex_grow(1.0)
+                                                .items_center()
+                                                .justify_center()
+                                                .gap_3()
+                                                .child(
+                                                    Icon::new(IconName::GalleryVerticalEnd)
+                                                        .text_color(theme::colors().text_muted.opacity(0.2)),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_color(theme::colors().text_muted)
+                                                        .child("打开目录开始浏览照片"),
+                                                )
+                                                .child(
+                                                    Button::new("empty-open-dir")
+                                                        .icon(IconName::FolderOpen)
+                                                        .primary()
+                                                        .label("打开目录")
+                                                        .on_click(cx.listener(|view, _event: &ClickEvent, _window, cx| {
+                                                            view.pick_and_scan_directory(cx);
+                                                        })),
+                                                )
+                                                .into_any_element()
+                                        } else {
+                                            match view.view_mode {
+                                                crate::state::app::ViewMode::Grid => {
+                                                    crate::ui::grid::render_grid(view, window, cx).into_any_element()
+                                                }
+                                                crate::state::app::ViewMode::Preview => {
+                                                crate::ui::preview::render_preview(view, window, cx).into_any_element()
+                                                }
+                                            }
+                                        })
+                                        .into_any_element(),
+                                ),
+                        )
+                        .child(
+                            resizable_panel()
+                                .size(px(view.config.right_panel_width as f32))
+                                .size_range(px(200.)..px(480.))
+                                .flex_none()
+                                .visible(view.config.right_panel_visible)
                                 .child(
-                                    Button::new("empty-open-dir")
-                                        .icon(IconName::FolderOpen)
-                                        .primary()
-                                        .label("打开目录")
-                                        .on_click(cx.listener(|view, _event: &ClickEvent, _window, cx| {
-                                            view.pick_and_scan_directory(cx);
-                                        })),
-                                )
-                                .into_any_element()
-                        } else {
-                            match view.view_mode {
-                                crate::state::app::ViewMode::Grid => {
-                                    crate::ui::grid::render_grid(view, window, cx).into_any_element()
-                                }
-                                crate::state::app::ViewMode::Preview => {
-                                crate::ui::preview::render_preview(view, window, cx).into_any_element()
-                                }
+                                    v_flex()
+                                        .size_full()
+                                        .bg(theme::colors().background)
+                                        .border_color(theme::colors().border_variant)
+                                        .border_l_1()
+                                        .child(crate::ui::info_panel::render_info_panel(view, cx))
+                                        .into_any_element(),
+                                ),
+                        )
+                        .on_resize({
+                            let vh = cx.entity().downgrade();
+                            move |state, _window, cx| {
+                                let sizes = state.read(cx).sizes().clone();
+                                let Some(view) = vh.upgrade() else { return };
+                                cx.update_entity(&view, |this, _cx| {
+                                    // 隐藏的面板 size 为 0，不覆盖其已存宽度
+                                    if this.sidebar_visible {
+                                        if let Some(w) = sizes.first() {
+                                            let wf: f32 = (*w).into();
+                                            this.config.left_panel_width = wf.round().max(0.) as u32;
+                                        }
+                                    }
+                                    if this.config.right_panel_visible {
+                                        if let Some(w) = sizes.get(2) {
+                                            let wf: f32 = (*w).into();
+                                            this.config.right_panel_width = wf.round().max(0.) as u32;
+                                        }
+                                    }
+                                    // on_resize 仅在拖拽结束（mouse up）触发，直接落盘
+                                    this.save_config();
+                                });
                             }
                         }),
-                )
-                .child(
-                    // Right info panel (conditionally visible)
-                    if view.config.right_panel_visible {
-                        v_flex()
-                            .h_full()
-                            .w(px(RIGHT_PANEL_WIDTH))
-                            .flex_shrink_0()
-                            .bg(theme::colors().background)
-                            .border_color(theme::colors().border_variant)
-                            .border_l_1()
-                            .child(crate::ui::info_panel::render_info_panel(view, cx))
-                            .into_any_element()
-                    } else {
-                        div().into_any_element()
-                    },
                 ),
         )
         .child(
