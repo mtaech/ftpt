@@ -34,6 +34,7 @@ pub fn render_layout(
             |view: &mut RootView, event: &KeyDownEvent, _window, cx| {
                 let key = event.keystroke.key.as_str();
                 let ctrl = event.keystroke.modifiers.control;
+                let shift = event.keystroke.modifiers.shift;
 
                 match (key, ctrl) {
                     // Rating
@@ -52,6 +53,16 @@ pub fn render_layout(
                     ("p", false) => view.dispatch_action(Action::FlagPick, cx),
                     ("x", false) => view.dispatch_action(Action::FlagReject, cx),
                     ("u", false) => view.dispatch_action(Action::FlagNone, cx),
+                    // Recognition
+                    ("b", false) => view.dispatch_action(Action::Recognize, cx),
+                    ("b", true) => {
+                        if shift {
+                            view.dispatch_action(Action::RecognizeAll, cx);
+                        } else {
+                            view.dispatch_action(Action::RecognizeUnrecognized, cx);
+                        }
+                    }
+                    ("v", false) => view.dispatch_action(Action::ToggleBbox, cx),
                     // View
                     ("g", false) => view.dispatch_action(Action::ToggleGridPreview, cx),
                     ("left", false) => view.dispatch_action(Action::Prev, cx),
@@ -64,11 +75,13 @@ pub fn render_layout(
                     // Selection
                     ("a", true) => view.dispatch_action(Action::SelectAll, cx),
                     ("d", true) => view.dispatch_action(Action::DeselectAll, cx),
-                    // Refresh
+                    // Refresh / Cancel
                     ("escape", false) => {
                         if view.show_settings {
                             view.show_settings = false;
                             cx.notify();
+                        } else if view.batch_recognizing {
+                            view.dispatch_action(Action::CancelBatchRecognize, cx);
                         }
                     }
                     ("f5", false) => view.dispatch_action(Action::Refresh, cx),
@@ -190,6 +203,82 @@ pub fn render_layout(
             parent.child(render_settings_overlay(view, cx))
         })
         // 批量操作进度弹窗
+        // 批量全量识别确认对话框
+        .when(view.show_recognize_all_confirm, |parent| {
+            let vh = cx.entity().downgrade();
+            let n = view.captures.len();
+            parent.child(
+                div()
+                    .absolute()
+                    .size_full()
+                    .bg(hsla(0., 0., 0., 0.4))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w(px(400.))
+                            .bg(theme::colors().surface_background)
+                            .rounded_lg()
+                            .shadow_lg()
+                            .child(
+                                v_flex()
+                                    .p_4()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .text_base()
+                                            .font_weight(FontWeight::BOLD)
+                                            .child("重新识别全部"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(theme::colors().text_muted)
+                                            .child(format!("将重新识别 {} 张照片，已有的识别结果会被覆盖。", n)),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .justify_end()
+                                            .gap_2()
+                                            .pt_2()
+                                            .child(
+                                                Button::new("cancel-recognize-all")
+                                                    .label("取消")
+                                                    .ghost()
+                                                    .on_click({
+                                                        let vh = vh.clone();
+                                                        move |_, _window, cx| {
+                                                            if let Some(e) = vh.upgrade() {
+                                                                cx.update_entity(&e, |view, cx| {
+                                                                    view.show_recognize_all_confirm = false;
+                                                                    cx.notify();
+                                                                });
+                                                            }
+                                                        }
+                                                    }),
+                                            )
+                                            .child(
+                                                Button::new("confirm-recognize-all")
+                                                    .label("确认")
+                                                    .primary()
+                                                    .on_click({
+                                                        let vh = vh.clone();
+                                                        move |_, _window, cx| {
+                                                            if let Some(e) = vh.upgrade() {
+                                                                cx.update_entity(&e, |view, cx| {
+                                                                    view.show_recognize_all_confirm = false;
+                                                                    view.dispatch_action(Action::ConfirmRecognizeAll, cx);
+                                                                });
+                                                            }
+                                                        }
+                                                    }),
+                                            ),
+                                    ),
+                            ),
+                    ),
+            )
+        })
         .when(view.batch_show_progress_popup, |parent| {
             let vh = cx.entity().downgrade();
             let (done, total) = view.batch_progress.unwrap_or((0, 1));

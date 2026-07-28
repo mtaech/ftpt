@@ -1,10 +1,13 @@
 use gpui::*;
+use gpui::prelude::FluentBuilder;
 use photo_domain::{CaptureMeta, ColorLabel, Flag};
-use photo_domain::Rating as DomainRating;
+use photo_domain::{Rating as DomainRating, Recognition, RecognitionStatus};
 
 use crate::action::Action;
 use crate::state::app::RootView;
 use gpui_component::rating::Rating;
+use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::{Sizable};
 
 use crate::ui::controls::{clear_link, section_header, segmented_button};
 use crate::ui::theme;
@@ -23,6 +26,9 @@ pub fn render_info_panel(view: &RootView, cx: &mut Context<RootView>) -> impl In
         // ── Hero ──
         .child(render_hero(focused))
         .child(section_divider())
+        // ── 识别 ──
+        .child(render_recognition_section(view, cx))
+        .child(section_divider())
         .child(render_exif_section(focused))
         .child(section_divider())
         .child(render_rating_section(focused, cx))
@@ -37,7 +43,7 @@ fn section_divider() -> impl IntoElement {
     div().h(px(1.)).w_full().bg(theme::colors().border_variant)
 }
 
-/// Hero 区：文件名（粗体截断）+ 分辨率/文件大小（等宽强调）
+/// Hero 区：文件名（粗体截断）+ 鸟种（条件显示）+ 分辨率/文件大小（等宽强调）
 fn render_hero(focused: Option<&CaptureMeta>) -> impl IntoElement {
     match focused {
         None => div()
@@ -68,6 +74,16 @@ fn render_hero(focused: Option<&CaptureMeta>) -> impl IntoElement {
                             .child(format_file_size(meta.file_size)),
                     ),
             )
+            // 鸟种中文名（存在时显示）
+            .when_some(meta.bird_name.as_ref(), |this, name| {
+                this.child(
+                    div()
+                        .text_base()
+                        .text_color(theme::colors().text_accent)
+                        .truncate()
+                        .child(name.clone()),
+                )
+            })
             .child(
                 div()
                     .font_family(theme::MONO_FONT_FAMILY)
@@ -411,3 +427,276 @@ fn render_flag_section(
         )
         .into_any_element()
 }
+
+// ── Recognition Section ─────────────────────────────────────────────────
+
+/// 置信度阈值色：>=80 success / >=50 warning / <50 info
+fn confidence_color(confidence: f32) -> Hsla {
+    if confidence >= 80.0 {
+        theme::colors().success
+    } else if confidence >= 50.0 {
+        theme::colors().warning
+    } else {
+        theme::colors().info
+    }
+}
+
+/// 2px 细进度条：条色按阈值动态，底为 element_background
+fn confidence_bar(confidence: f32) -> impl IntoElement {
+    let color = confidence_color(confidence);
+    let pct = confidence.clamp(0.0, 100.0) / 100.0;
+    div()
+        .h(px(2.))
+        .w_full()
+        .bg(theme::colors().element_background)
+        .rounded_sm()
+        .child(
+            div()
+                .h_full()
+                .w(relative(pct))
+                .bg(color)
+                .rounded_sm(),
+        )
+}
+
+/// 三层派生语义 chip：圆角 4px，1px 描边 + 文字 + 底色
+fn status_chip(label: &str, text_color: Hsla, bg_color: Hsla, border_color: Hsla) -> impl IntoElement {
+    div()
+        .px_2()
+        .py_0p5()
+        .rounded_sm()
+        .text_xs()
+        .text_color(text_color)
+        .bg(bg_color)
+        .border_1()
+        .border_color(border_color)
+        .child(label.to_string())
+}
+
+/// 识别 section：五态切换 + 切换检测框按钮
+fn render_recognition_section(
+    view: &RootView,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let vh = cx.entity().downgrade();
+    let colors = theme::colors();
+
+    // 计算当前聚焦 capture 的 index（用于 comparing recognizing_single）
+    let focused_cap_index = view
+        .focus_index
+        .and_then(|di| view.display_order.get(di).copied());
+
+    let is_busy = focused_cap_index.is_some()
+        && view.recognizing_single == focused_cap_index;
+
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .py_2()
+        .child(section_header("识别"))
+        .child(match (view.focused_recognition.as_ref(), is_busy) {
+            // ── 识别中 ──
+            (_, true) => {
+                let stage = view
+                    .recognize_stage
+                    .as_deref()
+                    .unwrap_or("识别中...");
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .child(gpui_component::spinner::Spinner::new().with_size(gpui_component::Size::Small))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(colors.text_muted)
+                            .child(stage.to_string()),
+                    )
+                    .into_any_element()
+            }
+            // ── 未识别（无记录） ──
+            (None, false) => {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(colors.text_muted)
+                            .child("尚未识别"),
+                    )
+                    .child(
+                        Button::new("recognize-photo")
+                            .primary()
+                            .small()
+                            .label("识别此照片 (b)")
+                            .on_click({
+                                let vh = vh.clone();
+                                move |_, _window, cx| {
+                                    if let Some(e) = vh.upgrade() {
+                                        cx.update_entity(&e, |view, cx| {
+                                            view.dispatch_action(Action::Recognize, cx);
+                                        });
+                                    }
+                                }
+                            }),
+                    )
+                    .into_any_element()
+            }
+            // ── 有识别记录 ──
+            (Some(r), false) => render_recognition_content(r),
+        })
+        // ToggleBbox 按钮（有识别记录且非识别中时显示，与重新识别并排）
+        .when(
+            view.focused_recognition.is_some() && !is_busy,
+            |this| {
+                this.child(render_recognition_actions(view, &vh))
+            },
+        )
+}
+
+/// 有识别记录时的内容渲染
+fn render_recognition_content(
+    r: &Recognition,
+) -> AnyElement {
+    let colors = theme::colors();
+
+    match r.status {
+        RecognitionStatus::Confirmed => {
+            let confidence = r.confidence.unwrap_or(0.0);
+            let conf_color = confidence_color(confidence);
+
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                // 置信度数字 + 进度条
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .font_family(theme::MONO_FONT_FAMILY)
+                                .text_lg()
+                                .text_color(conf_color)
+                                .child(format!("{:.1}%", confidence)),
+                        )
+                        .child(confidence_bar(confidence)),
+                )
+                // 状态 chip「已识别」
+                .child(
+                    h_flex()
+                        .justify_between()
+                        .child(status_chip(
+                            "已识别",
+                            colors.success,
+                            colors.success_background,
+                            colors.success_border,
+                        )),
+                )
+                .into_any_element()
+        }
+        RecognitionStatus::NeedsReview => {
+            let failure_msg = r.failure_stage.user_message();
+
+            // 取 candidates 中第一个 bird 非 None 项
+            let best_candidate = r.candidates.iter().find_map(|c| {
+                c.bird.as_ref().map(|b| (b.cn_name.clone(), c.confidence))
+            });
+
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(status_chip(
+                    "待复核",
+                    colors.warning,
+                    colors.warning_background,
+                    colors.warning_border,
+                ))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(colors.warning)
+                        .child(failure_msg.to_string()),
+                )
+                .when_some(best_candidate, |this, (name, conf)| {
+                    this.child(
+                        div()
+                            .text_sm()
+                            .text_color(colors.text_muted)
+                            .child(format!("最接近：{} {:.1}%", name, conf)),
+                    )
+                })
+                .into_any_element()
+        }
+        RecognitionStatus::Unrecognized => {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(status_chip(
+                    "未检测到鸟类",
+                    colors.text_muted,
+                    colors.element_background,
+                    colors.border_variant,
+                ))
+                .into_any_element()
+        }
+    }
+}
+
+/// 识别动作按钮行：重新识别 + 切换检测框
+fn render_recognition_actions(
+    view: &RootView,
+    vh: &gpui::WeakEntity<RootView>,
+) -> impl IntoElement {
+    let vh = vh.clone();
+    let bbox_label = if view.bbox_visible {
+        "隐藏检测框"
+    } else {
+        "显示检测框"
+    };
+
+    h_flex()
+        .justify_end()
+        .gap_1()
+        .child(
+            // 重新识别
+            Button::new("re-recognize")
+                .ghost()
+                .small()
+                .label("重新识别")
+                .on_click({
+                    let vh = vh.clone();
+                    move |_, _window, cx| {
+                        if let Some(e) = vh.upgrade() {
+                            cx.update_entity(&e, |view, cx| {
+                                view.dispatch_action(Action::Recognize, cx);
+                            });
+                        }
+                    }
+                }),
+        )
+        .child(
+            // 显示/隐藏检测框
+            Button::new("toggle-bbox")
+                .ghost()
+                .small()
+                .label(bbox_label)
+                .on_click({
+                    let vh = vh.clone();
+                    move |_, _window, cx| {
+                        if let Some(e) = vh.upgrade() {
+                            cx.update_entity(&e, |view, cx| {
+                                view.dispatch_action(Action::ToggleBbox, cx);
+                            });
+                        }
+                    }
+                }),
+        )
+}
+

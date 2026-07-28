@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use photo_domain::{CaptureMeta, ColorLabel, Flag, ImageFormat, Rating};
+use photo_domain::{CaptureMeta, ColorLabel, Flag, ImageFormat, Rating, RecognitionStatus};
 
 use gpui_component::{Icon, IconName, Sizable};
 use gpui::prelude::FluentBuilder;
@@ -52,12 +52,12 @@ pub fn render_grid_cell(
                 .child(render_flag_overlay(capture.flag)),
         )
         .child(
-            // 底部信息区：文件名 + 大小 / 星级
+            // 底部信息区：文件名 + 大小/星级 + 鸟种状态
             div()
                 .flex()
                 .flex_col()
                 .flex_shrink_0()
-                .gap_1()
+                .gap_0p5()
                 .px_2()
                 .py_1p5()
                 .bg(theme::colors().surface_background)
@@ -91,7 +91,9 @@ pub fn render_grid_cell(
                                 .child(format_file_size(capture.file_size)),
                         )
                         .child(render_rating_stars(capture.rating)),
-                ),
+                )
+                // 第三行：鸟种状态（常驻占位，固定高度，虚拟化等高约束）
+                .child(render_bird_status_line(capture)),
         )
         .when(capture.color_label != ColorLabel::None, |d| {
             d.child(render_color_label_bar(capture.color_label))
@@ -241,4 +243,79 @@ fn render_color_label_bar(label: ColorLabel) -> impl IntoElement {
         .w_full()
         .flex_shrink_0()
         .bg(color)
+}
+
+/// 鸟种状态行：常驻占位，虚拟化等高约束，无记录渲染空行
+fn render_bird_status_line(capture: &CaptureMeta) -> impl IntoElement {
+    let colors = theme::colors();
+
+    match capture.recognition_status {
+        Some(RecognitionStatus::Confirmed) => {
+            let name = capture.bird_name.as_deref().unwrap_or("");
+            let confidence = capture.bird_confidence.unwrap_or(0.0);
+            let conf_color = if confidence >= 80.0 {
+                colors.success
+            } else if confidence >= 50.0 {
+                colors.warning
+            } else {
+                colors.info
+            };
+
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .h(px(18.))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(conf_color)
+                        .truncate()
+                        .child(name.to_string()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .font_family(theme::MONO_FONT_FAMILY)
+                        .text_color(colors.text_muted)
+                        .flex_shrink_0()
+                        .child(format!("{:.1}%", confidence)),
+                )
+                .into_any_element()
+        }
+        Some(RecognitionStatus::NeedsReview) => {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .h(px(18.))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.warning)
+                        .truncate()
+                        .child("待复核"),
+                )
+                .into_any_element()
+        }
+        Some(RecognitionStatus::Unrecognized) => {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .h(px(18.))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text_muted)
+                        .child("未检测到鸟类"),
+                )
+                .into_any_element()
+        }
+        None => {
+            // 空行占位：保持等高
+            div().h(px(18.)).into_any_element()
+        }
+    }
 }

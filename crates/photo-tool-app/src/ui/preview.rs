@@ -4,6 +4,7 @@ use gpui::*;
 
 use gpui_component::menu::ContextMenuExt as _;
 use gpui_component::{Icon, IconName, Sizable};
+use photo_domain::RecognitionStatus;
 use crate::state::app::RootView;
 use crate::ui::theme;
 
@@ -210,7 +211,74 @@ pub fn render_preview(
                                 // 绝对定位脱离文档流：拖动/缩放只改偏移，不参与 flex 布局，
                                 // 否则 margin 会改变内容固有尺寸，把左右面板顶移位。
                                 // 坐标原点 = 父容器左上，需补回 p_4 的 16px 内边距。
-                                div()
+                                let bbox_el: Option<AnyElement> = if view.bbox_visible {
+                                    focused.and_then(|meta| {
+                                        let status = meta.recognition_status?;
+                                        let bbox = meta.bird_bbox?;
+                                        let (border_color, chip_bg, chip_text) = match status {
+                                            RecognitionStatus::Confirmed => (
+                                                theme::colors().success,
+                                                theme::colors().success_background,
+                                                theme::colors().success,
+                                            ),
+                                            RecognitionStatus::NeedsReview => (
+                                                theme::colors().warning,
+                                                theme::colors().warning_background,
+                                                theme::colors().warning,
+                                            ),
+                                            _ => return None,
+                                        };
+                                        let mut fill = border_color;
+                                        fill.a = 0.08;
+                                        let l = bbox.x1 * disp_w;
+                                        let t = bbox.y1 * disp_h;
+                                        let w = (bbox.x2 - bbox.x1) * disp_w;
+                                        let h_val = (bbox.y2 - bbox.y1) * disp_h;
+                                        let label = if let Some(name) = &meta.bird_name {
+                                            match meta.bird_confidence {
+                                                Some(conf) => format!("{} {:.0}%", name, conf),
+                                                None => name.clone(),
+                                            }
+                                        } else {
+                                            String::new()
+                                        };
+                                        Some(
+                                            div()
+                                                .absolute()
+                                                .left(px(l))
+                                                .top(px(t))
+                                                .w(px(w))
+                                                .h(px(h_val))
+                                                .border_2()
+                                                .border_color(border_color)
+                                                .bg(fill)
+                                                .overflow_hidden()
+                                                .child(
+                                                    div()
+                                                        .absolute()
+                                                        .top(px(0.))
+                                                        .left(px(0.))
+                                                        .max_w(px(w))
+                                                        .child(
+                                                            div()
+                                                                .bg(chip_bg)
+                                                                .text_color(chip_text)
+                                                                .text_xs()
+                                                                .line_height(relative(1.2))
+                                                                .px_1()
+                                                                .py_0p5()
+                                                                .rounded_sm()
+                                                                .child(label)
+                                                        )
+                                                )
+                                                .into_any_element()
+                                        )
+                                    })
+                                } else {
+                                    None
+                                };
+
+                                let mut container = div()
                                     .absolute()
                                     .left(px(img_x + pad_px))
                                     .top(px(img_y + pad_px))
@@ -218,8 +286,12 @@ pub fn render_preview(
                                         img(Arc::new(img_obj))
                                             .w(px(disp_w))
                                             .h(px(disp_h)),
-                                    )
-                                    .into_any_element()
+                                    );
+                                if let Some(el) = bbox_el {
+                                    container = container.child(el);
+                                }
+                                container.into_any_element()
+
                             }
                             None => div()
                                 .flex()

@@ -7,6 +7,7 @@ edition.workspace = true
 photo-domain = { path = "../photo-domain" }
 photo-engine = { path = "../photo-engine" }
 photo-config = { path = "../photo-config" }
+photo-recognize = { path = "../photo-recognize" }
 
 chrono.workspace = true
 font-kit.workspace = true

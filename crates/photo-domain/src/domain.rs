@@ -157,6 +157,11 @@ pub struct CaptureMeta {
     pub rating: Rating,
     pub color_label: ColorLabel,
     pub flag: Option<Flag>,
+    // --- 识别摘要字段（从文件夹数据目录的 recognition 表填充，None = 未识别） ---
+    pub bird_name: Option<String>,
+    pub bird_confidence: Option<f32>,
+    pub recognition_status: Option<RecognitionStatus>,
+    pub bird_bbox: Option<BBox>,
 }
 
 impl From<&Capture> for CaptureMeta {
@@ -201,6 +206,10 @@ impl From<&Capture> for CaptureMeta {
             rating: Rating::None,
             color_label: ColorLabel::None,
             flag: None,
+            bird_name: None,
+            bird_confidence: None,
+            recognition_status: None,
+            bird_bbox: None,
         }
     }
 }
@@ -234,6 +243,14 @@ impl CaptureMeta {
         self.rating = xmp.rating();
         self.color_label = xmp.color_label();
         self.flag = xmp.flag();
+    }
+
+    /// 填充识别摘要字段（由调用方负责从文件夹数据目录读取 Recognition）
+    pub fn enrich_with_recognition(&mut self, recognition: &Recognition) {
+        self.bird_name = recognition.bird.as_ref().map(|b| b.cn_name.clone());
+        self.bird_confidence = recognition.confidence;
+        self.recognition_status = Some(recognition.status);
+        self.bird_bbox = recognition.bbox;
     }
 }
 
@@ -287,6 +304,9 @@ pub struct FilterCriteria {
     pub flag_filter: Option<Flag>,
     /// 如果为 true，只显示没有标记旗标的照片
     pub unflagged_filter: bool,
+    /// 按识别状态过滤（含"未识别"= 无识别记录）
+    #[serde(default)]
+    pub recognition_filter: RecognitionFilter,
 }
 
 /// 排序方式
@@ -458,6 +478,180 @@ impl ExifMetadata {
 }
 
 // ============================================================================
+// 识别数据类型（纯结构体，推理机械在 photo-recognize 中，持久化机械在 photo-engine 中）
+// ============================================================================
+
+/// 检测框：归一化坐标 [x1, y1, x2, y2]（0–1，相对图像宽高）
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BBox {
+    pub x1: f32,
+    pub y1: f32,
+    pub x2: f32,
+    pub y2: f32,
+}
+
+impl BBox {
+    /// 构造并夹紧到 0–1 范围
+    pub fn new(x1: f32, y1: f32, x2: f32, y2: f32) -> Self {
+        let clamp01 = |v: f32| v.clamp(0.0, 1.0);
+        Self {
+            x1: clamp01(x1),
+            y1: clamp01(y1),
+            x2: clamp01(x2),
+            y2: clamp01(y2),
+        }
+    }
+
+    /// 解析数据库文本格式 "x1,y1,x2,y2"
+    pub fn parse(s: &str) -> Option<Self> {
+        let parts: Vec<f32> = s.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        if parts.len() == 4 {
+            Some(Self::new(parts[0], parts[1], parts[2], parts[3]))
+        } else {
+            None
+        }
+    }
+
+    /// 序列化为数据库文本格式 "x1,y1,x2,y2"
+    pub fn to_db_string(&self) -> String {
+        format!("{},{},{},{}", self.x1, self.y1, self.x2, self.y2)
+    }
+}
+
+/// 识别状态（三态；无识别记录 = 未识别，不占枚举值）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecognitionStatus {
+    /// 检测、分类、名录映射全部成功
+    Confirmed,
+    /// 管线中途失败（分类异常 / 名录映射失败 / 源图不可用），需人工复核
+    NeedsReview,
+    /// 检测阶段未发现鸟
+    Unrecognized,
+}
+
+impl RecognitionStatus {
+    /// 数据库存储文本
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::NeedsReview => "needs_review",
+            Self::Unrecognized => "unrecognized",
+        }
+    }
+
+    /// 从数据库文本解析
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "confirmed" => Some(Self::Confirmed),
+            "needs_review" => Some(Self::NeedsReview),
+            "unrecognized" => Some(Self::Unrecognized),
+            _ => None,
+        }
+    }
+}
+
+/// 识别失败阶段
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecognitionFailureStage {
+    None,
+    Detection,
+    Classification,
+    Mapping,
+    Assets,
+}
+
+impl RecognitionFailureStage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Detection => "detection",
+            Self::Classification => "classification",
+            Self::Mapping => "mapping",
+            Self::Assets => "assets",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "none" => Some(Self::None),
+            "detection" => Some(Self::Detection),
+            "classification" => Some(Self::Classification),
+            "mapping" => Some(Self::Mapping),
+            "assets" => Some(Self::Assets),
+            _ => None,
+        }
+    }
+
+    /// 面向用户的失败原因说明
+    pub fn user_message(&self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Detection => "检测异常",
+            Self::Classification => "分类异常",
+            Self::Mapping => "名录映射失败",
+            Self::Assets => "源图不可用",
+        }
+    }
+}
+
+/// 鸟种匹配：分类器类别号经名录库映射到的具体鸟种
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BirdMatch {
+    /// 名录库 animal_info 主键
+    pub bird_id: i64,
+    /// 中文名
+    pub cn_name: String,
+    /// 学名（拉丁名）
+    pub latin_name: String,
+}
+
+/// Top-N 候选（含未映射项：bird 为 None 表示该类别号未映射到名录）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BirdCandidate {
+    /// bird_model 原始类别号
+    pub class_index: u32,
+    /// 置信度（0–100）
+    pub confidence: f32,
+    /// 映射到的鸟种（未映射为 None）
+    pub bird: Option<BirdMatch>,
+}
+
+/// 一次识别的完整结果（不含路径；路径是持久化层的键）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Recognition {
+    pub status: RecognitionStatus,
+    /// Top-1 鸟种匹配（mapping 失败 / 未检出时为 None）
+    pub bird: Option<BirdMatch>,
+    /// Top-1 原始类别号（诊断用）
+    pub class_index: Option<u32>,
+    /// Top-1 置信度（0–100）
+    pub confidence: Option<f32>,
+    /// 检测框（检测失败为 None）
+    pub bbox: Option<BBox>,
+    /// Top-5 候选（含 Top-1 自身除外的备选；分类失败为空）
+    pub candidates: Vec<BirdCandidate>,
+    pub failure_stage: RecognitionFailureStage,
+    /// ISO8601 时间戳
+    pub recognized_at: String,
+}
+
+/// 识别状态筛选条件
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecognitionFilter {
+    /// 全部（不筛选）
+    #[default]
+    All,
+    Confirmed,
+    NeedsReview,
+    Unrecognized,
+    /// 未识别（无识别记录）
+    NotRecognized,
+}
+
+// ============================================================================
 // XMP 数据类型（纯结构体 + 枚举转换，读写机械在 photo-engine 中）
 // ============================================================================
 
@@ -531,7 +725,6 @@ impl XmpMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     #[test]
     fn test_format_from_jpg() {
@@ -623,6 +816,10 @@ mod tests {
             rating: Rating::None,
             color_label: ColorLabel::None,
             flag: None,
+            bird_name: None,
+            bird_confidence: None,
+            recognition_status: None,
+            bird_bbox: None,
         };
         cm.enrich_with_xmp(&xmp);
         assert_eq!(cm.rating, Rating::Three);
@@ -655,6 +852,10 @@ mod tests {
             rating: Rating::None,
             color_label: ColorLabel::None,
             flag: None,
+            bird_name: None,
+            bird_confidence: None,
+            recognition_status: None,
+            bird_bbox: None,
         };
         cm.enrich_with_xmp(&xmp);
         assert_eq!(cm.rating, Rating::None);
@@ -714,6 +915,113 @@ mod tests {
         let meta = ExifMetadata::default();
         let summary = meta.summary();
         assert_eq!(summary, "");
+    }
+
+    #[test]
+    fn test_bbox_db_string_roundtrip() {
+        let b = BBox::new(0.1, 0.2, 0.8, 0.9);
+        let parsed = BBox::parse(&b.to_db_string()).unwrap();
+        assert_eq!(parsed, b);
+    }
+
+    #[test]
+    fn test_bbox_new_clamps_to_unit_range() {
+        let b = BBox::new(-0.5, 0.2, 1.3, 0.9);
+        assert_eq!(b, BBox { x1: 0.0, y1: 0.2, x2: 1.0, y2: 0.9 });
+    }
+
+    #[test]
+    fn test_bbox_parse_rejects_malformed() {
+        assert!(BBox::parse("0.1,0.2,0.3").is_none());
+        assert!(BBox::parse("not,a,box,here").is_none());
+        assert!(BBox::parse("").is_none());
+    }
+
+    #[test]
+    fn test_recognition_status_str_roundtrip() {
+        for s in [
+            RecognitionStatus::Confirmed,
+            RecognitionStatus::NeedsReview,
+            RecognitionStatus::Unrecognized,
+        ] {
+            assert_eq!(RecognitionStatus::from_str(s.as_str()), Some(s));
+        }
+        assert_eq!(RecognitionStatus::from_str("pending"), None);
+    }
+
+    #[test]
+    fn test_failure_stage_str_roundtrip_and_messages() {
+        for s in [
+            RecognitionFailureStage::None,
+            RecognitionFailureStage::Detection,
+            RecognitionFailureStage::Classification,
+            RecognitionFailureStage::Mapping,
+            RecognitionFailureStage::Assets,
+        ] {
+            assert_eq!(RecognitionFailureStage::from_str(s.as_str()), Some(s));
+        }
+        assert_eq!(RecognitionFailureStage::Mapping.user_message(), "名录映射失败");
+    }
+
+    #[test]
+    fn test_enrich_with_recognition_confirmed() {
+        let rec = Recognition {
+            status: RecognitionStatus::Confirmed,
+            bird: Some(BirdMatch {
+                bird_id: 42,
+                cn_name: "大山雀".into(),
+                latin_name: "Parus major".into(),
+            }),
+            class_index: Some(1066),
+            confidence: Some(85.3),
+            bbox: Some(BBox::new(0.1, 0.2, 0.8, 0.9)),
+            candidates: vec![],
+            failure_stage: RecognitionFailureStage::None,
+            recognized_at: "2026-07-28T12:00:00Z".into(),
+        };
+        let mut cm = CaptureMeta::from(&Capture {
+            base_name: "DSC_0001".into(),
+            source_files: vec![SourceFile {
+                path: std::path::PathBuf::from("/photos/DSC_0001.jpg"),
+                format: ImageFormat::Jpeg,
+                is_sidecar: false,
+                file_size: Some(1024),
+            }],
+            primary_index: 0,
+        });
+        cm.enrich_with_recognition(&rec);
+        assert_eq!(cm.bird_name.as_deref(), Some("大山雀"));
+        assert_eq!(cm.bird_confidence, Some(85.3));
+        assert_eq!(cm.recognition_status, Some(RecognitionStatus::Confirmed));
+        assert!(cm.bird_bbox.is_some());
+    }
+
+    #[test]
+    fn test_enrich_with_recognition_unrecognized_has_no_bird_fields() {
+        let rec = Recognition {
+            status: RecognitionStatus::Unrecognized,
+            bird: None,
+            class_index: None,
+            confidence: None,
+            bbox: None,
+            candidates: vec![],
+            failure_stage: RecognitionFailureStage::Detection,
+            recognized_at: "2026-07-28T12:00:00Z".into(),
+        };
+        let mut cm = CaptureMeta::from(&Capture {
+            base_name: "DSC_0002".into(),
+            source_files: vec![SourceFile {
+                path: std::path::PathBuf::from("/photos/DSC_0002.jpg"),
+                format: ImageFormat::Jpeg,
+                is_sidecar: false,
+                file_size: Some(1024),
+            }],
+            primary_index: 0,
+        });
+        cm.enrich_with_recognition(&rec);
+        assert_eq!(cm.bird_name, None);
+        assert_eq!(cm.recognition_status, Some(RecognitionStatus::Unrecognized));
+        assert_eq!(cm.bird_bbox, None);
     }
 
     #[test]

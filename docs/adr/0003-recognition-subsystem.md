@@ -38,9 +38,9 @@ photo-tool.exe
 | 全量 120MB pica.db 照搬 | 为从未被查询的死表付出分发体积 |
 | cargo-dist 等打包框架 | 无 CI，过度工程 |
 
-## 待验证项
+## 已验证项
 
-- ort `download-binaries` 拉取的 pyke 预编译运行时**是否内置 DirectML EP**：首次构建时确认；若无，改手动下载微软官方 Windows 包（内置 DirectML）+ `load-dynamic` 加载
+- ~~ort `download-binaries` 是否内置 DirectML EP~~：**已验证内置**。pyke 预编译运行时为**静态链接**（`rustc-link-lib=static=onnxruntime` + dxguid/DXGI/D3D12/DirectML 链接库），`onnxruntime.dll` 不存在、不需要；唯二动态依赖是 `DirectML.dll`（`copy-dylibs` 自动拷到 target 输出目录）。分发物 = exe + DirectML.dll + models/ + data/
 
 ## 影响
 

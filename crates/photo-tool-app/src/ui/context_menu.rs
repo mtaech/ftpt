@@ -23,7 +23,8 @@ pub fn capture_menu(
     let menu = menu.menu(
         if in_preview { "返回网格" } else { "在预览中打开" },
         cmd(Action::ToggleGridPreview),
-    );
+    )
+    .menu("识别此照片 (b)", cmd(Action::Recognize));
 
     let Some(meta) = meta else {
         return menu;

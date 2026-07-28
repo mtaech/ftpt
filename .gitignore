@@ -6,3 +6,8 @@ node_modules/
 dist/
 .pi-subagents/
 nul
+
+# 识别资产（二进制，不入库）
+models/
+data/
+tmp_smoke/
