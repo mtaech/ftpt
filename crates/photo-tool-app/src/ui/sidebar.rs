@@ -192,24 +192,39 @@ fn render_recent_directories(
         let vh_open = vh.clone();
         let vh_remove = vh.clone();
         elements.push(
+            // 复用当前文件夹卡片的双行结构：目录名 + 完整路径（等宽），右侧 hover 浮现 ×
             div()
                 .id(ElementId::Name(SharedString::from(format!("recent-{i}"))))
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .px_2()
-                .py_0p5()
                 .rounded_sm()
                 .cursor_pointer()
                 .hover(|style| style.bg(theme::colors().element_hover))
                 .child(
                     div()
                         .flex_1()
-                        .text_sm()
-                        .text_color(theme::colors().text_muted)
-                        .truncate()
-                        .child(display),
+                        .px_2()
+                        .py_1()
+                        .child(
+                            v_flex()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(theme::colors().text)
+                                        .truncate()
+                                        .child(display),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme::colors().text_muted)
+                                        .font_family(theme::MONO_FONT_FAMILY)
+                                        .truncate()
+                                        .child(dir.clone()),
+                                ),
+                        ),
                 )
                 .child(
                     // hover 时浮现的移除按钮（与常用目录同款交互）
@@ -218,6 +233,7 @@ fn render_recent_directories(
                         .invisible()
                         .group_hover("", |this| this.visible())
                         .cursor_pointer()
+                        .pr_2()
                         .child(
                             Icon::new(IconName::Close)
                                 .xsmall()
