@@ -319,11 +319,10 @@ pub enum SortDirection {
     Descending,
 }
 
-/// 删除模式
+/// 删除模式（仅支持移到回收站）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeleteMode {
     Trash,
-    Permanent,
 }
 
 /// 批量文件操作类型

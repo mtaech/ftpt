@@ -53,12 +53,11 @@ pub struct AppConfig {
     #[serde(default)]
     pub recent_directories: Vec<String>,
     pub theme: Theme,
-    pub default_delete_mode: String,
     pub window_width: u32,
     pub window_height: u32,
     pub left_panel_width: u32,
     pub right_panel_visible: bool,
-    /// 右侧信息面板宽度（px）。旧配置无此字段时默认 280。
+    /// 右侧信息面板宽度（px）。旧配置无此字段时默认 200。
     #[serde(default = "default_right_panel_width")]
     pub right_panel_width: u32,
     pub thumbnail_cache_mode: ThumbnailCacheMode,
@@ -67,14 +66,21 @@ pub struct AppConfig {
     /// 自定义缩略图缓存目录。None 时用 config 所在目录的 thumbnails/ 子目录。
     #[serde(default)]
     pub cache_directory: Option<String>,
+    /// 批量识别线程数（1-4）。低配设备减小，高配设备加大。默认 2。
+    #[serde(default = "default_recognition_threads")]
+    pub recognition_thread_count: u32,
 }
 
 fn default_right_panel_width() -> u32 {
-    280
+    200
 }
 
 fn default_font_family() -> String {
     "Microsoft YaHei UI".to_string()
+}
+
+fn default_recognition_threads() -> u32 {
+    2
 }
 
 impl Default for AppConfig {
@@ -85,16 +91,16 @@ impl Default for AppConfig {
             last_directory: None,
             recent_directories: vec![],
             theme: Theme::Light,
-            default_delete_mode: "trash".to_string(),
             window_width: 1400,
             window_height: 900,
-            left_panel_width: 260,
+            left_panel_width: 180,
             right_panel_visible: true,
-            right_panel_width: 280,
+            right_panel_width: 200,
             thumbnail_cache_mode: ThumbnailCacheMode::default(),
             max_cache_size_mb: 500,
             font_family: default_font_family(),
             cache_directory: None,
+            recognition_thread_count: default_recognition_threads(),
         }
     }
 }

@@ -12,19 +12,26 @@ fn cmd(action: Action) -> Box<ContextMenuAction> {
 }
 
 /// 构建图片右键菜单。
-/// `meta` 为右键目标（用于勾选当前评分/标签/标记）；`in_preview` 决定首项文案与缩放项。
+/// `meta` 为右键目标（用于勾选当前评分/标签/标记）；`in_preview` 决定首项文案与缩放项；
+/// `selected_count` 用于多选时调整菜单文案。
 pub fn capture_menu(
     menu: PopupMenu,
     meta: Option<&CaptureMeta>,
     in_preview: bool,
+    selected_count: usize,
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
+    let recognize_label = if selected_count > 1 {
+        format!("识别所选照片 ({}张) (b)", selected_count)
+    } else {
+        "识别此照片 (b)".to_string()
+    };
     let menu = menu.menu(
         if in_preview { "返回网格" } else { "在预览中打开" },
         cmd(Action::ToggleGridPreview),
     )
-    .menu("识别此照片 (b)", cmd(Action::Recognize));
+    .menu(recognize_label.as_str(), cmd(Action::Recognize));
 
     let Some(meta) = meta else {
         return menu;
@@ -70,7 +77,6 @@ pub fn capture_menu(
 
     menu.separator()
         .menu("删除（移至回收站）", cmd(Action::Delete))
-        .menu("永久删除", cmd(Action::PermanentDelete))
 }
 
 /// 构建侧栏文件夹卡片的右键菜单。

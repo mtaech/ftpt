@@ -9,12 +9,14 @@ use gpui::*;
 use crate::ui::theme;
 
 /// Render a single thumbnail cell in the grid.
+/// `use<>` 精确捕获：返回元素不借用 capture（全部构建 owned 值），
+/// 使 uniform_list 闭包可直接借用状态而无需克隆。
 pub fn render_grid_cell(
     capture: &CaptureMeta,
     _index: usize,
     is_selected: bool,
-    thumbnail_bytes: Option<&Vec<u8>>,
-) -> impl IntoElement {
+    thumbnail: Option<Arc<Image>>,
+) -> impl IntoElement + use<> {
     let border_color = if is_selected {
         theme::colors().text_accent
     } else {
@@ -47,7 +49,7 @@ pub fn render_grid_cell(
                 .justify_center()
                 .overflow_hidden()
                 .bg(theme::colors().element_background)
-                .child(render_thumbnail(capture, thumbnail_bytes))
+                .child(render_thumbnail(capture, thumbnail))
                 .child(render_format_badge(capture))
                 .child(render_flag_overlay(capture.flag)),
         )
@@ -70,7 +72,7 @@ pub fn render_grid_cell(
                         .gap_1()
                         .child(
                             div()
-                                .text_sm()
+                                
                                 .text_color(theme::colors().text)
                                 .truncate()
                                 .child(format!("{}.{}", capture.base_name, capture.primary_format.to_lowercase())),
@@ -85,7 +87,7 @@ pub fn render_grid_cell(
                         .justify_between()
                         .child(
                             div()
-                                .text_xs()
+                                
                                 .font_family(theme::MONO_FONT_FAMILY)
                                 .text_color(theme::colors().text_muted)
                                 .child(format_file_size(capture.file_size)),
@@ -112,11 +114,10 @@ fn format_file_size(size: Option<u64>) -> String {
 
 fn render_thumbnail(
     capture: &CaptureMeta,
-    thumbnail_bytes: Option<&Vec<u8>>,
-) -> impl IntoElement {
-    if let Some(bytes) = thumbnail_bytes {
-        let image = Image::from_bytes(gpui::ImageFormat::Jpeg, bytes.clone());
-        img(Arc::new(image))
+    thumbnail: Option<Arc<Image>>,
+) -> impl IntoElement + use<> {
+    if let Some(image) = thumbnail {
+        img(image)
             .object_fit(ObjectFit::Cover)
             .size_full()
             .into_any_element()
@@ -128,7 +129,7 @@ fn render_thumbnail(
             .size_full()
             .child(
                 div()
-                    .text_xs()
+                    
                     .text_color(theme::colors().text_muted)
                     .child(format!("{}.{}", capture.base_name, capture.primary_format.to_lowercase())),
             )
@@ -137,7 +138,7 @@ fn render_thumbnail(
 }
 
 /// 缩略图左上角格式徽标：RAW / JPG / RAW+JPG
-fn render_format_badge(capture: &CaptureMeta) -> impl IntoElement {
+fn render_format_badge(capture: &CaptureMeta) -> impl IntoElement + use<> {
     let text = derive_format_label(&capture.extensions);
     if text.is_empty() {
         return div().into_any_element();
@@ -151,7 +152,7 @@ fn render_format_badge(capture: &CaptureMeta) -> impl IntoElement {
         .bg(*theme::colors::BADGE_BG)
         .child(
             div()
-                .text_xs()
+                
                 .text_color(hsla(0., 0., 1., 1.))
                 .child(text),
         )
@@ -246,7 +247,7 @@ fn render_color_label_bar(label: ColorLabel) -> impl IntoElement {
 }
 
 /// 鸟种状态行：常驻占位，虚拟化等高约束，无记录渲染空行
-fn render_bird_status_line(capture: &CaptureMeta) -> impl IntoElement {
+fn render_bird_status_line(capture: &CaptureMeta) -> impl IntoElement + use<> {
     let colors = theme::colors();
 
     match capture.recognition_status {
@@ -269,14 +270,14 @@ fn render_bird_status_line(capture: &CaptureMeta) -> impl IntoElement {
                 .h(px(18.))
                 .child(
                     div()
-                        .text_xs()
+                        
                         .text_color(conf_color)
                         .truncate()
                         .child(name.to_string()),
                 )
                 .child(
                     div()
-                        .text_xs()
+                        
                         .font_family(theme::MONO_FONT_FAMILY)
                         .text_color(colors.text_muted)
                         .flex_shrink_0()
@@ -292,7 +293,7 @@ fn render_bird_status_line(capture: &CaptureMeta) -> impl IntoElement {
                 .h(px(18.))
                 .child(
                     div()
-                        .text_xs()
+                        
                         .text_color(colors.warning)
                         .truncate()
                         .child("待复核"),
@@ -307,7 +308,7 @@ fn render_bird_status_line(capture: &CaptureMeta) -> impl IntoElement {
                 .h(px(18.))
                 .child(
                     div()
-                        .text_xs()
+                        
                         .text_color(colors.text_muted)
                         .child("未检测到鸟类"),
                 )

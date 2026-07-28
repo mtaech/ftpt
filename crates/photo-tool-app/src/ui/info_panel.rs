@@ -7,7 +7,7 @@ use crate::action::Action;
 use crate::state::app::RootView;
 use gpui_component::rating::Rating;
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::{Sizable};
+use gpui_component::{Sizable, IconName};
 
 use crate::ui::controls::{clear_link, section_header, segmented_button};
 use crate::ui::theme;
@@ -16,6 +16,7 @@ use gpui_component::h_flex;
 /// Render the right info panel with EXIF info + rating/label/flag controls.
 pub fn render_info_panel(view: &RootView, cx: &mut Context<RootView>) -> impl IntoElement {
     let focused = view.get_focused_capture();
+    let vh = cx.entity().downgrade();
 
     div()
         .flex()
@@ -23,6 +24,33 @@ pub fn render_info_panel(view: &RootView, cx: &mut Context<RootView>) -> impl In
         .size_full()
         .p_3()
         .gap_2()
+        // ── 面板标题栏 ──
+        .child(
+            h_flex()
+                .justify_between()
+                .items_center()
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::colors().text)
+                        .child("信息"),
+                )
+                .child(
+                    Button::new("close-right-panel")
+                        .icon(IconName::PanelRightClose)
+                        .ghost()
+                        .small()
+                        .tooltip("关闭右侧面板  Ctrl+]")
+                        .on_click(move |_, _window, cx| {
+                            if let Some(e) = vh.upgrade() {
+                                let _ = cx.update_entity(&e, |view, cx| {
+                                    view.dispatch_action(Action::ToggleRightPanel, cx);
+                                });
+                            }
+                        }),
+                ),
+        )
+        .child(section_divider())
         // ── Hero ──
         .child(render_hero(focused))
         .child(section_divider())
@@ -47,7 +75,7 @@ fn section_divider() -> impl IntoElement {
 fn render_hero(focused: Option<&CaptureMeta>) -> impl IntoElement {
     match focused {
         None => div()
-            .text_sm()
+            
             .text_color(theme::colors().text_placeholder)
             .child("未选择图片")
             .into_any_element(),
@@ -60,7 +88,7 @@ fn render_hero(focused: Option<&CaptureMeta>) -> impl IntoElement {
                     .justify_between()
                     .child(
                         div()
-                            .text_sm()
+                            
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme::colors().text)
                             .truncate()
@@ -69,7 +97,7 @@ fn render_hero(focused: Option<&CaptureMeta>) -> impl IntoElement {
                     .child(
                         div()
                             .font_family(theme::MONO_FONT_FAMILY)
-                            .text_xs()
+                            
                             .text_color(theme::colors().text_muted)
                             .child(format_file_size(meta.file_size)),
                     ),
@@ -112,7 +140,7 @@ fn info_row(label: &str, value: &str) -> impl IntoElement {
     let label = format!("{}:", label);
     h_flex()
         .justify_between()
-        .text_xs()
+        
         .child(
             div()
                 .text_color(theme::colors().text_muted)
@@ -139,7 +167,7 @@ fn render_exif_section(
         .child(section_header("信息"))
         .child(match focused {
             None => div()
-                .text_xs()
+                
                 .text_color(theme::colors().text_muted)
                 .child("无 EXIF 信息")
                 .into_any_element(),
@@ -201,7 +229,7 @@ fn render_rating_section(
             .child(section_header("评分"))
             .child(
                 div()
-                    .text_xs()
+                    
                     .text_color(theme::colors().text_muted)
                     .child("未选择图片"),
             )
@@ -227,12 +255,14 @@ fn render_rating_section(
                     let vh = vh.clone();
                     move |val, _window, cx| {
                         let action = match *val {
+                            0 => Action::Rate0, // 点击当前已选星可递减，1 星再点即清除
                             1 => Action::Rate1,
                             2 => Action::Rate2,
                             3 => Action::Rate3,
                             4 => Action::Rate4,
                             5 => Action::Rate5,
-                            _ => unreachable!(),
+                            // GPUI 回调中 panic 会 abort，异常值直接忽略
+                            _ => return,
                         };
                         if let Some(entity) = vh.upgrade() {
                             cx.update_entity(&entity, |view, cx| {
@@ -274,7 +304,7 @@ fn render_color_label_section(
             .child(section_header("颜色标签"))
             .child(
                 div()
-                    .text_xs()
+                    
                     .text_color(theme::colors().text_muted)
                     .child("未选择图片"),
             )
@@ -360,7 +390,7 @@ fn render_flag_section(
             .child(section_header("旗标"))
             .child(
                 div()
-                    .text_xs()
+                    
                     .text_color(theme::colors().text_muted)
                     .child("未选择图片"),
             )
@@ -465,7 +495,7 @@ fn status_chip(label: &str, text_color: Hsla, bg_color: Hsla, border_color: Hsla
         .px_2()
         .py_0p5()
         .rounded_sm()
-        .text_xs()
+        
         .text_color(text_color)
         .bg(bg_color)
         .border_1()
@@ -508,7 +538,7 @@ fn render_recognition_section(
                     .child(gpui_component::spinner::Spinner::new().with_size(gpui_component::Size::Small))
                     .child(
                         div()
-                            .text_sm()
+                            
                             .text_color(colors.text_muted)
                             .child(stage.to_string()),
                     )
@@ -522,7 +552,7 @@ fn render_recognition_section(
                     .gap_1()
                     .child(
                         div()
-                            .text_sm()
+                            
                             .text_color(colors.text_muted)
                             .child("尚未识别"),
                     )
@@ -619,14 +649,14 @@ fn render_recognition_content(
                 ))
                 .child(
                     div()
-                        .text_sm()
+                        
                         .text_color(colors.warning)
                         .child(failure_msg.to_string()),
                 )
                 .when_some(best_candidate, |this, (name, conf)| {
                     this.child(
                         div()
-                            .text_sm()
+                            
                             .text_color(colors.text_muted)
                             .child(format!("最接近：{} {:.1}%", name, conf)),
                     )

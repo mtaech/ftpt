@@ -1,4 +1,4 @@
-use photo_domain::RecognitionFilter;
+use photo_domain::{RecognitionFilter, SortBy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -35,7 +35,6 @@ pub enum Action {
     DeselectAll,
     // File ops
     Delete,
-    PermanentDelete,
     // Recognition
     Recognize,
     ToggleBbox,
@@ -44,6 +43,9 @@ pub enum Action {
     ConfirmRecognizeAll,
     CancelBatchRecognize,
     SetRecognitionFilter(RecognitionFilter),
+    // Sort
+    SetSortBy(SortBy),
+    ToggleSortDir,
     // Sidebar 文件夹卡片（作用于 folder_menu_dir 指向的右键目标）
     ToggleContextDirFavorite,
     RemoveContextDir,

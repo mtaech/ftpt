@@ -47,7 +47,7 @@ pub fn render_status_bar(
         .border_color(theme::colors().border_variant)
         .px(px(12.))
         .gap(px(8.))
-        .text_xs()
+        
         // 左段：图标 + 路径
         .child(
             h_flex()
@@ -139,7 +139,8 @@ pub fn render_status_bar(
                         .child(div().text_color(theme::colors().text_muted).child("·"))
                         .child(div().font_family(theme::MONO_FONT_FAMILY).text_color(theme::colors().warning).child(needs_review.to_string()))
                         .child(div().text_color(theme::colors().text_muted).child("待复核"))
-                        .child(
+                        .child({
+                            let vh = vh.clone();
                             div()
                                 .id("cancel-batch-recognize")
                                 .cursor_pointer()
@@ -152,8 +153,8 @@ pub fn render_status_bar(
                                             view.dispatch_action(Action::CancelBatchRecognize, cx);
                                         });
                                     }
-                                }),
-                        )
+                                })
+                        })
                         .into_any_element()
                 } else if view.batch_in_progress {
                     let (done, total) = view.batch_progress.unwrap_or((0, 1));
@@ -161,7 +162,8 @@ pub fn render_status_bar(
                     let tt = tooltip_text;
                     h_flex()
                         .gap(px(4.))
-                        .child(
+                        .child({
+                            let vh = vh.clone();
                             div()
                                 .id("batch-progress-bar")
                                 .w(px(80.))
@@ -186,11 +188,11 @@ pub fn render_status_bar(
                                         .bg(theme::colors().text_accent)
                                         .w(px((80.0 * pct).max(2.0).min(80.0)))
                                         .rounded_full(),
-                                ),
-                        )
-                        .child(div().text_color(theme::colors().text_accent).text_xs().child(done.to_string()))
-                        .child(div().text_color(theme::colors().text_muted).text_xs().child("/"))
-                        .child(div().text_color(theme::colors().text_muted).text_xs().child(total.to_string()))
+                                )
+                        })
+                        .child(div().text_color(theme::colors().text_accent).child(done.to_string()))
+                        .child(div().text_color(theme::colors().text_muted).child("/"))
+                        .child(div().text_color(theme::colors().text_muted).child(total.to_string()))
                         .into_any_element()
                 } else {
                     div()
@@ -202,5 +204,6 @@ pub fn render_status_bar(
                         .child(if scanning { "扫描中…" } else { "就绪" })
                         .into_any_element()
                 })
+
         })
 }

@@ -11,3 +11,6 @@ nul
 models/
 data/
 tmp_smoke/
+
+# 运行时日志（exe 同级 logs/ 目录）
+logs/

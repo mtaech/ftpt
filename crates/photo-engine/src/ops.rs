@@ -2,7 +2,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-use photo_domain::{Capture, DeleteMode};
+use photo_domain::Capture;
 
 use crate::folder_db::{FolderDb, FolderDbError};
 
@@ -25,43 +25,35 @@ fn all_capture_paths(capture: &Capture) -> Vec<PathBuf> {
         .collect()
 }
 
-/// 删除文件：回收站或永久删除
-pub fn delete_file(path: &Path, mode: DeleteMode) -> Result<(), OpError> {
+/// 删除文件：移到回收站
+pub fn delete_file(path: &Path) -> Result<(), OpError> {
     if !path.exists() {
         return Err(OpError::NotFound(path.to_path_buf()));
     }
-    match mode {
-        DeleteMode::Trash => {
-            trash::delete(path)?;
-        }
-        DeleteMode::Permanent => {
-            std::fs::remove_file(path)?;
-        }
-    }
+    trash::delete(path)?;
     Ok(())
 }
 
-/// 删除一次拍摄的所有文件
-pub fn delete_capture(capture: &Capture, mode: DeleteMode) -> Result<(), OpError> {
+/// 删除一次拍摄的所有文件（移到回收站）
+pub fn delete_capture(capture: &Capture) -> Result<(), OpError> {
     for path in &all_capture_paths(capture) {
         if path.exists() {
-            delete_file(path, mode)?;
+            delete_file(path)?;
         }
     }
     Ok(())
 }
 
-/// 批量删除拍摄，返回每个文件的结果
+/// 批量删除拍摄，返回每个文件的结果（移到回收站）
 pub fn delete_captures(
     captures: &[&Capture],
-    mode: DeleteMode,
 ) -> Vec<(PathBuf, Result<(), OpError>)> {
     captures
         .iter()
         .flat_map(|c| {
             all_capture_paths(c).into_iter().map(move |p| {
                 let result = if p.exists() {
-                    delete_file(&p, mode)
+                    delete_file(&p)
                 } else {
                     Err(OpError::NotFound(p.clone()))
                 };
@@ -275,15 +267,15 @@ mod tests {
     }
 
     #[test]
-    fn test_permanent_delete() {
+    fn test_trash_delete() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.jpg");
         std::fs::write(&path, b"data").unwrap();
         assert!(path.exists());
 
-        let result = delete_file(&path, DeleteMode::Permanent);
+        let result = delete_file(&path);
         assert!(result.is_ok());
-        assert!(!path.exists(), "file still exists after permanent delete");
+        assert!(!path.exists(), "file still exists after delete");
     }
 
     #[test]
@@ -344,7 +336,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let capture = make_test_capture(&dir, "delete_me", &["jpg", "NEF"]);
 
-        let result = delete_capture(&capture, DeleteMode::Permanent);
+        let result = delete_capture(&capture);
         assert!(result.is_ok());
         assert!(!dir.path().join("delete_me.jpg").exists());
         assert!(!dir.path().join("delete_me.NEF").exists());
@@ -354,7 +346,7 @@ mod tests {
     fn test_delete_file_not_found() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("does_not_exist.jpg");
-        let result = delete_file(&path, DeleteMode::Permanent);
+        let result = delete_file(&path);
         assert!(result.is_err());
         match result {
             Err(OpError::NotFound(p)) => assert_eq!(p, path),
@@ -384,7 +376,7 @@ mod tests {
             primary_index: 0,
         };
         // delete_capture should succeed despite one missing file
-        let result = delete_capture(&capture, DeleteMode::Permanent);
+        let result = delete_capture(&capture);
         assert!(result.is_ok());
     }
 }

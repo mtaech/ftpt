@@ -15,42 +15,54 @@ pub fn render_preview(
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let focused = view.get_focused_capture();
-    let thumbnail_data = view.thumbnail_data.clone();
 
-    // 优先 1600px 预览数据；未加载完成时回退缩略图
-    let image_source = focused.and_then(|meta| {
+    // 优先 1600px 预览数据；未加载完成时回退缩略图（Arc 指针拷贝，零字节克隆）
+    let image_source: Option<Arc<Image>> = focused.and_then(|meta| {
         let idx = meta.index;
         view.preview_data
             .get(&idx)
-            .map(|(f, b)| (*f, b.clone()))
-            .or_else(|| thumbnail_data.get(&idx).map(|b| (ImageFormat::Jpeg, b.clone())))
+            .cloned()
+            .or_else(|| view.thumbnail_data.get(&idx).cloned())
     });
 
-    // 计算中间区的显式宽度，替代 size_full（GPUI img 配合字节源时 size_full + object_fit 不生效）
-    let viewport_w: f32 = window.viewport_size().width.into();
-    let viewport_h: f32 = window.viewport_size().height.into();
-    let left_w = (if view.sidebar_visible {
-        view.config.left_panel_width as f32
+    // 图片区尺寸：优先用 canvas 实测值（border-box），首帧回退手算。
+    // 手算只作首帧兜底：视口 − 左右 rail − 左右面板 − 边框。
+    let measured_rc = view.preview_area_size.clone();
+    let m = *measured_rc.borrow();
+    let (area_w, area_h) = if m.0 > 0. {
+        m
     } else {
-        0.
-    }) + crate::ui::layout::RAIL_WIDTH;
-    let right_w = if view.config.right_panel_visible {
-        view.config.right_panel_width as f32
-    } else {
-        0.
+        let viewport_w: f32 = window.viewport_size().width.into();
+        let viewport_h: f32 = window.viewport_size().height.into();
+        let left_w = (if view.sidebar_visible {
+            view.config.left_panel_width as f32
+        } else {
+            0.
+        }) + crate::ui::layout::RAIL_WIDTH;
+        let right_w = (if view.config.right_panel_visible {
+            view.config.right_panel_width as f32
+        } else {
+            0.
+        }) + crate::ui::layout::RAIL_WIDTH;
+        (
+            (viewport_w - left_w - right_w - 2.).max(100.),
+            // 可用高度 ≈ 视口 − 工具栏(~40) − 状态栏(~24) − 导航栏(~32) − 缩略图条(~77) − 缩放栏(~28)
+            (viewport_h - 40. - 24. - 32. - 77. - 28.).max(100.),
+        )
     };
-    let center_w = viewport_w - left_w - right_w - 16. * 2. - 2.;
-    let center_w = center_w.max(100.);
-    // 可用高度 = 视口 − 工具栏(~40) − 状态栏(~24) − 导航栏(~32) − 缩略图条(~77) − 缩放栏(~28) − 图片padding(32)
-    let center_h = (viewport_h - 40. - 24. - 32. - 77. - 28. - 32.).max(100.);
+
+    // 内容区 = 图片区 − p_4 内边距（16×2）
+    let pad_px = 16.0;
+    let container_w = (area_w - pad_px * 2.).max(1.);
+    let container_h = (area_h - pad_px * 2.).max(1.);
     // 按原始比例计算适配尺寸：同时约束宽度和高度，竖图也能顶满
     let (img_w, img_h) = focused
         .and_then(|m| Some((m.image_width?, m.image_height?)))
         .map(|(w, h)| {
-            let scale = (center_w / w as f32).min(center_h / h as f32).min(1.0);
+            let scale = (container_w / w as f32).min(container_h / h as f32).min(1.0);
             (w as f32 * scale, h as f32 * scale)
         })
-        .unwrap_or((center_w, center_h * 0.75));
+        .unwrap_or((container_w, container_h * 0.75));
 
     // 应用缩放倍率
     let zoom = view.preview_zoom;
@@ -69,9 +81,6 @@ pub fn render_preview(
     };
 
     // 手动计算居中偏移（替代 flex items_center/justify_center），缩放时从中心展开
-    let pad_px = 16.0;
-    let container_w = (center_w - pad_px * 2.).max(1.);
-    let container_h = (center_h - pad_px * 2.).max(1.);
     let img_x = ((container_w - disp_w) / 2.).max(-disp_w).min(0.) + view.preview_pan.0;
     let img_y = ((container_h - disp_h) / 2.).max(-disp_h).min(0.) + view.preview_pan.1;
 
@@ -97,7 +106,7 @@ pub fn render_preview(
                 .border_color(theme::colors().border_variant)
                 .child(
                     div()
-                        .text_sm()
+                        
                         .text_color(theme::colors().text)
                         .child(
                             focused
@@ -107,7 +116,7 @@ pub fn render_preview(
                 )
                 .child(
                     div()
-                        .text_xs()
+                        
                         .text_color(theme::colors().text_muted)
                         .child(format!(
                             "{} / {}",
@@ -197,21 +206,52 @@ pub fn render_preview(
                         .context_menu({
                             let vh = view_handle.clone();
                             move |menu, window, cx| {
-                                let meta = vh
+                                let (meta, selected_count) = vh
                                     .upgrade()
-                                    .and_then(|view| view.read(cx).get_focused_capture().cloned());
+                                    .map(|view| {
+                                        let reader = view.read(cx);
+                                        (reader.get_focused_capture().cloned(), reader.selected.len())
+                                    })
+                                    .unwrap_or_default();
                                 crate::ui::context_menu::capture_menu(
                                     menu,
                                     meta.as_ref(),
                                     true,
+                                    selected_count,
                                     window,
                                     cx,
                                 )
                             }
                         })
+                        .child(
+                            // 实测图片区尺寸写入 preview_area_size，变化时 defer notify 重排
+                            //（手算会漏 rail/边框，且拖拽面板期间 config 宽度是旧值）
+                            canvas({
+                                let vh = view_handle.clone();
+                                move |bounds, _window, cx| {
+                                    let w: f32 = bounds.size.width.into();
+                                    let h: f32 = bounds.size.height.into();
+                                    let changed = {
+                                        let mut slot = measured_rc.borrow_mut();
+                                        let changed = (slot.0 - w).abs() > 0.5
+                                            || (slot.1 - h).abs() > 0.5;
+                                        *slot = (w, h);
+                                        changed
+                                    };
+                                    if changed {
+                                        if let Some(view) = vh.upgrade() {
+                                            cx.defer(move |cx| {
+                                                let _ = cx.update_entity(&view, |_, cx| cx.notify());
+                                            });
+                                        }
+                                    }
+                                }
+                            }, |_, _, _, _| {})
+                            .absolute()
+                            .size_full(),
+                        )
                         .child(match &image_source {
-                            Some((fmt, bytes)) => {
-                                let img_obj = Image::from_bytes(*fmt, bytes.clone());
+                            Some(image) => {
                                 // 绝对定位脱离文档流：拖动/缩放只改偏移，不参与 flex 布局，
                                 // 否则 margin 会改变内容固有尺寸，把左右面板顶移位。
                                 // 坐标原点 = 父容器左上，需补回 p_4 的 16px 内边距。
@@ -267,7 +307,7 @@ pub fn render_preview(
                                                             div()
                                                                 .bg(chip_bg)
                                                                 .text_color(chip_text)
-                                                                .text_xs()
+                                                                
                                                                 .line_height(relative(1.2))
                                                                 .px_1()
                                                                 .py_0p5()
@@ -287,7 +327,7 @@ pub fn render_preview(
                                     .left(px(img_x + pad_px))
                                     .top(px(img_y + pad_px))
                                     .child(
-                                        img(Arc::new(img_obj))
+                                        img(image.clone())
                                             .w(px(disp_w))
                                             .h(px(disp_h)),
                                     );
@@ -332,7 +372,7 @@ pub fn render_preview(
                 .child(zoom_button(IconName::Minus, "zoom-out", crate::action::Action::ZoomOut, false, view_handle.clone()))
                 .child(
                     div()
-                        .text_sm()
+                        
                         .text_color(theme::colors().text_muted)
                         .child(zoom_label),
                 )
@@ -354,7 +394,7 @@ fn zoom_button(icon: IconName, id: &str, action: crate::action::Action, active: 
         .rounded_md()
         .bg(if active { theme::colors().element_hover } else { theme::colors().element_background })
         .text_color(theme::colors().text)
-        .text_sm()
+        
         .cursor(CursorStyle::PointingHand)
         .child(Icon::new(icon).small().text_color(theme::colors().text))
         .on_click(move |_event: &ClickEvent, _window, cx| {

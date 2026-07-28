@@ -1,5 +1,5 @@
 use gpui::{
-    BoxShadow, Hsla, Pixels, Point, Rgba, hsla, px,
+    BoxShadow, Hsla, Pixels, Point, Rgba, Styled, hsla, px,
 };
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Mutex;
@@ -219,6 +219,16 @@ pub fn accent_dim() -> Hsla {
     let mut c = colors().text_accent;
     c.a = 0.10;
     c
+}
+
+/// 卡片容器规范（设计系统约定）：element_background 底色 + border_variant 细边框
+/// + rounded_md 圆角。用于需要与背景拉开层次的内容卡片（侧栏文件夹卡片、目录行等），
+/// 选中/高亮态在此基础上覆盖 bg（如 accent_dim）。
+pub fn card<E: Styled>(el: E) -> E {
+    el.bg(colors().element_background)
+        .border_1()
+        .border_color(colors().border_variant)
+        .rounded_md()
 }
 
 /// accent 色的悬浮版本：比 solid 稍亮/稍暗，取决于模式。

@@ -78,6 +78,22 @@ pub enum RecognizeError {
     RawPreview(String),
 }
 
+
+/// 推理后端。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    DirectML,
+    Cpu,
+}
+
+impl std::fmt::Display for Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Backend::DirectML => write!(f, "DirectML"),
+            Backend::Cpu => write!(f, "CPU"),
+        }
+    }
+}
 // ---------------------------------------------------------------------------
 // Recognizer
 // ---------------------------------------------------------------------------
@@ -97,6 +113,7 @@ pub struct Recognizer {
     detection_session: Session,
     classification_session: Session,
     catalog: CatalogDb,
+    backend: Backend,
 }
 
 impl Recognizer {
@@ -129,15 +146,17 @@ impl Recognizer {
                 bird_path.display()
             )));
         }
-
-        let detection_session = load_model(&yolo_path)?;
-        let classification_session = load_model(&bird_path)?;
+        let (detection_session, backend) = load_model(&yolo_path)?;
+        let (classification_session, _) = load_model(&bird_path)?;
         let catalog = CatalogDb::open(catalog_db)?;
+
+        tracing::info!("识别器初始化完成，推理后端: {}", backend);
 
         Ok(Self {
             detection_session,
             classification_session,
             catalog,
+            backend,
         })
     }
 
@@ -188,26 +207,38 @@ impl Recognizer {
     pub fn classification_session(&mut self) -> &mut Session {
         &mut self.classification_session
     }
+
+    /// 返回当前使用的推理后端。
+    pub fn backend(&self) -> Backend {
+        self.backend
+    }
 }
 
 // ---------------------------------------------------------------------------
 // 模型加载
 // ---------------------------------------------------------------------------
 
-/// 加载 ONNX 模型，自动处理执行提供程序。
-fn load_model(path: &Path) -> Result<Session, RecognizeError> {
+/// 加载 ONNX 模型，返回 session 与实际使用的推理后端。
+fn load_model(path: &Path) -> Result<(Session, Backend), RecognizeError> {
     #[cfg(target_os = "windows")]
     {
         // Windows: 先试 DirectML，失败回退 CPU（pica 策略对等）
+        // HighPerformance = DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE：
+        // 双显卡机型（核显 + N 卡独显）上让 Windows 把 DirectML 设备绑到独显，
+        // 否则默认可能落在核显（如 Radeon 780M）上
         match (|| -> Result<_, ort::Error> {
             let builder = Session::builder()?;
-            let mut builder = builder.with_execution_providers([ep::DirectML::default().build()])?;
+            let mut builder = builder.with_execution_providers([
+                ep::DirectML::default()
+                    .with_performance_preference(ep::directml::PerformancePreference::HighPerformance)
+                    .build(),
+            ])?;
             builder.commit_from_file(path)
         })()
         {
             Ok(session) => {
                 tracing::info!("模型加载成功 (DirectML): {}", path.display());
-                return Ok(session);
+                return Ok((session, Backend::DirectML));
             }
             Err(e) => {
                 tracing::warn!(
@@ -223,7 +254,7 @@ fn load_model(path: &Path) -> Result<Session, RecognizeError> {
         RecognizeError::ModelLoad(format!("CPU session 创建失败 ({}): {e}", path.display()))
     })?;
     tracing::info!("模型加载成功 (CPU): {}", path.display());
-    Ok(session)
+    Ok((session, Backend::Cpu))
 }
 
 // ---------------------------------------------------------------------------

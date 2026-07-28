@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::path::{Path, PathBuf};
@@ -9,11 +11,12 @@ use gpui_component::select::{SearchableVec, SelectEvent, SelectState};
 use std::sync::LazyLock;
 use photo_config::AppConfig;
 use photo_domain::{
-    BatchOpType, CaptureMeta, ColorLabel, DeleteMode, FilterCriteria, Flag, Rating,
+    BatchOpType, CaptureMeta, ColorLabel, FilterCriteria, Flag, Rating,
     SortBy, SortDirection,
 };
 use photo_recognize::Recognizer;
 use photo_engine::thumbnail::ThumbnailCache;
+use crate::ui::toolbar::SettingsOverlay;
 use photo_engine::{scanner, folder_db::FolderDb};
 
 use crate::worker::Worker;
@@ -38,6 +41,18 @@ pub enum ViewMode {
     Preview,
 }
 
+/// 批量识别共享进度：工作线程逐张写入，UI 侧 200ms 轮询读取（与 sync_progress 同一模式）。
+/// 640 张级别的批量任务中途无任何上报时，UI 与日志会静止数十分钟，表现为“卡死”。
+#[derive(Default)]
+struct BatchProgress {
+    done: std::sync::atomic::AtomicUsize,
+    confirmed: std::sync::atomic::AtomicUsize,
+    unrecognized: std::sync::atomic::AtomicUsize,
+    needs_review: std::sync::atomic::AtomicUsize,
+    /// 批量识别当前处理的文件名（多线程时为最后开始识别的文件）
+    current: parking_lot::Mutex<String>,
+}
+
 pub struct RootView {
     pub config: AppConfig,
     pub config_path: PathBuf,
@@ -58,21 +73,28 @@ pub struct RootView {
     pub focus_index: Option<usize>,
     /// Sorted, filtered indices into `self.captures`.
     pub display_order: Vec<usize>,
-    /// Thumbnail JPEG bytes keyed by capture index.
-    pub thumbnail_data: HashMap<usize, Vec<u8>>,
-    /// 预览图字节（含格式）按 capture 索引缓存：非 RAW 为原图，RAW 为大尺寸内嵌预览
-    pub preview_data: HashMap<usize, (ImageFormat, Vec<u8>)>,
+    /// 已解码缩略图按 capture 索引缓存。存 Arc<Image>（加载时构建一次、哈希一次），
+    /// 渲染路径只做指针拷贝——此前存 Vec<u8>，grid/preview 每帧克隆整表字节，是卡顿主因。
+    pub thumbnail_data: HashMap<usize, Arc<Image>>,
+    /// 预览图按 capture 索引缓存：非 RAW 为原图，RAW 为大尺寸内嵌预览（格式在 Image 内）
+    pub preview_data: HashMap<usize, Arc<Image>>,
     /// preview_data 的 FIFO 淘汰顺序
     preview_order: VecDeque<usize>,
     /// 网格虚拟列表滚动句柄（uniform_list 滚动条用）
     pub grid_scroll_handle: UniformListScrollHandle,
+    /// 预览图片区实测尺寸（canvas prepaint 写入，变化时 defer notify 重排；0 = 未测量）
+    pub preview_area_size: Rc<RefCell<(f32, f32)>>,
     /// 预览缩略图条滚动句柄（track_scroll 记录子项位置，scroll_to_item 跟随焦点）
     pub filmstrip_scroll: ScrollHandle,
     /// 字体选择下拉状态（设置弹窗用）
     pub font_select: Entity<SelectState<SearchableVec<SharedString>>>,
     pub show_settings: bool,
+    /// 设置弹窗独立 View（拥有自身 render 生命周期，避免每帧重建）
+    pub settings_overlay: Option<gpui::Entity<SettingsOverlay>>,
+    /// 网格视图筛选栏展开状态（默认折叠，仅折叠态一行摘要）
+    pub filter_bar_expanded: bool,
     pub scan_task: Option<Task<()>>,
-    /// 左侧边栏当前显示的侧栏 tab：0=文件树，1=收藏夹，2=筛选
+    /// 左侧边栏当前显示的侧栏 tab：0=文件树，1=文件操作
     pub sidebar_section: usize,
     /// 左侧边栏显隐（由 Activity Rail 或快捷键切换）
     pub sidebar_visible: bool,
@@ -160,10 +182,10 @@ impl RootView {
         // 旧配置 left_panel_width==0 是旧的「收起」语义：恢复默认宽度，启动时隐藏侧栏
         let sidebar_visible = config.left_panel_width > 0;
         if config.left_panel_width == 0 {
-            config.left_panel_width = 260;
+            config.left_panel_width = 180;
         }
         if config.right_panel_width == 0 {
-            config.right_panel_width = 280;
+            config.right_panel_width = 200;
         }
         // 启动后自动扫描上次打开的目录
         let auto_dir = config.last_directory.clone();
@@ -194,9 +216,12 @@ impl RootView {
             preview_order: VecDeque::new(),
             font_select,
             show_settings: false,
+            settings_overlay: None,
+            filter_bar_expanded: false,
             sidebar_section: 0,
             sidebar_visible,
             grid_scroll_handle: UniformListScrollHandle::new(),
+            preview_area_size: Rc::new(RefCell::new((0., 0.))),
             filmstrip_scroll: ScrollHandle::default(),
             batch_compare_dir: String::new(),
             batch_source_format: String::new(),
@@ -647,6 +672,26 @@ impl RootView {
         .detach();
     }
 
+    /// 是否有任一筛选条件生效（筛选栏折叠态摘要/「清除全部」显隐依据）
+    pub fn has_active_filters(&self) -> bool {
+        let f = &self.filter;
+        f.text_search.is_some()
+            || f.min_rating.is_some()
+            || f.flag_filter.is_some()
+            || f.unflagged_filter
+            || f.recognition_filter != photo_domain::RecognitionFilter::All
+            || f.paired_only.is_some()
+            || f.format_filter.is_some()
+            || f.date_from.is_some()
+            || f.date_to.is_some()
+    }
+
+    /// 清空全部筛选条件并重算展示顺序
+    pub fn clear_filters(&mut self) {
+        self.filter = FilterCriteria::default();
+        self.apply_filter_and_sort();
+    }
+
     pub fn apply_filter_and_sort(&mut self) {
         let filter = &self.filter;
         let sort_by = self.sort_by;
@@ -771,7 +816,8 @@ impl RootView {
     fn insert_preview(&mut self, idx: usize, format: ImageFormat, bytes: Vec<u8>) {
         self.preview_order.retain(|&i| i != idx);
         self.preview_order.push_back(idx);
-        self.preview_data.insert(idx, (format, bytes));
+        self.preview_data
+            .insert(idx, Arc::new(Image::from_bytes(format, bytes)));
         while self.preview_order.len() > Self::PREVIEW_CACHE_LIMIT {
             if let Some(oldest) = self.preview_order.pop_front() {
                 self.preview_data.remove(&oldest);
@@ -901,7 +947,8 @@ impl RootView {
             move |this, result, cx| {
                 this.grid_loading.remove(&capture_idx);
                 if let Some(bytes) = result {
-                    this.thumbnail_data.insert(capture_idx, bytes);
+                    this.thumbnail_data
+                        .insert(capture_idx, Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes)));
                     cx.notify();
                 }
             },
@@ -965,7 +1012,8 @@ impl RootView {
                     .ok()
             }, move |this, result, _cx| {
                 if let Some(bytes) = result {
-                    this.thumbnail_data.insert(ci, bytes);
+                    this.thumbnail_data
+                        .insert(ci, Arc::new(Image::from_bytes(gpui::ImageFormat::Jpeg, bytes)));
                     _cx.notify();
                 }
             });
@@ -1189,7 +1237,7 @@ impl RootView {
     }
 
 
-    pub fn delete_selected(&mut self, mode: DeleteMode, cx: &mut Context<Self>) {
+    pub fn delete_selected(&mut self, cx: &mut Context<Self>) {
         let capture_indices: Vec<usize> = self.selected.drain().collect();
         if capture_indices.is_empty() {
             return;
@@ -1229,7 +1277,7 @@ impl RootView {
                 use photo_engine::ops;
                 let mut results = Vec::new();
                 for path in &paths {
-                    let result = ops::delete_file(path, mode);
+                    let result = ops::delete_file(path);
                     results.push((path.clone(), result));
                 }
                 results
@@ -1393,14 +1441,15 @@ impl RootView {
             }
             // File ops
             Action::Delete => {
-                self.delete_selected(DeleteMode::Trash, cx);
-            }
-            Action::PermanentDelete => {
-                self.delete_selected(DeleteMode::Permanent, cx);
+                self.delete_selected(cx);
             }
             // Recognition
             Action::Recognize => {
-                self.recognize_single(cx);
+                if self.selected.len() > 1 {
+                    self.recognize_selected(cx);
+                } else {
+                    self.recognize_single(cx);
+                }
             }
             Action::ToggleBbox => {
                 self.bbox_visible = !self.bbox_visible;
@@ -1507,6 +1556,19 @@ impl RootView {
                 tracing::info!("设置识别筛选: {:?}", filter);
                 cx.notify();
             }
+            Action::SetSortBy(sort_by) => {
+                self.sort_by = sort_by;
+                self.apply_filter_and_sort();
+                cx.notify();
+            }
+            Action::ToggleSortDir => {
+                self.sort_dir = match self.sort_dir {
+                    SortDirection::Ascending => SortDirection::Descending,
+                    SortDirection::Descending => SortDirection::Ascending,
+                };
+                self.apply_filter_and_sort();
+                cx.notify();
+            }
             // Other
             Action::Refresh => {
                 if let Some(ref dir) = self.dir_path.clone() {
@@ -1526,6 +1588,12 @@ impl RootView {
             }
             Action::ToggleSettings => {
                 self.show_settings = !self.show_settings;
+                if self.show_settings {
+                    let vh = cx.entity().downgrade();
+                    self.settings_overlay = Some(cx.new(|_| SettingsOverlay { vh }));
+                } else {
+                    self.settings_overlay = None;
+                }
                 cx.notify();
             }
         }
@@ -1640,6 +1708,7 @@ impl RootView {
                     let catalog_db = exe_dir.join("data").join("pica_ref.db");
                     let mut recognizer = photo_recognize::Recognizer::new(&models_dir, &catalog_db)
                         .map_err(|e| format!("加载识别模型失败: {e}"))?;
+                    tracing::info!("单张识别开始，推理后端: {}", recognizer.backend());
                     recognizer.recognize(&capture, None)
                         .map_err(|e| format!("识别失败: {e}"))
                 })();
@@ -1694,6 +1763,39 @@ impl RootView {
         );
     }
 
+    /// 多选识别：选中超过一张时批量识别所有选中照片
+    fn recognize_selected(&mut self, cx: &mut Context<Self>) {
+        if self.recognizing_single.is_some() || self.batch_recognizing {
+            tracing::info!("识别忽略：已有识别任务进行中");
+            return;
+        }
+        let dir = match self.dir_path.clone() { Some(d) => d, None => return };
+        if self.folder_db.is_none() { return };
+
+        let mut targets: Vec<(usize, photo_domain::Capture)> = Vec::new();
+        for meta in &self.captures {
+            if self.selected.contains(&meta.index) {
+                if let Some(cap) = self.build_capture_from_meta(meta) {
+                    targets.push((meta.index, cap));
+                }
+            }
+        }
+        if targets.is_empty() {
+            return;
+        }
+
+        let total = targets.len();
+        tracing::info!("多选识别：选中 {} 张，开始批量识别", total);
+        self.batch_recognizing = true;
+        self.batch_progress_rc = (0, total);
+        self.batch_current_file = String::new();
+        self.batch_counts = (0, 0, 0);
+        self.batch_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+        cx.notify();
+
+        self.spawn_batch_recognize(targets, dir, cx);
+    }
+
     /// 启动批量识别（RecognizeUnrecognized / ConfirmRecognizeAll 共用）
     fn spawn_batch_recognize(
         &mut self,
@@ -1705,12 +1807,16 @@ impl RootView {
 
         let cancel = self.batch_cancel.clone();
         let total = targets.len();
+        let progress = Arc::new(BatchProgress::default());
+        let progress_work = progress.clone();
+
+        let n_threads = (self.config.recognition_thread_count as usize).min(total).max(1);
 
         self.worker.spawn(
             cx,
             move || {
-                // 工作线程侧懒加载 Recognizer
-                let mut recognizer = (|| -> Result<Recognizer, String> {
+                // 每个识别线程懒加载自己独占的 Recognizer（Session 需 &mut，不可跨线程共享）
+                let create_recognizer = || -> Result<Recognizer, String> {
                     let exe_dir = std::env::current_exe()
                         .map_err(|e| format!("获取 exe 路径失败: {e}"))?
                         .parent()
@@ -1720,30 +1826,93 @@ impl RootView {
                     let catalog_db = exe_dir.join("data").join("pica_ref.db");
                     Recognizer::new(&models_dir, &catalog_db)
                         .map_err(|e| format!("加载识别模型失败: {e}"))
-                })();
+                };
 
-                let mut results: Vec<(usize, String, Result<photo_domain::Recognition, String>)> = Vec::new();
+                tracing::info!("批量识别开始，共 {} 张，{} 个识别线程", total, n_threads);
 
-                for (i, (capture_idx, cap)) in targets.iter().enumerate() {
+                // 全局“开始序号”，仅用于日志显示 [N/total]
+                let started_counter = std::sync::atomic::AtomicUsize::new(0);
+
+                // 分块 + std::thread::scope：每线程恰好创建一份 Recognizer，顺序处理本块
+                std::thread::scope(|s| {
+                    let chunk_size = total.div_ceil(n_threads);
+                    // 以引用形式供 move 闭包捕获，避免 FnMut 中移出外层变量
+                    let cancel = &cancel;
+                    let dir = &dir;
+                    let progress_work = &progress_work;
+                    let started_counter = &started_counter;
+                    let handles: Vec<_> = targets
+                        .chunks(chunk_size)
+                        .map(|chunk| {
+                            s.spawn(move || {
+                                let mut recognizer = create_recognizer();
+                                let mut out: Vec<(usize, String, Result<photo_domain::Recognition, String>)> =
+                                    Vec::new();
+
+                                for (capture_idx, cap) in chunk {
+                                    if cancel.load(Ordering::Relaxed) {
+                                        break;
+                                    }
+
+                                    let primary = &cap.source_files[cap.primary_index];
+                                    let rel = primary.path.strip_prefix(&dir)
+                                        .map(|p| p.to_string_lossy().replace('\\', "/"))
+                                        .unwrap_or_default();
+
+                                    // 开始前记录当前文件：若中途真卡死，最后一行日志即嫌疑人
+                                    let n = started_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                                    tracing::info!("批量识别 [{}/{}] 识别中: {}", n, total, rel);
+                                    *progress_work.current.lock() = rel.clone();
+                                    let started = std::time::Instant::now();
+
+                                    let rec_result = match &mut recognizer {
+                                        Ok(rec) => rec.recognize(cap, None).map_err(|e| format!("识别失败: {e}")),
+                                        Err(e) => Err(e.clone()),
+                                    };
+
+                                    let elapsed = started.elapsed();
+                                    progress_work.done.fetch_add(1, Ordering::Relaxed);
+                                    match &rec_result {
+                                        Ok(rec) => {
+                                            match rec.status {
+                                                photo_domain::RecognitionStatus::Confirmed => &progress_work.confirmed,
+                                                photo_domain::RecognitionStatus::Unrecognized => &progress_work.unrecognized,
+                                                photo_domain::RecognitionStatus::NeedsReview => &progress_work.needs_review,
+                                            }
+                                            .fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        Err(_) => {
+                                            progress_work.needs_review.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    // 慢照片告警：正常 2-4s/张，超 10s 说明该文件解码或推理异常
+                                    if elapsed.as_secs() >= 10 {
+                                        tracing::warn!("批量识别 [{}/{}] {} 耗时 {:.1?}，异常缓慢", n, total, rel, elapsed);
+                                    }
+
+                                    out.push((*capture_idx, rel, rec_result));
+                                }
+
+                                out
+                            })
+                        })
+                        .collect();
+
                     if cancel.load(Ordering::Relaxed) {
-                        tracing::info!("批量识别被取消，已完成 {i}/{} 张", total);
-                        break;
+                        let done = progress_work.done.load(Ordering::Relaxed);
+                        tracing::info!("批量识别被取消，已完成 {}/{} 张", done, total);
                     }
 
-                    let primary = &cap.source_files[cap.primary_index];
-                    let rel = primary.path.strip_prefix(&dir)
-                        .map(|p| p.to_string_lossy().replace('\\', "/"))
-                        .unwrap_or_default();
-
-                    let rec_result = match &mut recognizer {
-                        Ok(rec) => rec.recognize(cap, None).map_err(|e| format!("识别失败: {e}")),
-                        Err(e) => Err(e.clone()),
-                    };
-
-                    results.push((*capture_idx, rel, rec_result));
-                }
-
-                results
+                    // 单线程 panic 不应吞掉其他线程的结果：记录错误并保留已完成部分
+                    let mut results: Vec<(usize, String, Result<photo_domain::Recognition, String>)> = Vec::new();
+                    for h in handles {
+                        match h.join() {
+                            Ok(chunk_results) => results.extend(chunk_results),
+                            Err(_) => tracing::error!("批量识别某工作线程 panic，该线程未完成的结果丢失"),
+                        }
+                    }
+                    results
+                })
             },
             move |this, results, cx| {
                 let mut confirmed = 0usize;
@@ -1794,6 +1963,40 @@ impl RootView {
                 cx.notify();
             },
         );
+
+        // 轮询共享进度，实时刷新状态栏（与 sync_progress 同一模式）；
+        // on_done 将 batch_recognizing 置 false 后轮询退出
+        cx.spawn(move |weak: WeakEntity<RootView>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(200))
+                        .await;
+                    let Some(view) = weak.upgrade() else {
+                        break;
+                    };
+                    let running = cx.update_entity(&view, |this, cx| {
+                        if !this.batch_recognizing {
+                            return false;
+                        }
+                        this.batch_progress_rc = (progress.done.load(Ordering::Relaxed), total);
+                        this.batch_current_file = progress.current.lock().clone();
+                        this.batch_counts = (
+                            progress.confirmed.load(Ordering::Relaxed),
+                            progress.unrecognized.load(Ordering::Relaxed),
+                            progress.needs_review.load(Ordering::Relaxed),
+                        );
+                        cx.notify();
+                        true
+                    });
+                    if !running {
+                        break;
+                    }
+                }
+            }
+        })
+        .detach();
     }
 
     fn apply_rating(&mut self, rating: Rating, cx: &mut Context<Self>) {

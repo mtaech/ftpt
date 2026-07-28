@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use photo_domain::{BatchOpType, Capture, DeleteMode, ImageFormat};
+use photo_domain::{BatchOpType, Capture, ImageFormat};
 
 use crate::ops;
 use crate::scanner::{self, ScanError};
@@ -104,7 +104,7 @@ pub fn execute(
                     .map(|_| format!("{verb}: {}", name))
             }
             BatchOpType::DeleteSame | BatchOpType::DeleteNotSame => {
-                ops::delete_capture(capture, DeleteMode::Permanent)
+                ops::delete_capture(capture)
                     .map(|_| format!("{verb}: {}", name))
             }
             BatchOpType::MoveSame | BatchOpType::MoveNotSame => {

@@ -9,7 +9,7 @@ use crate::ui::theme;
 /// 注：GPUI 无 letter-spacing API，故仅在视觉上通过全大写实现字距感。
 pub fn section_header(label: &str) -> Div {
     div()
-        .text_xs()
+        
         .text_color(theme::colors().text_muted)
         .pb_1()
         .child(label.to_uppercase())

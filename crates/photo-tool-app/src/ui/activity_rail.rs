@@ -9,7 +9,7 @@ use crate::ui::theme;
 /// 左侧 Activity Rail：48px 宽交易终端风格，竖排 icon-only 按钮。
 /// 顶部：目录、导入、设置；底部：主题切换（向日葵/月亮）。
 pub fn render_activity_rail(
-    _view: &RootView,
+    view: &RootView,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let vh = cx.entity().downgrade();
@@ -27,9 +27,17 @@ pub fn render_activity_rail(
         // 目录——切换左侧面板显隐
         .child(
             Button::new("rail-dir-btn")
-                .icon(IconName::Folder)
+                .icon(if view.sidebar_visible {
+                    IconName::PanelLeft
+                } else {
+                    IconName::PanelLeftOpen
+                })
                 .ghost()
-                .tooltip("切换目录面板")
+                .tooltip(if view.sidebar_visible {
+                    "隐藏目录面板"
+                } else {
+                    "显示目录面板"
+                })
                 .on_click({
                     let vh = vh.clone();
                     move |_, _window, cx| {
@@ -61,23 +69,7 @@ pub fn render_activity_rail(
         // 弹性占位，把主题按钮推到底部（注意：不能给 rail 自身加 flex_grow，
         // 否则它在父级 h_flex 行里会横向吃掉剩余空间）
         .child(div().flex_grow(1.0))
-        // 右侧面板切换
-        .child(
-            Button::new("rail-right-panel-btn")
-                .icon(IconName::PanelRight)
-                .ghost()
-                .tooltip("切换右侧面板")
-                .on_click({
-                    let vh = vh.clone();
-                    move |_, _window, cx| {
-                        if let Some(entity) = vh.upgrade() {
-                            cx.update_entity(&entity, |view, cx| {
-                                view.dispatch_action(Action::ToggleRightPanel, cx);
-                            });
-                        }
-                    }
-                }),
-        )
+        // 主题
         .child(
             Button::new("rail-theme-btn")
                 .icon(if is_dark { IconName::Sun } else { IconName::Moon })

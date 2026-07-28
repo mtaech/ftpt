@@ -8,7 +8,6 @@ use gpui_component::scroll::ScrollableElement;
 
 use crate::action::{Action, ContextMenuAction};
 use crate::state::app::RootView;
-use crate::ui::toolbar::render_settings_overlay;
 use crate::ui::theme;
 
 /// 左侧 Activity Rail 固定宽度（px），网格列宽计算依赖该值
@@ -70,16 +69,14 @@ pub fn render_layout(
                     ("home", false) => view.dispatch_action(Action::First, cx),
                     ("end", false) => view.dispatch_action(Action::Last, cx),
                     // Delete
-                    ("delete", false) => view.dispatch_action(Action::Delete, cx),
-                    ("delete", true) => view.dispatch_action(Action::PermanentDelete, cx),
+                    ("delete", _) => view.dispatch_action(Action::Delete, cx),
                     // Selection
                     ("a", true) => view.dispatch_action(Action::SelectAll, cx),
                     ("d", true) => view.dispatch_action(Action::DeselectAll, cx),
                     // Refresh / Cancel
                     ("escape", false) => {
                         if view.show_settings {
-                            view.show_settings = false;
-                            cx.notify();
+                            view.dispatch_action(Action::ToggleSettings, cx);
                         } else if view.batch_recognizing {
                             view.dispatch_action(Action::CancelBatchRecognize, cx);
                         }
@@ -103,6 +100,23 @@ pub fn render_layout(
                 }
             }
         })
+        // 拖拽面板时逐帧重渲染，使 grid 能动态重算可用宽度。
+        // 仅在按住鼠标（拖拽进行中）时 notify，避免鼠标移动引发持续重绘。
+        .on_mouse_move({
+            let vh = cx.entity().downgrade();
+            move |event: &MouseMoveEvent, _window, cx| {
+                if event.pressed_button.is_none() {
+                    return;
+                }
+                if let Some(view) = vh.upgrade() {
+                    let visible = view.read(cx).sidebar_visible
+                        || view.read(cx).config.right_panel_visible;
+                    if visible {
+                        let _ = cx.update_entity(&view, |_, cx| cx.notify());
+                    }
+                }
+            }
+        })
         .child(
             // Toolbar at the top
             crate::ui::toolbar::render_toolbar(view, cx),
@@ -118,6 +132,14 @@ pub fn render_layout(
                 )
                 .child(
                     // 三栏可拖拽布局：左栏 | 内容区 | 右栏（gpui-component h_resizable）
+                    // 必须套 flex_1（basis=0）槽位：h_resizable 的内容固有宽度是各面板
+                    // basis 之和（含 ResizableState 记住的旧尺寸），flex_grow 只增不减，
+                    // 超过剩余空间时整行溢出、右 rail 与右面板被挤出屏幕。
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .child(
                     h_resizable("main-panels")
                         .child(
                             resizable_panel()
@@ -144,43 +166,58 @@ pub fn render_layout(
                                         .h_full()
                                         .w_full()
                                         .overflow_hidden()
-                                        .child(if view.dir_path.is_none() {
-                                            // Empty state: no directory loaded
-                                            v_flex()
-                                                .h_full()
-                                                .flex_grow(1.0)
-                                                .items_center()
-                                                .justify_center()
-                                                .gap_3()
-                                                .child(
-                                                    Icon::new(IconName::GalleryVerticalEnd)
-                                                        .text_color(theme::colors().text_muted.opacity(0.2)),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_color(theme::colors().text_muted)
-                                                        .child("打开目录开始浏览照片"),
-                                                )
-                                                .child(
-                                                    Button::new("empty-open-dir")
-                                                        .icon(IconName::FolderOpen)
-                                                        .primary()
-                                                        .label("打开目录")
-                                                        .on_click(cx.listener(|view, _event: &ClickEvent, _window, cx| {
-                                                            view.pick_and_scan_directory(cx);
-                                                        })),
-                                                )
-                                                .into_any_element()
-                                        } else {
-                                            match view.view_mode {
-                                                crate::state::app::ViewMode::Grid => {
-                                                    crate::ui::grid::render_grid(view, window, cx).into_any_element()
-                                                }
-                                                crate::state::app::ViewMode::Preview => {
-                                                crate::ui::preview::render_preview(view, window, cx).into_any_element()
-                                                }
-                                            }
-                                        })
+                                        // 筛选栏：仅网格模式 + 已有目录时显示
+                                        .when(
+                                            view.dir_path.is_some()
+                                                && view.view_mode == crate::state::app::ViewMode::Grid,
+                                            |parent| {
+                                                parent.child(crate::ui::filter_bar::render_filter_bar(
+                                                    view, cx,
+                                                ))
+                                            },
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_h_0()
+                                                .child(if view.dir_path.is_none() {
+                                                    // Empty state: no directory loaded
+                                                    v_flex()
+                                                        .h_full()
+                                                        .flex_grow(1.0)
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .gap_3()
+                                                        .child(
+                                                            Icon::new(IconName::GalleryVerticalEnd)
+                                                                .text_color(theme::colors().text_muted.opacity(0.2)),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_color(theme::colors().text_muted)
+                                                                .child("打开目录开始浏览照片"),
+                                                        )
+                                                        .child(
+                                                            Button::new("empty-open-dir")
+                                                                .icon(IconName::FolderOpen)
+                                                                .primary()
+                                                                .label("打开目录")
+                                                                .on_click(cx.listener(|view, _event: &ClickEvent, _window, cx| {
+                                                                    view.pick_and_scan_directory(cx);
+                                                                })),
+                                                        )
+                                                        .into_any_element()
+                                                } else {
+                                                    match view.view_mode {
+                                                        crate::state::app::ViewMode::Grid => {
+                                                            crate::ui::grid::render_grid(view, window, cx).into_any_element()
+                                                        }
+                                                        crate::state::app::ViewMode::Preview => {
+                                                        crate::ui::preview::render_preview(view, window, cx).into_any_element()
+                                                        }
+                                                    }
+                                                }),
+                                        )
                                         .into_any_element(),
                                 ),
                         )
@@ -224,6 +261,11 @@ pub fn render_layout(
                                 });
                             }
                         }),
+                        ),
+                )
+                .child(
+                    // 右侧 Activity Rail（与左侧 rail 对称）
+                    crate::ui::right_rail::render_right_rail(view, cx),
                 ),
         )
         .child(
@@ -232,7 +274,11 @@ pub fn render_layout(
         )
         // Settings overlay
         .when(view.show_settings, |parent| {
-            parent.child(render_settings_overlay(view, cx))
+            if let Some(overlay) = &view.settings_overlay {
+                parent.child(overlay.clone())
+            } else {
+                parent
+            }
         })
         // 批量操作进度弹窗
         // 批量全量识别确认对话框
@@ -265,7 +311,7 @@ pub fn render_layout(
                                     )
                                     .child(
                                         div()
-                                            .text_sm()
+                                            
                                             .text_color(theme::colors().text_muted)
                                             .child(format!("将重新识别 {} 张照片，已有的识别结果会被覆盖。", n)),
                                     )
@@ -343,7 +389,7 @@ pub fn render_layout(
                                     .py_3()
                                     .border_b_1()
                                     .border_color(theme::colors().border_variant)
-                                    .child(div().font_weight(FontWeight::BOLD).text_sm().child("批量操作进度"))
+                                    .child(div().font_weight(FontWeight::BOLD).child("批量操作进度"))
                                     .child(
                                         div()
                                             .id("close-progress-popup")
@@ -392,7 +438,7 @@ pub fn render_layout(
                                             )
                                             .child(
                                                 div()
-                                                    .text_xs()
+                                                    
                                                     .text_color(theme::colors().text)
                                                     .font_family(theme::MONO_FONT_FAMILY)
                                                     .child(format!("{done}/{total}")),
@@ -401,7 +447,7 @@ pub fn render_layout(
                                     .child(
                                         // 状态消息
                                         div()
-                                            .text_xs()
+                                            
                                             .text_color(theme::colors().text_muted)
                                             .child({
                                                 let msg = if view.batch_progress_msg.is_empty() {
@@ -426,7 +472,7 @@ pub fn render_layout(
                                                 let is_err = msg.contains("失败");
                                                 div()
                                                     .py_0p5()
-                                                    .text_xs()
+                                                    
                                                     .text_color(if is_err {
                                                         theme::colors().error
                                                     } else {

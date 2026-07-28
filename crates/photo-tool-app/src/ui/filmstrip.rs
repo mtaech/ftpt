@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use gpui::*;
 use gpui_component::scroll::{Scrollbar, ScrollbarShow};
 
@@ -25,9 +23,9 @@ pub fn render_filmstrip(view: &RootView, cx: &mut Context<RootView>) -> impl Int
             let vh = view_handle.clone();
 
             // 外框 68x52 含 2px 边框（border-box），内容区恰好 64x48
-            let content: AnyElement = if let Some(bytes) = view.thumbnail_data.get(&capture_idx) {
+            let content: AnyElement = if let Some(image) = view.thumbnail_data.get(&capture_idx) {
                 // 字节源 img 必须显式尺寸（size_full + object_fit 不生效，见 preview.rs 注释）
-                img(Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes.clone())))
+                img(image.clone())
                     .w(px(64.))
                     .h(px(48.))
                     .object_fit(ObjectFit::Cover)

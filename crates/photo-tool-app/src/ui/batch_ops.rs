@@ -96,7 +96,7 @@ pub fn render_batch_ops_section(
                         .py_1()
                         .rounded_sm()
                         .bg(theme::colors().element_background)
-                        .text_xs()
+                        
                         .cursor_pointer()
                         .on_click(move |_, _window, cx| {
                             if let Some(e) = vh_click.upgrade() {
@@ -122,7 +122,7 @@ pub fn render_batch_ops_section(
                                 .id(label.clone())
                                 .px_2()
                                 .py_1()
-                                .text_xs()
+                                
                                 .cursor_pointer()
                                 .text_color(if is_active {
                                     theme::colors().text_accent
@@ -164,7 +164,7 @@ pub fn render_batch_ops_section(
                         .justify_center()
                         .py_2()
                         .rounded_md()
-                        .text_sm()
+                        
                         .font_weight(FontWeight::MEDIUM)
                         .cursor_pointer()
                         .bg(theme::colors().text_accent)
@@ -192,7 +192,7 @@ pub fn render_batch_ops_section(
                     div()
                         .py_0p5()
                         .px_1()
-                        .text_xs()
+                        
                         .text_color(if is_err {
                             theme::colors().error
                         } else {
@@ -214,14 +214,14 @@ pub fn render_batch_ops_section(
 
 fn label(text: &'static str) -> impl IntoElement {
     div()
-        .text_xs()
+        
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme::colors().text_muted)
         .child(text)
 }
 
 fn arrow() -> impl IntoElement {
-    div().text_xs().text_color(theme::colors().text_muted).child("▼")
+    div().text_color(theme::colors().text_muted).child("▼")
 }
 
 fn option_list(items: Vec<gpui::AnyElement>) -> impl IntoElement {
@@ -263,7 +263,7 @@ fn format_dropdown(
                 .py_1()
                 .rounded_sm()
                 .bg(theme::colors().element_background)
-                .text_xs()
+                
                 .cursor_pointer()
                 .on_click(move |_, _window, cx| {
                     if let Some(e) = vh_click.upgrade() {
@@ -287,7 +287,7 @@ fn format_dropdown(
                         .id(SharedString::from(display_name))
                         .px_2()
                         .py_1()
-                        .text_xs()
+                        
                         .cursor_pointer()
                         .text_color(if is_active {
                             theme::colors().text_accent

@@ -10,12 +10,8 @@ use photo_config::AppConfig;
 use crate::state::app::RootView;
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    // 日志框架初始化（返回值是文件写入的 WorkerGuard，必须存活到进程结束）
+    let _log_guard = init_logging();
 
     let config_path = photo_config::determine_config_path().unwrap_or_else(|e| {
         tracing::warn!("Failed to determine config path: {e}, using default");
@@ -74,4 +70,48 @@ fn main() {
         })
         .detach();
     });
+}
+
+/// 初始化日志框架：控制台 + 文件双通道。
+/// - 控制台层：RUST_LOG 环境变量控制，默认 info（开发调试用）
+/// - 文件层：exe 同级 logs/ 目录，按天滚动（photo-tool.log.YYYY-MM-DD），固定 info+，
+///   无终端的发布环境下也能排查问题
+/// - panic hook：GPUI 会静默吞掉事件处理器中的 panic，hook 把 panic 写入日志
+fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
+    use tracing_subscriber::filter::LevelFilter;
+    use tracing_subscriber::prelude::*;
+
+    let stdout_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stdout)
+        .with_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info".into()),
+        );
+
+    // 日志目录随 exe 走（便携约定，与 models/、data/、PT.toml 同级）
+    let log_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("logs")))
+        .unwrap_or_else(|| std::path::PathBuf::from("logs"));
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "photo-tool.log");
+    let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(file_writer)
+        .with_ansi(false)
+        .with_filter(LevelFilter::INFO);
+
+    tracing_subscriber::registry()
+        .with(stdout_layer)
+        .with(file_layer)
+        .init();
+
+    // 桥接 log crate → tracing：ort 等依赖打日志走 log，需转发到 tracing
+    let _ = tracing_log::LogTracer::init();
+
+    std::panic::set_hook(Box::new(|info| {
+        tracing::error!(target: "panic", "{info}");
+    }));
+
+    tracing::info!("日志框架已初始化，日志目录: {}", log_dir.display());
+    guard
 }
