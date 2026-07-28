@@ -15,7 +15,7 @@ pub const RAIL_WIDTH: f32 = 48.0;
 
 /// Render the three-panel layout: sidebar | content | info_panel.
 pub fn render_layout(
-    view: &RootView,
+    view: &mut RootView,
     window: &mut Window,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
@@ -172,7 +172,9 @@ pub fn render_layout(
                                                 && view.view_mode == crate::state::app::ViewMode::Grid,
                                             |parent| {
                                                 parent.child(crate::ui::filter_bar::render_filter_bar(
-                                                    view, cx,
+                                                    &mut *view,
+                                                    &mut *window,
+                                                    cx,
                                                 ))
                                             },
                                         )

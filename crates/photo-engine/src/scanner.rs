@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use walkdir::WalkDir;
@@ -11,7 +10,7 @@ pub enum ScanError {
     Io(#[from] std::io::Error),
 }
 
-/// 扫描目录，将所有图片文件按 stem 归并为 Capture 列表
+/// 扫描目录，每个图片文件各自成为一个 Capture（JPG 与 RAW 不再堆叠）
 ///
 /// `on_progress` — 可选进度回调，接收 0-100 表示扫描+归并的百分比
 pub fn scan_directory(
@@ -28,7 +27,6 @@ pub fn scan_directory(
     // 单轮收集：一次 walkdir，暂存到临时 vec（消除双轮 I/O）
     struct Entry {
         path: PathBuf,
-        stem: String,
         format: ImageFormat,
         file_size: Option<u64>,
     }
@@ -47,7 +45,7 @@ pub fn scan_directory(
         let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
             continue;
         };
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+        if path.file_stem().is_none() {
             continue;
         };
 
@@ -64,7 +62,6 @@ pub fn scan_directory(
 
         entries.push(Entry {
             path: path.to_path_buf(),
-            stem: stem.to_string(),
             format,
             file_size,
         });
@@ -77,66 +74,50 @@ pub fn scan_directory(
     }
     report(0);
 
-    // 归组并报告进度
-    let mut base_map: HashMap<String, Vec<SourceFile>> = HashMap::new();
-    for (i, e) in entries.into_iter().enumerate() {
-        let base_key = e.stem.to_lowercase();
-        let sf = SourceFile {
-            path: e.path,
-            format: e.format,
-            file_size: e.file_size,
-        };
-        base_map.entry(base_key).or_default().push(sf);
-        report(((i + 1) as f64 / total as f64 * 100.0).min(100.0) as u32);
-    }
-
-    report(100);
-
-    // 归并为 Capture
-    let mut captures: Vec<Capture> = base_map
+    // 每文件一个 Capture，转换并报告进度
+    let mut captures: Vec<Capture> = entries
         .into_iter()
-        .map(|(base_name, source_files)| {
-            let primary_index = source_files
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, f)| f.format.display_priority())
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-
-            let display_name = source_files
-                .first()
-                .and_then(|f| f.path.file_stem())
+        .enumerate()
+        .map(|(i, e)| {
+            let display_name = e
+                .path
+                .file_stem()
                 .and_then(|s| s.to_str())
-                .unwrap_or(&base_name)
+                .unwrap_or_default()
                 .to_string();
-
+            report(((i + 1) as f64 / total as f64 * 100.0).min(100.0) as u32);
             Capture {
                 base_name: display_name,
-                source_files,
-                primary_index,
+                source_files: vec![SourceFile {
+                    path: e.path,
+                    format: e.format,
+                    file_size: e.file_size,
+                }],
+                primary_index: 0,
             }
         })
         .collect();
 
+    report(100);
+
     apply_filter(&mut captures, filter);
-    captures.sort_by_key(|a| a.base_name.to_lowercase());
+    // 按完整文件名小写排序：同名 JPG/RAW 相邻且顺序确定（jpg < nef）
+    captures.sort_by_key(|c| {
+        c.source_files[c.primary_index]
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_lowercase()
+    });
 
     Ok(captures)
 }
 
-/// 应用筛选条件：当前操作在 Capture 层面（无 enrich_with_recognition），
-/// text_search 只能匹配 base_name；recognition_filter 在 Capture 层面
-/// 全部为未识别（recognition_status=None），所以只 All/NotRecognized 保留。
-///
-/// 待扫描完成后，在 `apply_filter_and_sort`（app.rs）中对 CaptureMeta
-/// 做更精确的识别筛选和 bird_name 文本搜索。
+/// 应用筛选条件：Capture 层面只做 recognition_filter（全部未识别，
+/// 仅 All/NotRecognized 保留）；其余筛选（鸟种、评分等）在扫描完成后
+/// 由 `apply_filter_and_sort`（app.rs）在 CaptureMeta 层面执行。
 fn apply_filter(captures: &mut Vec<Capture>, filter: &FilterCriteria) {
-    if let Some(ref text) = filter.text_search {
-        let text_lower = text.to_lowercase();
-        captures.retain(|c| {
-            c.base_name.to_lowercase().contains(&text_lower)
-        });
-    }
     // recognition_filter：Capture 层面全部为未识别
     if filter.recognition_filter != photo_domain::RecognitionFilter::All
         && filter.recognition_filter != photo_domain::RecognitionFilter::NotRecognized
@@ -145,16 +126,6 @@ fn apply_filter(captures: &mut Vec<Capture>, filter: &FilterCriteria) {
         // 因为识别扫描还没跑——直接清空
         captures.clear();
     }
-}
-
-/// 计算堆叠数：除主显示图片外的图像文件数量
-pub fn stack_count(capture: &Capture) -> usize {
-    capture
-        .source_files
-        .iter()
-        .enumerate()
-        .filter(|(i, _f)| *i != capture.primary_index)
-        .count()
 }
 
 #[cfg(test)]
@@ -174,30 +145,30 @@ mod tests {
     }
 
     #[test]
-    fn test_pair_jpeg_raw() {
+    fn test_jpeg_raw_split() {
         let dir = TempDir::new().unwrap();
         create_test_files(&dir, &["DSC_0001.jpg", "DSC_0001.NEF"]);
 
         let captures = scan_directory(dir.path(), &FilterCriteria::default(), None).unwrap();
-        assert_eq!(captures.len(), 1);
-        let c = &captures[0];
-        assert_eq!(c.base_name, "DSC_0001");
-        assert_eq!(c.source_files.len(), 2);
-        assert_eq!(c.source_files[c.primary_index].format, ImageFormat::Jpeg);
+        assert_eq!(captures.len(), 2);
+        assert!(captures.iter().all(|c| c.source_files.len() == 1));
+        // 按文件名排序：jpg 在前，NEF 在后
+        assert_eq!(captures[0].source_files[0].format, ImageFormat::Jpeg);
+        assert!(matches!(captures[1].source_files[0].format, ImageFormat::Raw(_)));
+        assert!(captures.iter().all(|c| c.base_name == "DSC_0001"));
     }
 
     #[test]
-    fn test_case_insensitive_pairing() {
+    fn test_case_insensitive_extensions_split() {
         let dir = TempDir::new().unwrap();
         create_test_files(&dir, &["photo.JPG", "Photo.NEF"]);
 
         let captures = scan_directory(dir.path(), &FilterCriteria::default(), None).unwrap();
-        assert_eq!(captures.len(), 1);
-        assert_eq!(captures[0].source_files.len(), 2);
+        assert_eq!(captures.len(), 2);
     }
 
     #[test]
-    fn test_jpeg_only_no_pairing() {
+    fn test_jpeg_only() {
         let dir = TempDir::new().unwrap();
         create_test_files(&dir, &["solo.jpg"]);
 
@@ -220,13 +191,18 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_raws_same_capture() {
+    fn test_same_stem_multiple_formats_split() {
         let dir = TempDir::new().unwrap();
         create_test_files(&dir, &["img.jpg", "img.NEF", "img.DNG"]);
 
         let captures = scan_directory(dir.path(), &FilterCriteria::default(), None).unwrap();
-        assert_eq!(captures.len(), 1);
-        assert_eq!(captures[0].source_files.len(), 3);
+        assert_eq!(captures.len(), 3);
+        // 同名三格式按文件名小写排序（dng < jpg < nef），顺序确定
+        let names: Vec<String> = captures
+            .iter()
+            .map(|c| c.source_files[0].path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, vec!["img.DNG", "img.jpg", "img.NEF"]);
     }
 
     #[test]
@@ -235,11 +211,10 @@ mod tests {
         create_test_files(&dir, &["img.jpg", "img.NEF", "img.xmp"]);
 
         let captures = scan_directory(dir.path(), &FilterCriteria::default(), None).unwrap();
-        assert_eq!(captures.len(), 1);
-        // .xmp 不再被当作旁车文件——非 viewable 扩展名被忽略
-        assert_eq!(captures[0].source_files.len(), 2);
-        for sf in &captures[0].source_files {
-            assert!(!sf.path.extension().unwrap().to_str().unwrap().eq_ignore_ascii_case("xmp"));
+        // .xmp 非 viewable 扩展名被忽略
+        assert_eq!(captures.len(), 2);
+        for c in &captures {
+            assert!(!c.source_files[0].path.extension().unwrap().to_str().unwrap().eq_ignore_ascii_case("xmp"));
         }
     }
 
@@ -250,8 +225,6 @@ mod tests {
 
         let captures = scan_directory(dir.path(), &FilterCriteria::default(), None).unwrap();
         assert_eq!(captures.len(), 1);
-        // mp4 不被当作图片源文件
-        assert_eq!(captures[0].source_files.len(), 1);
     }
 
     #[test]
@@ -260,6 +233,7 @@ mod tests {
         create_test_files(&dir, &["a.jpg", "a.NEF", "b.jpg", "b.CR2", "c.jpg"]);
 
         let captures = scan_directory(dir.path(), &FilterCriteria::default(), None).unwrap();
-        assert_eq!(captures.len(), 3);
+        // 每文件一个 Capture：a.jpg/a.NEF/b.jpg/b.CR2/c.jpg 共 5 个
+        assert_eq!(captures.len(), 5);
     }
 }

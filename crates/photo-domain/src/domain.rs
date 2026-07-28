@@ -95,20 +95,6 @@ impl ImageFormat {
                 | "x3f"
         )
     }
-
-    /// 主显示图片优先级（数字越小越优先）
-    pub fn display_priority(&self) -> u8 {
-        match self {
-            Self::Jpeg => 0,
-            Self::Png => 1,
-            Self::Tiff => 2,
-            Self::Heif => 3,
-            Self::WebP => 4,
-            Self::Bmp => 5,
-            Self::Gif => 6,
-            Self::Raw(_) => 7,
-        }
-    }
 }
 
 /// 组成一次拍摄的单个源文件
@@ -280,12 +266,11 @@ pub enum Flag {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilterCriteria {
-    /// 仅显示有配对的（JPEG+RAW）
-    pub paired_only: Option<bool>,
     /// 按文件类型过滤
     pub format_filter: Option<ImageFormat>,
-    /// 文件名文本搜索
-    pub text_search: Option<String>,
+    /// 按鸟种中文名过滤（多选，空 = 不过滤）
+    #[serde(default)]
+    pub bird_names: Vec<String>,
     /// 按日期范围过滤
     pub date_from: Option<chrono::NaiveDate>,
     pub date_to: Option<chrono::NaiveDate>,
@@ -741,13 +726,6 @@ mod tests {
         assert!(!ImageFormat::is_raw_extension("mp4"));
     }
 
-    #[test]
-    fn test_display_priority_jpeg_higher_than_raw() {
-        assert!(
-            ImageFormat::Jpeg.display_priority()
-                < ImageFormat::Raw("NEF".into()).display_priority()
-        );
-    }
 
     #[test]
     fn test_format_from_png() {

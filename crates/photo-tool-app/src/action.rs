@@ -12,6 +12,7 @@ pub enum Action {
     ZoomIn,
     ZoomOut,
     ZoomToFit,
+    ZoomActual,
     // Rating
     Rate0,
     Rate1,

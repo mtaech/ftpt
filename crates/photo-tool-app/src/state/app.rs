@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use gpui::*;
 use gpui_component::IndexPath;
+use gpui_component::combobox::{ComboboxEvent, ComboboxState};
 use gpui_component::select::{SearchableVec, SelectEvent, SelectState};
 use std::sync::LazyLock;
 use photo_config::AppConfig;
@@ -41,6 +42,9 @@ pub enum ViewMode {
     Preview,
 }
 
+/// 批量识别单张结果：(capture_index, 相对路径, 识别结果)
+type BatchResult = (usize, String, Result<photo_domain::Recognition, String>);
+
 /// 批量识别共享进度：工作线程逐张写入，UI 侧 200ms 轮询读取（与 sync_progress 同一模式）。
 /// 640 张级别的批量任务中途无任何上报时，UI 与日志会静止数十分钟，表现为“卡死”。
 #[derive(Default)]
@@ -51,6 +55,71 @@ struct BatchProgress {
     needs_review: std::sync::atomic::AtomicUsize,
     /// 批量识别当前处理的文件名（多线程时为最后开始识别的文件）
     current: parking_lot::Mutex<String>,
+    /// 已完成结果队列：工作线程逐张推入，UI 轮询 drain 后即时刻到网格，
+    /// 不再等整批结束才更新
+    results: parking_lot::Mutex<Vec<BatchResult>>,
+}
+
+// ── 预览缩放/平移纯函数（与 preview.rs 渲染公式严格一致，改动需同步）──
+
+/// 预览居中偏移：图片 ≤ 容器时居中（≥0），> 容器时为负（图片向左上溢出）
+pub(crate) fn preview_center_offset(disp: f32, container: f32) -> f32 {
+    (container - disp) / 2.
+}
+
+/// 单轴平移钳制：图片 ≤ 容器时不允许平移；> 容器时边缘不可进入视口
+pub(crate) fn clamp_pan_axis(disp: f32, container: f32, pan: f32) -> f32 {
+    if disp <= container {
+        0.
+    } else {
+        let center = preview_center_offset(disp, container);
+        pan.clamp(container - disp - center, -center)
+    }
+}
+
+/// 光标中心缩放：保持光标下的图像点不动，返回新 pan。
+/// old_disp/new_disp 为缩放前后显示尺寸，container 为容器尺寸，cursor 为容器坐标。
+pub(crate) fn pan_after_cursor_zoom(
+    old_disp: (f32, f32),
+    new_disp: (f32, f32),
+    container: (f32, f32),
+    pan: (f32, f32),
+    cursor: (f32, f32),
+) -> (f32, f32) {
+    let axis = |old_d: f32, new_d: f32, c: f32, p: f32, cur: f32| {
+        let old_origin = preview_center_offset(old_d, c) + p;
+        let r = if old_d > 0. { new_d / old_d } else { 1. };
+        let new_origin = cur - (cur - old_origin) * r;
+        new_origin - preview_center_offset(new_d, c)
+    };
+    (
+        axis(old_disp.0, new_disp.0, container.0, pan.0, cursor.0),
+        axis(old_disp.1, new_disp.1, container.1, pan.1, cursor.1),
+    )
+}
+
+/// 将 JPEG/常规图字节解码为可直接绘制的 RenderImage（worker 线程执行）。
+/// 预览/全分辨率必须预解码：字节源走 GPUI asset 异步解码，解码完成前 img 画空白，
+/// 源切换时会闪白屏；RenderImage 走 ImageSource::Render 同步路径，到达即可绘制。
+fn decode_render_image(bytes: &[u8], is_jpeg: bool) -> Option<RenderImage> {
+    let mut rgba = if is_jpeg {
+        let options = zune_core::options::DecoderOptions::new_fast()
+            .jpeg_set_out_colorspace(zune_core::colorspace::ColorSpace::RGB);
+        let mut decoder =
+            zune_jpeg::JpegDecoder::new_with_options(std::io::Cursor::new(bytes), options);
+        let pixels = decoder.decode().ok()?;
+        let info = decoder.info()?;
+        let rgb = image::RgbImage::from_raw(info.width as u32, info.height as u32, pixels)?;
+        image::DynamicImage::ImageRgb8(rgb).into_rgba8()
+    } else {
+        image::load_from_memory(bytes).ok()?.into_rgba8()
+    };
+    // GPUI RenderImage 帧要求 BGRA 通道序（gpui assets.rs / img.rs 均为 swap(0,2)），
+    // 不交换则红蓝对调，画面整体偏青
+    for px in rgba.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    Some(RenderImage::new(vec![image::Frame::new(rgba)]))
 }
 
 pub struct RootView {
@@ -76,18 +145,30 @@ pub struct RootView {
     /// 已解码缩略图按 capture 索引缓存。存 Arc<Image>（加载时构建一次、哈希一次），
     /// 渲染路径只做指针拷贝——此前存 Vec<u8>，grid/preview 每帧克隆整表字节，是卡顿主因。
     pub thumbnail_data: HashMap<usize, Arc<Image>>,
-    /// 预览图按 capture 索引缓存：非 RAW 为原图，RAW 为大尺寸内嵌预览（格式在 Image 内）
-    pub preview_data: HashMap<usize, Arc<Image>>,
+    /// 预览图按 capture 索引缓存：worker 线程预解码为 RenderImage，
+    /// 到达即可绘制（字节源走 GPUI asset 异步解码，首帧会画空白——切换白屏根因）
+    pub preview_data: HashMap<usize, Arc<RenderImage>>,
     /// preview_data 的 FIFO 淘汰顺序
     preview_order: VecDeque<usize>,
+    /// 全分辨率图按 capture 索引缓存：放大超过预览分辨率或 100% 时按需加载（同样预解码）
+    pub fullres_data: HashMap<usize, Arc<RenderImage>>,
+    /// fullres_data 的 FIFO 淘汰顺序（单张 GPU 纹理可达百 MB，上限极小）
+    fullres_order: VecDeque<usize>,
     /// 网格虚拟列表滚动句柄（uniform_list 滚动条用）
     pub grid_scroll_handle: UniformListScrollHandle,
-    /// 预览图片区实测尺寸（canvas prepaint 写入，变化时 defer notify 重排；0 = 未测量）
-    pub preview_area_size: Rc<RefCell<(f32, f32)>>,
+    /// 预览图片区实测边界（窗口坐标 x/y/w/h；canvas prepaint 写入，变化时 defer notify 重排；w=0 = 未测量）
+    pub preview_area_bounds: Rc<RefCell<(f32, f32, f32, f32)>>,
     /// 预览缩略图条滚动句柄（track_scroll 记录子项位置，scroll_to_item 跟随焦点）
     pub filmstrip_scroll: ScrollHandle,
     /// 字体选择下拉状态（设置弹窗用）
     pub font_select: Entity<SelectState<SearchableVec<SharedString>>>,
+    /// 鸟种多选下拉状态（筛选栏用，ComboboxState 创建需要 Window，
+    /// 鸟名列表变化时置 dirty 标记，由筛选栏 render 时重建）
+    pub bird_select: Entity<ComboboxState<SearchableVec<String>>>,
+    /// 当前 captures 中去重排序后的鸟种中文名（鸟种下拉的数据源）
+    pub bird_options: Vec<String>,
+    /// 鸟种下拉待重建标记（扫描/识别完成或外部清除筛选时置位）
+    pub bird_options_dirty: bool,
     pub show_settings: bool,
     /// 设置弹窗独立 View（拥有自身 render 生命周期，避免每帧重建）
     pub settings_overlay: Option<gpui::Entity<SettingsOverlay>>,
@@ -100,6 +181,10 @@ pub struct RootView {
     pub sidebar_visible: bool,
     /// 正在后台加载中的预览图 capture 索引（防重复 spawn）
     preview_loading: HashSet<usize>,
+    /// 预览图加载的合作式取消令牌：焦点离开后取消未完成的慢解码（RAW 完整解码）
+    preview_cancel: HashMap<usize, Arc<AtomicBool>>,
+    /// 正在后台加载中的全分辨率图 capture 索引（防重复 spawn）
+    fullres_loading: HashSet<usize>,
     /// 正在后台加载中的网格缩略图 capture 索引（防重复 spawn）
     grid_loading: HashSet<usize>,
     /// 预览缩放倍率（1.0 = 适配窗口）
@@ -179,6 +264,9 @@ impl RootView {
         })
         .detach();
 
+        // 鸟种多选下拉：初始为空（尚未扫描），鸟名列表变化后由筛选栏 render 重建
+        let bird_select = Self::new_bird_select(&[], &[], window, cx);
+
         // 旧配置 left_panel_width==0 是旧的「收起」语义：恢复默认宽度，启动时隐藏侧栏
         let sidebar_visible = config.left_panel_width > 0;
         if config.left_panel_width == 0 {
@@ -207,6 +295,8 @@ impl RootView {
             display_order: Vec::new(),
             scan_task: None,
             preview_loading: HashSet::new(),
+            preview_cancel: HashMap::new(),
+            fullres_loading: HashSet::new(),
             grid_loading: HashSet::new(),
             preview_zoom: 1.0,
             preview_pan: (0.0, 0.0),
@@ -214,14 +304,19 @@ impl RootView {
             thumbnail_data: HashMap::new(),
             preview_data: HashMap::new(),
             preview_order: VecDeque::new(),
+            fullres_data: HashMap::new(),
+            fullres_order: VecDeque::new(),
             font_select,
+            bird_select,
+            bird_options: Vec::new(),
+            bird_options_dirty: false,
             show_settings: false,
             settings_overlay: None,
             filter_bar_expanded: false,
             sidebar_section: 0,
             sidebar_visible,
             grid_scroll_handle: UniformListScrollHandle::new(),
-            preview_area_size: Rc::new(RefCell::new((0., 0.))),
+            preview_area_bounds: Rc::new(RefCell::new((0., 0., 0., 0.))),
             filmstrip_scroll: ScrollHandle::default(),
             batch_compare_dir: String::new(),
             batch_source_format: String::new(),
@@ -370,6 +465,8 @@ impl RootView {
                         this.thumbnail_data.clear();
                         this.preview_data.clear();
                         this.preview_order.clear();
+                        this.fullres_data.clear();
+                        this.fullres_order.clear();
                         this.apply_filter_and_sort();
                         // 扫描完成后，用 folder_db 中已有的识别记录 enrich CaptureMeta
                         if let Some(ref db) = this.folder_db {
@@ -387,6 +484,8 @@ impl RootView {
                             }
                         }
                         this.apply_filter_and_sort();
+                        // 鸟种列表供筛选栏多选下拉使用
+                        this.refresh_bird_options();
                         tracing::info!(
                             "扫描完成：{} 找到 {} 个 capture，过滤后 {} 个",
                             dir.display(),
@@ -675,12 +774,11 @@ impl RootView {
     /// 是否有任一筛选条件生效（筛选栏折叠态摘要/「清除全部」显隐依据）
     pub fn has_active_filters(&self) -> bool {
         let f = &self.filter;
-        f.text_search.is_some()
+        !f.bird_names.is_empty()
             || f.min_rating.is_some()
             || f.flag_filter.is_some()
             || f.unflagged_filter
             || f.recognition_filter != photo_domain::RecognitionFilter::All
-            || f.paired_only.is_some()
             || f.format_filter.is_some()
             || f.date_from.is_some()
             || f.date_to.is_some()
@@ -689,6 +787,8 @@ impl RootView {
     /// 清空全部筛选条件并重算展示顺序
     pub fn clear_filters(&mut self) {
         self.filter = FilterCriteria::default();
+        // 鸟种下拉的选中集独立于 filter，标记重建以同步清空
+        self.bird_options_dirty = true;
         self.apply_filter_and_sort();
     }
 
@@ -703,27 +803,17 @@ impl RootView {
             .iter()
             .enumerate()
             .filter(|(_i, meta)| {
-                // paired_only
-                if let Some(paired) = filter.paired_only {
-                    let is_paired = meta.stack_count > 0;
-                    if is_paired != paired {
-                        return false;
-                    }
-                }
                 // format_filter
                 if let Some(ref fmt_filter) = filter.format_filter {
                     if meta.primary_format != fmt_filter.to_string() {
                         return false;
                     }
                 }
-                // text_search
-                if let Some(ref text) = filter.text_search {
-                    if !meta
-                        .base_name
-                        .to_lowercase()
-                        .contains(&text.to_lowercase())
-                    {
-                        return false;
+                // bird_names（鸟种多选：bird_name 命中任一选中项即保留）
+                if !filter.bird_names.is_empty() {
+                    match &meta.bird_name {
+                        Some(bn) if filter.bird_names.contains(bn) => {}
+                        _ => return false,
                     }
                 }
                 // date_from / date_to
@@ -812,12 +902,17 @@ impl RootView {
 
     /// 预览图缓存上限（张）
     const PREVIEW_CACHE_LIMIT: usize = 20;
+    /// 全分辨率图缓存上限（张）：单张 GPU 纹理可达百 MB，只保留当前与相邻
+    const FULLRES_CACHE_LIMIT: usize = 2;
+    /// 预览图长边像素（磁盘缓存键的一部分）
+    pub const PREVIEW_LOAD_SIZE: u32 = 1600;
+    /// 预览预取半径：焦点前后各预取几张
+    const PREVIEW_PREFETCH_RADIUS: usize = 2;
 
-    fn insert_preview(&mut self, idx: usize, format: ImageFormat, bytes: Vec<u8>) {
+    fn insert_preview(&mut self, idx: usize, image: Arc<RenderImage>) {
         self.preview_order.retain(|&i| i != idx);
         self.preview_order.push_back(idx);
-        self.preview_data
-            .insert(idx, Arc::new(Image::from_bytes(format, bytes)));
+        self.preview_data.insert(idx, image);
         while self.preview_order.len() > Self::PREVIEW_CACHE_LIMIT {
             if let Some(oldest) = self.preview_order.pop_front() {
                 self.preview_data.remove(&oldest);
@@ -825,17 +920,37 @@ impl RootView {
         }
     }
 
+    fn insert_fullres(&mut self, idx: usize, image: Arc<RenderImage>) {
+        self.fullres_order.retain(|&i| i != idx);
+        self.fullres_order.push_back(idx);
+        self.fullres_data.insert(idx, image);
+        while self.fullres_order.len() > Self::FULLRES_CACHE_LIMIT {
+            if let Some(oldest) = self.fullres_order.pop_front() {
+                self.fullres_data.remove(&oldest);
+            }
+        }
+    }
+
     /// 确保当前焦点图片的预览数据已加载：全部格式经 worker 线程缩放到 1600px。
-    /// 同时预取前后各一张，快速切换时无感。
+    /// 预取焦点前后各 PREVIEW_PREFETCH_RADIUS 张；离开邻域的未完成慢解码（RAW）被取消。
     pub fn ensure_preview_loaded(&mut self, cx: &mut Context<Self>) {
         let Some(focus_idx) = self.focus_index else { return };
-        self.spawn_preview_load(focus_idx, cx);
-        // 相邻预取：前后各一张
-        if focus_idx > 0 {
-            self.spawn_preview_load(focus_idx - 1, cx);
-        }
-        if focus_idx + 1 < self.display_order.len() {
-            self.spawn_preview_load(focus_idx + 1, cx);
+        // 取消离开预取邻域的未完成加载，释放 worker 线程给当前邻域
+        let keep_start = focus_idx.saturating_sub(Self::PREVIEW_PREFETCH_RADIUS);
+        let keep_end = (focus_idx + Self::PREVIEW_PREFETCH_RADIUS).min(self.display_order.len().saturating_sub(1));
+        let keep: HashSet<usize> = (keep_start..=keep_end)
+            .filter_map(|di| self.display_order.get(di).copied())
+            .collect();
+        self.preview_cancel.retain(|&ci, token| {
+            if keep.contains(&ci) {
+                true
+            } else {
+                token.store(true, std::sync::atomic::Ordering::Relaxed);
+                false
+            }
+        });
+        for di in keep_start..=keep_end {
+            self.spawn_preview_load(di, cx);
         }
     }
 
@@ -863,18 +978,90 @@ impl RootView {
 
             file_size: meta.file_size,
         };
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.preview_cancel.insert(capture_idx, cancel.clone());
         self.worker.spawn(
             cx,
             move || {
-                cache
-                    .get_or_generate(&source, 1600, None)
-                    .map_err(|e| tracing::warn!("预览图生成失败: {e}"))
-                    .ok()
+                // 预览字节恒为 JPEG（缩略图磁盘缓存统一存 JPEG）
+                match cache.get_or_generate(&source, Self::PREVIEW_LOAD_SIZE, Some(&cancel)) {
+                    Ok(bytes) => decode_render_image(&bytes, true).map(Arc::new),
+                    Err(photo_engine::thumbnail::ThumbnailError::Cancelled) => None,
+                    Err(e) => {
+                        tracing::warn!("预览图生成失败: {e}");
+                        None
+                    }
+                }
             },
             move |this, result, cx| {
                 this.preview_loading.remove(&capture_idx);
-                if let Some(bytes) = result {
-                    this.insert_preview(capture_idx, ImageFormat::Jpeg, bytes);
+                this.preview_cancel.remove(&capture_idx);
+                if let Some(image) = result {
+                    this.insert_preview(capture_idx, image);
+                    cx.notify();
+                }
+            },
+        );
+    }
+
+    /// 当前预览显示尺寸是否需要全分辨率源：100%（zoom==0）或显示尺寸超过预览分辨率。
+    pub fn needs_fullres(&self) -> bool {
+        if self.view_mode != ViewMode::Preview { return false; }
+        if self.preview_zoom == 0.0 { return true; }
+        match self.preview_disp_size() {
+            Some((w, h)) => w > Self::PREVIEW_LOAD_SIZE as f32 || h > Self::PREVIEW_LOAD_SIZE as f32,
+            None => false,
+        }
+    }
+
+    /// 确保焦点图的全分辨率版本在加载（needs_fullres 为真时由缩放/渲染路径触发）。
+    /// RAW 提取内嵌全尺寸 JPEG（走磁盘缓存），常规图直接读原文件字节（重编码只会损质量）。
+    pub fn ensure_fullres_loaded(&mut self, cx: &mut Context<Self>) {
+        use photo_domain::{ImageFormat as DomainFormat, SourceFile};
+
+        let Some(focus_idx) = self.focus_index else { return };
+        let Some(&capture_idx) = self.display_order.get(focus_idx) else { return };
+        if self.fullres_data.contains_key(&capture_idx) { return; }
+        if !self.fullres_loading.insert(capture_idx) { return; } // 已在加载
+        let Some(meta) = self.captures.get(capture_idx) else { return };
+
+        let path = PathBuf::from(&meta.primary_path);
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let is_raw = matches!(DomainFormat::from_extension(&ext), Some(DomainFormat::Raw(_)));
+        let cache = self.thumbnail_cache.clone();
+        let source = SourceFile {
+            path: path.clone(),
+            format: DomainFormat::from_extension(&ext).unwrap_or(DomainFormat::Jpeg),
+            file_size: meta.file_size,
+        };
+        self.worker.spawn(
+            cx,
+            move || {
+                if is_raw {
+                    // u32::MAX = 不缩放：内嵌全尺寸 JPEG 原样入磁盘缓存，下次秒开
+                    let cache = cache?;
+                    cache.get_or_generate(&source, u32::MAX, None)
+                        .map_err(|e| tracing::warn!("全分辨率 RAW 预览生成失败: {e}"))
+                        .ok()
+                        .and_then(|b| decode_render_image(&b, true))
+                        .map(Arc::new)
+                } else {
+                    let is_jpeg = matches!(ext.as_str(), "jpg" | "jpeg");
+                    std::fs::read(&path)
+                        .map_err(|e| tracing::warn!("全分辨率图读取失败: {e}"))
+                        .ok()
+                        .and_then(|b| decode_render_image(&b, is_jpeg))
+                        .map(Arc::new)
+                }
+            },
+            move |this, result, cx| {
+                this.fullres_loading.remove(&capture_idx);
+                if let Some(image) = result {
+                    this.insert_fullres(capture_idx, image);
                     cx.notify();
                 }
             },
@@ -883,8 +1070,102 @@ impl RootView {
 
 
 
-    /// 预载焦点前后 ±20 张网格缩略图，供预览缩略图条使用。
-    /// ensure_thumbnail_loaded 内部有双重早退（已缓存/加载中），重复调用零成本。
+    // ── 预览缩放/平移数学（与 preview.rs 渲染公式严格一致）──
+
+    /// 预览容器尺寸（图片区实测边界 − p_4 内边距 16×2）；未测量返回 None
+    fn preview_container_size(&self) -> Option<(f32, f32)> {
+        let (_, _, w, h) = *self.preview_area_bounds.borrow();
+        if w <= 0. {
+            return None;
+        }
+        Some(((w - 32.).max(1.), (h - 32.).max(1.)))
+    }
+
+    /// 焦点图原生像素尺寸
+    fn focused_native_size(&self) -> Option<(f32, f32)> {
+        let meta = self.get_focused_capture()?;
+        Some((meta.image_width? as f32, meta.image_height? as f32))
+    }
+
+    /// fit 尺寸（适配容器，不放大）
+    pub fn preview_fit_size(&self) -> Option<(f32, f32)> {
+        let (cw, ch) = self.preview_container_size()?;
+        let (nw, nh) = self.focused_native_size()?;
+        if nw <= 0. || nh <= 0. {
+            return None;
+        }
+        let scale = (cw / nw).min(ch / nh).min(1.0);
+        Some((nw * scale, nh * scale))
+    }
+
+    /// 当前显示尺寸：zoom==0 → 原生像素（100%）；否则 fit × zoom
+    pub fn preview_disp_size(&self) -> Option<(f32, f32)> {
+        if self.preview_zoom == 0.0 {
+            self.focused_native_size().or_else(|| self.preview_fit_size())
+        } else {
+            self.preview_fit_size()
+                .map(|(w, h)| (w * self.preview_zoom, h * self.preview_zoom))
+        }
+    }
+
+    /// 有效缩放倍率（zoom==0 的 100% 换算为相对 fit 的倍率）
+    fn effective_zoom(&self) -> f32 {
+        if self.preview_zoom != 0.0 {
+            return self.preview_zoom;
+        }
+        match (self.preview_fit_size(), self.focused_native_size()) {
+            (Some((fw, _)), Some((nw, _))) if fw > 0. => nw / fw,
+            _ => 1.0,
+        }
+    }
+
+    /// 按固定步进缩放（×1.25 / ÷1.25）；cursor（容器坐标）给定时以光标为中心
+    pub fn zoom_step(&mut self, zoom_in: bool, cursor: Option<(f32, f32)>, cx: &mut Context<Self>) {
+        let eff = self.effective_zoom();
+        let z = if zoom_in { eff * 1.25 } else { eff / 1.25 };
+        self.zoom_to(z, cursor, cx);
+    }
+
+    /// 设置缩放倍率（0.1–10 钳制）；cursor（容器坐标）给定时以光标为中心缩放。
+    /// 缩放后钳制平移并按需触发全分辨率加载。
+    pub fn zoom_to(&mut self, new_zoom: f32, cursor: Option<(f32, f32)>, cx: &mut Context<Self>) {
+        let new_zoom = new_zoom.clamp(0.1, 10.0);
+        if let (Some(container), Some(fit)) = (self.preview_container_size(), self.preview_fit_size()) {
+            let old_eff = self.effective_zoom();
+            let old_disp = (fit.0 * old_eff, fit.1 * old_eff);
+            let new_disp = (fit.0 * new_zoom, fit.1 * new_zoom);
+            if let Some(cur) = cursor {
+                self.preview_pan = pan_after_cursor_zoom(old_disp, new_disp, container, self.preview_pan, cur);
+            }
+        }
+        self.preview_zoom = new_zoom;
+        self.clamp_preview_pan();
+        if self.needs_fullres() {
+            self.ensure_fullres_loaded(cx);
+        }
+        cx.notify();
+    }
+
+    /// 切到 100% 实际像素（zoom==0），触发全分辨率加载
+    pub fn zoom_to_actual(&mut self, cx: &mut Context<Self>) {
+        self.preview_zoom = 0.0;
+        self.clamp_preview_pan();
+        self.ensure_fullres_loaded(cx);
+        cx.notify();
+    }
+
+    /// 平移钳制：图片 ≤ 容器时回中；> 容器时边缘不可进入视口
+    pub fn clamp_preview_pan(&mut self) {
+        let (Some(container), Some(disp)) = (self.preview_container_size(), self.preview_disp_size()) else {
+            return;
+        };
+        self.preview_pan = (
+            clamp_pan_axis(disp.0, container.0, self.preview_pan.0),
+            clamp_pan_axis(disp.1, container.1, self.preview_pan.1),
+        );
+    }
+
+    /// 预载焦点前后 ±20 张网格缩略图，供预览缩略图条使用。    /// ensure_thumbnail_loaded 内部有双重早退（已缓存/加载中），重复调用零成本。
     pub fn ensure_filmstrip_thumbs_loaded(&mut self, cx: &mut Context<Self>) {
         if self.display_order.is_empty() { return; }
         let center = self.focus_index.unwrap_or(0);
@@ -1397,20 +1678,18 @@ impl RootView {
                 cx.notify();
             }
             Action::ZoomIn => {
-                self.preview_zoom = (self.preview_zoom * 1.25).min(10.0);
-                cx.notify();
+                self.zoom_step(true, None, cx);
             }
             Action::ZoomOut => {
-                self.preview_zoom = (self.preview_zoom / 1.25).max(0.1);
-                if self.preview_zoom <= 1.0 {
-                    self.preview_pan = (0.0, 0.0);
-                }
-                cx.notify();
+                self.zoom_step(false, None, cx);
             }
             Action::ZoomToFit => {
                 self.preview_zoom = 1.0;
                 self.preview_pan = (0.0, 0.0);
                 cx.notify();
+            }
+            Action::ZoomActual => {
+                self.zoom_to_actual(cx);
             }
             // Rating
             Action::Rate0 => self.apply_rating(Rating::None, cx),
@@ -1641,6 +1920,71 @@ impl RootView {
         }
     }
 
+    /// 创建鸟种多选下拉实体并订阅 Change 事件（选中变化即写回 filter.bird_names）
+    fn new_bird_select(
+        options: &[String],
+        selected_names: &[String],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ComboboxState<SearchableVec<String>>> {
+        let selected: Vec<IndexPath> = options
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| selected_names.contains(n))
+            .map(|(i, _)| IndexPath::default().row(i))
+            .collect();
+        let entity = cx.new(|cx| {
+            ComboboxState::new(SearchableVec::new(options.to_vec()), selected, window, cx)
+                .multiple(true)
+                .searchable(true)
+        });
+        cx.subscribe(&entity, |view, _state, event, cx| {
+            if let ComboboxEvent::Change(values) = event {
+                view.filter.bird_names = values.clone();
+                view.apply_filter_and_sort();
+                cx.notify();
+            }
+        })
+        .detach();
+        entity
+    }
+
+    /// 收集当前 captures 中去重排序后的鸟种中文名；变化时标记鸟种下拉待重建
+    fn refresh_bird_options(&mut self) {
+        let mut names: Vec<String> = self
+            .captures
+            .iter()
+            .filter_map(|m| m.bird_name.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        names.sort();
+        if names != self.bird_options {
+            self.bird_options = names;
+            self.bird_options_dirty = true;
+        }
+    }
+
+    /// 重建鸟种下拉（鸟名列表或选中集外部变化后调用；创建需要 Window，故由筛选栏 render 驱动）
+    pub fn rebuild_bird_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 已选鸟名中已不存在的条目剔除
+        let pruned: Vec<String> = self
+            .filter
+            .bird_names
+            .iter()
+            .filter(|n| self.bird_options.contains(n))
+            .cloned()
+            .collect();
+        if pruned.len() != self.filter.bird_names.len() {
+            self.filter.bird_names = pruned;
+            self.apply_filter_and_sort();
+        }
+        let options = self.bird_options.clone();
+        let selected = self.filter.bird_names.clone();
+        self.bird_select = Self::new_bird_select(&options, &selected, window, cx);
+        self.bird_options_dirty = false;
+    }
+
     /// 从 CaptureMeta 构建 Capture（供识别管线使用）
     fn build_capture_from_meta(&self, meta: &CaptureMeta) -> Option<photo_domain::Capture> {
         let primary_path = std::path::Path::new(&meta.primary_path);
@@ -1732,6 +2076,7 @@ impl RootView {
                         this.recognizing_single = None;
                         this.recognize_stage = None;
                         this.apply_filter_and_sort();
+                        this.refresh_bird_options();
                         cx.notify();
 
                         // toast
@@ -1809,6 +2154,7 @@ impl RootView {
         let total = targets.len();
         let progress = Arc::new(BatchProgress::default());
         let progress_work = progress.clone();
+        let progress_done = progress.clone();
 
         let n_threads = (self.config.recognition_thread_count as usize).min(total).max(1);
 
@@ -1846,8 +2192,6 @@ impl RootView {
                         .map(|chunk| {
                             s.spawn(move || {
                                 let mut recognizer = create_recognizer();
-                                let mut out: Vec<(usize, String, Result<photo_domain::Recognition, String>)> =
-                                    Vec::new();
 
                                 for (capture_idx, cap) in chunk {
                                     if cancel.load(Ordering::Relaxed) {
@@ -1890,10 +2234,10 @@ impl RootView {
                                         tracing::warn!("批量识别 [{}/{}] {} 耗时 {:.1?}，异常缓慢", n, total, rel, elapsed);
                                     }
 
-                                    out.push((*capture_idx, rel, rec_result));
+                                    // 逐张推入共享队列：UI 轮询 drain 后网格即时刻入，
+                                    // 不再等整批结束
+                                    progress_work.results.lock().push((*capture_idx, rel, rec_result));
                                 }
-
-                                out
                             })
                         })
                         .collect();
@@ -1903,53 +2247,30 @@ impl RootView {
                         tracing::info!("批量识别被取消，已完成 {}/{} 张", done, total);
                     }
 
-                    // 单线程 panic 不应吞掉其他线程的结果：记录错误并保留已完成部分
-                    let mut results: Vec<(usize, String, Result<photo_domain::Recognition, String>)> = Vec::new();
+                    // 单线程 panic 不应吞掉其他线程：join 只为检出 panic
                     for h in handles {
-                        match h.join() {
-                            Ok(chunk_results) => results.extend(chunk_results),
-                            Err(_) => tracing::error!("批量识别某工作线程 panic，该线程未完成的结果丢失"),
+                        if h.join().is_err() {
+                            tracing::error!("批量识别某工作线程 panic，该线程未完成的结果丢失");
                         }
                     }
-                    results
                 })
             },
-            move |this, results, cx| {
-                let mut confirmed = 0usize;
-                let mut unrecognized = 0usize;
-                let mut needs_review = 0usize;
-                let done = results.len();
+            move |this, (), cx| {
+                // 轮询可能尚未 drain 最后几张，on_done 先兜底清队列（锁内 take，不会重复应用）
+                let remaining = std::mem::take(&mut *progress_done.results.lock());
+                this.apply_recognition_results(remaining);
 
-                for (capture_idx, rel, rec_result) in &results {
-                    match rec_result {
-                        Ok(rec) => {
-                            if let Some(ref db) = this.folder_db {
-                                let _ = db.upsert_recognition(rel, rec);
-                            }
-                            if let Some(meta) = this.captures.iter_mut().find(|m| m.index == *capture_idx) {
-                                meta.enrich_with_recognition(rec);
-                            }
-                            match rec.status {
-                                photo_domain::RecognitionStatus::Confirmed => confirmed += 1,
-                                photo_domain::RecognitionStatus::Unrecognized => unrecognized += 1,
-                                photo_domain::RecognitionStatus::NeedsReview => needs_review += 1,
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("批量识别错误 {}: {e}", rel);
-                            needs_review += 1;
-                        }
-                    }
-                }
+                let done = progress_done.done.load(Ordering::Relaxed);
+                let confirmed = progress_done.confirmed.load(Ordering::Relaxed);
+                let unrecognized = progress_done.unrecognized.load(Ordering::Relaxed);
+                let needs_review = progress_done.needs_review.load(Ordering::Relaxed);
 
-                if let Some(last) = results.last() {
-                    this.batch_current_file = last.1.clone();
-                }
                 this.batch_progress_rc = (done, total);
                 this.batch_counts = (confirmed, unrecognized, needs_review);
                 this.batch_recognizing = false;
                 this.apply_filter_and_sort();
                 this.refresh_focused_recognition();
+                this.refresh_bird_options();
 
                 this.show_toast(format!(
                     "识别完成：确认 {} · 无鸟 {} · 待复核 {}",
@@ -1964,7 +2285,7 @@ impl RootView {
             },
         );
 
-        // 轮询共享进度，实时刷新状态栏（与 sync_progress 同一模式）；
+        // 轮询共享进度，实时刷新状态栏与网格（与 sync_progress 同一模式）；
         // on_done 将 batch_recognizing 置 false 后轮询退出
         cx.spawn(move |weak: WeakEntity<RootView>, cx: &mut AsyncApp| {
             let mut cx = cx.clone();
@@ -1987,6 +2308,14 @@ impl RootView {
                             progress.unrecognized.load(Ordering::Relaxed),
                             progress.needs_review.load(Ordering::Relaxed),
                         );
+                        // drain 已完成结果：逐张刻到网格（db upsert + CaptureMeta enrich）
+                        let drained = std::mem::take(&mut *progress.results.lock());
+                        if !drained.is_empty() {
+                            this.apply_recognition_results(drained);
+                            this.refresh_focused_recognition();
+                            this.refresh_bird_options();
+                            this.apply_filter_and_sort();
+                        }
                         cx.notify();
                         true
                     });
@@ -1997,6 +2326,28 @@ impl RootView {
             }
         })
         .detach();
+    }
+
+    /// 应用一批批量识别结果：upsert folder_db + enrich CaptureMeta。
+    /// 轮询 drain 与 on_done 兜底共用；状态计数由工作线程侧原子量维护，此处不累加。
+    fn apply_recognition_results(&mut self, results: Vec<BatchResult>) {
+        for (capture_idx, rel, rec_result) in &results {
+            match rec_result {
+                Ok(rec) => {
+                    if let Some(db) = &self.folder_db {
+                        if let Err(e) = db.upsert_recognition(rel, rec) {
+                            tracing::error!("写入识别结果失败 {}: {e}", rel);
+                        }
+                    }
+                    if let Some(meta) = self.captures.iter_mut().find(|m| m.index == *capture_idx) {
+                        meta.enrich_with_recognition(rec);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("批量识别错误 {}: {e}", rel);
+                }
+            }
+        }
     }
 
     fn apply_rating(&mut self, rating: Rating, cx: &mut Context<Self>) {
@@ -2059,5 +2410,81 @@ impl RootView {
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::ui::layout::render_layout(self, window, cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // 不用 super::*：gpui 根导出的 test 属性宏会遮蔽内建 #[test] 导致宏展开递归
+    use super::{clamp_pan_axis, pan_after_cursor_zoom, preview_center_offset};
+
+    #[test]
+    fn test_decode_render_image_bgra_channel_order() {
+        // 回归：RenderImage 帧必须 BGRA（gpui 约定）。用纯色 JPEG 验证通道序，
+        // 防止红蓝对调导致画面整体偏青（曾作为“白平衡不对”出现）。
+        let mut jpeg = std::io::Cursor::new(Vec::new());
+        image::RgbImage::from_fn(8, 8, |_, _| image::Rgb([250, 10, 20]))
+            .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+            .unwrap();
+        let img = super::decode_render_image(&jpeg.into_inner(), true).expect("JPEG 应解码成功");
+        let bytes = img.as_bytes(0).expect("应有首帧");
+        let (b, g, r, a) = (bytes[0] as i32, bytes[1] as i32, bytes[2] as i32, bytes[3] as i32);
+        assert!(r > 200, "BGRA[2]=R 应 ≈250，实际 {r}");
+        assert!(b < 60, "BGRA[0]=B 应 ≈20，实际 {b}");
+        assert!(g < 60, "BGRA[1]=G 应 ≈10，实际 {g}");
+        assert_eq!(a, 255, "alpha 应为 255");
+    }
+
+    #[test]
+    fn test_center_offset_small_image_centers() {
+        // 图片小于容器：居中偏移为正（(1000-400)/2 = 300）
+        assert_eq!(preview_center_offset(400., 1000.), 300.);
+    }
+
+    #[test]
+    fn test_center_offset_large_image_overflows() {
+        // 图片大于容器：偏移为负（左上溢出）
+        assert_eq!(preview_center_offset(2000., 1000.), -500.);
+        assert_eq!(preview_center_offset(4000., 100.), -1950.);
+    }
+
+    #[test]
+    fn test_clamp_pan_small_image_forces_zero() {
+        // 图片 ≤ 容器：任何平移都被拉回 0（保持居中）
+        assert_eq!(clamp_pan_axis(400., 1000., 123.), 0.);
+        assert_eq!(clamp_pan_axis(1000., 1000., -50.), 0.);
+    }
+
+    #[test]
+    fn test_clamp_pan_large_image_keeps_edges_out() {
+        // 图片 2000 容器 1000：center=-500，pan ∈ [1000-2000-(-500), 500] = [-500, 500]
+        assert_eq!(clamp_pan_axis(2000., 1000., 999.), 500.);
+        assert_eq!(clamp_pan_axis(2000., 1000., -999.), -500.);
+        assert_eq!(clamp_pan_axis(2000., 1000., 100.), 100.);
+    }
+
+    #[test]
+    fn test_cursor_zoom_keeps_point_fixed() {
+        // 容器中心光标缩放：pan 不变（中心点不动）
+        let container = (1000., 800.);
+        let old_disp = (500., 400.);
+        let new_disp = (1000., 800.);
+        let cursor = (500., 400.);
+        let pan = pan_after_cursor_zoom(old_disp, new_disp, container, (0., 0.), cursor);
+        assert!(pan.0.abs() < 1e-4 && pan.1.abs() < 1e-4, "中心缩放不应移动 pan: {pan:?}");
+
+        // 非中心光标：缩放前后光标下的图像点（分数坐标）不变
+        let cursor = (200., 200.);
+        let pan = pan_after_cursor_zoom(old_disp, new_disp, container, (10., -20.), cursor);
+        let frac_before = (
+            (cursor.0 - (preview_center_offset(old_disp.0, container.0) + 10.)) / old_disp.0,
+            (cursor.1 - (preview_center_offset(old_disp.1, container.1) - 20.)) / old_disp.1,
+        );
+        let frac_after = (
+            (cursor.0 - (preview_center_offset(new_disp.0, container.0) + pan.0)) / new_disp.0,
+            (cursor.1 - (preview_center_offset(new_disp.1, container.1) + pan.1)) / new_disp.1,
+        );
+        assert!((frac_before.0 - frac_after.0).abs() < 1e-4, "x 分数坐标应不变");
+        assert!((frac_before.1 - frac_after.1).abs() < 1e-4, "y 分数坐标应不变");
     }
 }

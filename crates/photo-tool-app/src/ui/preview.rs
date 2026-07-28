@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use gpui::*;
 
 use gpui_component::menu::ContextMenuExt as _;
@@ -16,21 +14,30 @@ pub fn render_preview(
 ) -> impl IntoElement {
     let focused = view.get_focused_capture();
 
-    // 优先 1600px 预览数据；未加载完成时回退缩略图（Arc 指针拷贝，零字节克隆）
-    let image_source: Option<Arc<Image>> = focused.and_then(|meta| {
+    // 放大超过预览分辨率 / 100% 时优先全分辨率；否则 1600px 预览；未加载完成回退缩略图。
+    // 预览/全分辨率已在 worker 线程预解码为 RenderImage，源切换无空白帧。
+    let need_full = view.needs_fullres();
+    let image_source: Option<ImageSource> = focused.and_then(|meta| {
         let idx = meta.index;
+        if need_full && let Some(img) = view.fullres_data.get(&idx) {
+            return Some(ImageSource::from(img.clone()));
+        }
         view.preview_data
             .get(&idx)
-            .cloned()
-            .or_else(|| view.thumbnail_data.get(&idx).cloned())
+            .map(|i| ImageSource::from(i.clone()))
+            .or_else(|| view.thumbnail_data.get(&idx).map(|i| ImageSource::from(i.clone())))
     });
+    // 加载状态：预览未就绪（显示模糊缩略图兜底）/ 全分辨率加载中（显示放大略软的预览）
+    let loading_preview = focused.is_some_and(|m| !view.preview_data.contains_key(&m.index));
+    let loading_fullres = need_full
+        && focused.is_some_and(|m| !view.fullres_data.contains_key(&m.index));
 
     // 图片区尺寸：优先用 canvas 实测值（border-box），首帧回退手算。
     // 手算只作首帧兜底：视口 − 左右 rail − 左右面板 − 边框。
-    let measured_rc = view.preview_area_size.clone();
+    let measured_rc = view.preview_area_bounds.clone();
     let m = *measured_rc.borrow();
-    let (area_w, area_h) = if m.0 > 0. {
-        m
+    let (area_w, area_h) = if m.2 > 0. {
+        (m.2, m.3)
     } else {
         let viewport_w: f32 = window.viewport_size().width.into();
         let viewport_h: f32 = window.viewport_size().height.into();
@@ -81,11 +88,41 @@ pub fn render_preview(
     };
 
     // 手动计算居中偏移（替代 flex items_center/justify_center），缩放时从中心展开
-    let img_x = ((container_w - disp_w) / 2.).max(-disp_w).min(0.) + view.preview_pan.0;
-    let img_y = ((container_h - disp_h) / 2.).max(-disp_h).min(0.) + view.preview_pan.1;
+    let img_x = crate::state::app::preview_center_offset(disp_w, container_w) + view.preview_pan.0;
+    let img_y = crate::state::app::preview_center_offset(disp_h, container_h) + view.preview_pan.1;
 
 
     let view_handle = cx.entity().downgrade();
+
+    // 加载状态浮层（ContextMenu 包装后无 .when，提前构建 Option 元素）
+    let fullres_chip: Option<AnyElement> = loading_fullres.then(|| {
+        // 全分辨率加载中提示（当前显示的是 1600px 预览的放大）
+        div()
+            .absolute()
+            .top(px(24.))
+            .right(px(24.))
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(theme::colors().surface_background)
+            .text_color(theme::colors().text_muted)
+            .child("全分辨率加载中…")
+            .into_any_element()
+    });
+    let preview_chip: Option<AnyElement> = (loading_preview && image_source.is_some()).then(|| {
+        // 预览解码中（当前显示模糊缩略图兜底）
+        div()
+            .absolute()
+            .top(px(24.))
+            .right(px(24.))
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(theme::colors().surface_background)
+            .text_color(theme::colors().text_muted)
+            .child("预览解码中…")
+            .into_any_element()
+    });
 
     div()
         .flex()
@@ -154,11 +191,16 @@ pub fn render_preview(
                                 };
                                 if let Some(view) = vh.upgrade() {
                                     let _ = cx.update_entity(&view, |root_view, root_cx| {
-                                        if delta_y > 0. {
-                                            root_view.dispatch_action(crate::action::Action::ZoomIn, root_cx);
+                                        // 以光标为中心缩放：窗口坐标 → 容器坐标（图片区原点 + p_4 内边距）
+                                        let b = *root_view.preview_area_bounds.borrow();
+                                        let cursor = if b.2 > 0. {
+                                            let px: f32 = event.position.x.into();
+                                            let py: f32 = event.position.y.into();
+                                            Some((px - b.0 - 16., py - b.1 - 16.))
                                         } else {
-                                            root_view.dispatch_action(crate::action::Action::ZoomOut, root_cx);
-                                        }
+                                            None
+                                        };
+                                        root_view.zoom_step(delta_y > 0., cursor, root_cx);
                                     });
                                 }
                             }
@@ -187,6 +229,7 @@ pub fn render_preview(
                                             let cx_pos: f32 = pos.x.into();
                                             let cy_pos: f32 = pos.y.into();
                                             root_view.preview_pan = (spx + (cx_pos - sx), spy + (cy_pos - sy));
+                                            root_view.clamp_preview_pan();
                                             root_cx.notify();
                                         }
                                     });
@@ -229,13 +272,15 @@ pub fn render_preview(
                             canvas({
                                 let vh = view_handle.clone();
                                 move |bounds, _window, cx| {
+                                    let x: f32 = bounds.origin.x.into();
+                                    let y: f32 = bounds.origin.y.into();
                                     let w: f32 = bounds.size.width.into();
                                     let h: f32 = bounds.size.height.into();
                                     let changed = {
                                         let mut slot = measured_rc.borrow_mut();
-                                        let changed = (slot.0 - w).abs() > 0.5
-                                            || (slot.1 - h).abs() > 0.5;
-                                        *slot = (w, h);
+                                        let changed = (slot.2 - w).abs() > 0.5
+                                            || (slot.3 - h).abs() > 0.5;
+                                        *slot = (x, y, w, h);
                                         changed
                                     };
                                     if changed {
@@ -259,17 +304,10 @@ pub fn render_preview(
                                     focused.and_then(|meta| {
                                         let status = meta.recognition_status?;
                                         let bbox = meta.bird_bbox?;
-                                        let (border_color, chip_bg, chip_text) = match status {
-                                            RecognitionStatus::Confirmed => (
-                                                theme::colors().success,
-                                                theme::colors().success_background,
-                                                theme::colors().success,
-                                            ),
-                                            RecognitionStatus::NeedsReview => (
-                                                theme::colors().warning,
-                                                theme::colors().warning_background,
-                                                theme::colors().warning,
-                                            ),
+                                        // 只画边框+淡填充，不叠加鸟种名标签（会遮挡鸟体；名字看右侧信息面板）
+                                        let border_color = match status {
+                                            RecognitionStatus::Confirmed => theme::colors().success,
+                                            RecognitionStatus::NeedsReview => theme::colors().warning,
                                             _ => return None,
                                         };
                                         let mut fill = border_color;
@@ -278,14 +316,6 @@ pub fn render_preview(
                                         let t = bbox.y1 * disp_h;
                                         let w = (bbox.x2 - bbox.x1) * disp_w;
                                         let h_val = (bbox.y2 - bbox.y1) * disp_h;
-                                        let label = if let Some(name) = &meta.bird_name {
-                                            match meta.bird_confidence {
-                                                Some(conf) => format!("{} {:.0}%", name, conf),
-                                                None => name.clone(),
-                                            }
-                                        } else {
-                                            String::new()
-                                        };
                                         Some(
                                             div()
                                                 .absolute()
@@ -296,25 +326,6 @@ pub fn render_preview(
                                                 .border_2()
                                                 .border_color(border_color)
                                                 .bg(fill)
-                                                .overflow_hidden()
-                                                .child(
-                                                    div()
-                                                        .absolute()
-                                                        .top(px(0.))
-                                                        .left(px(0.))
-                                                        .max_w(px(w))
-                                                        .child(
-                                                            div()
-                                                                .bg(chip_bg)
-                                                                .text_color(chip_text)
-                                                                
-                                                                .line_height(relative(1.2))
-                                                                .px_1()
-                                                                .py_0p5()
-                                                                .rounded_sm()
-                                                                .child(label)
-                                                        )
-                                                )
                                                 .into_any_element()
                                         )
                                     })
@@ -337,7 +348,22 @@ pub fn render_preview(
                                 container.into_any_element()
 
                             }
-                            None => div()
+                            None => {
+                                if loading_preview {
+                                    // 有焦点但预览/缩略图都未就绪：加载中指示
+                                    div()
+                                        .flex()
+                                        .size_full()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            div()
+                                                .text_color(theme::colors().text_muted)
+                                                .child("加载中…"),
+                                        )
+                                        .into_any_element()
+                                } else {
+                                div()
                                 .flex()
                                 .flex_col()
                                 .items_center()
@@ -352,8 +378,12 @@ pub fn render_preview(
                                         .text_color(theme::colors().text_muted)
                                         .child("从网格中选择图片进行预览"),
                                 )
-                                .into_any_element(),
-                        }),
+                                .into_any_element()
+                                }
+                            }
+                        })
+                        .children(fullres_chip)
+                        .children(preview_chip)
                 )
         )
         .child(crate::ui::filmstrip::render_filmstrip(view, cx))
@@ -377,8 +407,34 @@ pub fn render_preview(
                         .child(zoom_label),
                 )
                 .child(zoom_button(IconName::Plus, "zoom-in", crate::action::Action::ZoomIn, false, view_handle.clone()))
-                .child(zoom_button(IconName::Frame, "zoom-fit", crate::action::Action::ZoomToFit, false, view_handle.clone()))
+                .child(zoom_button(IconName::Frame, "zoom-fit", crate::action::Action::ZoomToFit, zoom == 1.0, view_handle.clone()))
+                .child(zoom_text_button("1:1", "zoom-actual", crate::action::Action::ZoomActual, zoom == 0.0, view_handle.clone()))
         )
+}
+
+/// 缩放栏文本按钮（如 "1:1"），样式与 zoom_button 一致
+fn zoom_text_button(label: &'static str, id: &str, action: crate::action::Action, active: bool, view_handle: WeakEntity<RootView>) -> impl IntoElement {
+    let vh = view_handle.clone();
+    let owned_id = id.to_string();
+    div()
+        .id(ElementId::Name(format!("zoom-{owned_id}").into()))
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(36.))
+        .h(px(36.))
+        .rounded_md()
+        .bg(if active { theme::colors().element_hover } else { theme::colors().element_background })
+        .text_color(theme::colors().text)
+        .cursor(CursorStyle::PointingHand)
+        .child(label)
+        .on_click(move |_event: &ClickEvent, _window, cx| {
+            if let Some(view) = vh.upgrade() {
+                let _ = cx.update_entity(&view, |root_view, root_cx| {
+                    root_view.dispatch_action(action, root_cx);
+                });
+            }
+        })
 }
 
 fn zoom_button(icon: IconName, id: &str, action: crate::action::Action, active: bool, view_handle: WeakEntity<RootView>) -> impl IntoElement {

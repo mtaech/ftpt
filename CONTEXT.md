@@ -9,15 +9,15 @@
 
 ### Capture（拍摄）
 
-一次快门产生的拍摄。一个 **stem** 下的所有源文件聚合成一个 Capture。
+一个图片文件即一个 Capture。JPG 与 RAW 不再按 stem 堆叠，各自独立成项。
 
-- 示例：`DSC_0001.jpg` + `DSC_0001.NEF` → 一个 Capture
+- 示例：`DSC_0001.jpg` → 一个 Capture；`DSC_0001.NEF` → 另一个 Capture
 
 ### SourceFile（源文件）
 
 
 - 属性：路径、格式（ImageFormat）、文件大小
-- 一个 Capture 包含 1..n 个 SourceFile
+- 一个 Capture 恰好包含 1 个 SourceFile
 
 ### ImageFormat（图片格式）
 
@@ -30,12 +30,6 @@
 
 - 包含：base_name, primary_path, primary_format, stack_count, file_size, date_taken, extensions
 - 设计目的：避免 UI 层加载完整文件路径列表（批量展示 5000+ 条目时节省内存和 FFI 开销）
-
-### Stack（堆叠）
-
-一个 Capture 中除主显示文件外的文件。`stack_count` 表示额外源文件的数量。
-
-- 示例：`DSC_0001.jpg`（主）+ `DSC_0001.NEF` → stack_count = 1
 
 ---
 
@@ -85,7 +79,7 @@ Pick（入选）或 Reject（淘汰）。持久化到 `xmp_meta` 表。
 
 ### FilterCriteria（筛选条件）
 
-组合式筛选器：文件名文本搜索、日期范围、评分下限、颜色标签、旗标、格式过滤、仅显示有配对的。
+组合式筛选器：文件名文本搜索、日期范围、评分下限、颜色标签、旗标、格式过滤。
 
 ### SortBy（排序方式）
 

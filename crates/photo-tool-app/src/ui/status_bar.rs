@@ -1,4 +1,4 @@
-use gpui::*;
+use gpui::{prelude::FluentBuilder, *};
 use gpui_component::{Icon, IconName, Sizable, h_flex};
 
 use crate::action::Action;
@@ -13,6 +13,8 @@ pub fn render_status_bar(
 ) -> impl IntoElement {
     let vh = cx.entity().downgrade();
     let total = view.captures.len();
+    let filtered = view.display_order.len();
+    let filters_active = view.has_active_filters();
     let selected_count = view.selected.len();
 
     let path_str = view
@@ -25,7 +27,16 @@ pub fn render_status_bar(
     } else {
         path_str.to_string()
     };
-    let file_count = if view.dir_path.is_some() { total } else { 0 };
+    // 筛选生效时显示「筛选后 / 总数」，否则只显示总数
+    let (file_count, total_count) = if view.dir_path.is_some() {
+        if filters_active {
+            (filtered, Some(total))
+        } else {
+            (total, None)
+        }
+    } else {
+        (0, None)
+    };
     let scanning = view.scan_task.is_some();
 
     let tooltip_text = if view.batch_in_progress {
@@ -77,9 +88,23 @@ pub fn render_status_bar(
                 .child(
                     div()
                         .font_family(theme::MONO_FONT_FAMILY)
-                        .text_color(theme::colors().text_muted)
+                        .text_color(if filters_active {
+                            theme::colors().text_accent
+                        } else {
+                            theme::colors().text_muted
+                        })
                         .child(file_count.to_string()),
                 )
+                .when_some(total_count, |parent, tc| {
+                    parent
+                        .child(div().text_color(theme::colors().text_muted).child("/"))
+                        .child(
+                            div()
+                                .font_family(theme::MONO_FONT_FAMILY)
+                                .text_color(theme::colors().text_muted)
+                                .child(tc.to_string()),
+                        )
+                })
                 .child(div().text_color(theme::colors().text_muted).child("文件"))
                 .child(div().text_color(theme::colors().text_muted).child("·"))
                 .child(

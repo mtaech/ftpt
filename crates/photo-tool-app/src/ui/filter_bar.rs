@@ -1,6 +1,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _, DropdownButton};
+use gpui_component::combobox::Combobox;
 use gpui_component::rating::Rating as GcRating;
 use gpui_component::{h_flex, v_flex, Icon, IconName, Sizable};
 use photo_domain::{Flag, ImageFormat, Rating, RecognitionFilter, SortBy, SortDirection};
@@ -31,10 +32,18 @@ fn recognition_filter_label(f: RecognitionFilter) -> &'static str {
 }
 
 /// 可折叠的网格视图筛选栏（含排序控件）
+///
+/// 鸟种下拉的数据随扫描/识别完成变化：创建 ComboboxState 需要 Window，
+/// 故由本函数 render 时消费 `bird_options_dirty` 标记并重建实体。
 pub fn render_filter_bar(
-    view: &RootView,
+    view: &mut RootView,
+    window: &mut Window,
     cx: &mut Context<RootView>,
-) -> impl IntoElement {
+) -> impl IntoElement + use<> {
+    if view.bird_options_dirty {
+        view.rebuild_bird_select(window, cx);
+    }
+    let view: &RootView = view;
     let vh = cx.entity().downgrade();
     let expanded = view.filter_bar_expanded;
     let has_filters = view.has_active_filters();
@@ -43,12 +52,22 @@ pub fn render_filter_bar(
 
     // ── 折叠态：筛选摘要芯片 ──
     let mut summary_chips: Vec<AnyElement> = Vec::new();
-    if let Some(text) = &view.filter.text_search {
+    if !view.filter.bird_names.is_empty() {
+        let names = &view.filter.bird_names;
+        let label = if names.len() == 1 {
+            format!("鸟种: {}", names[0])
+        } else {
+            format!("鸟种: {} 等{}种", names[0], names.len())
+        };
         summary_chips.push(summary_chip(
-            "sum-search",
-            format!("搜索: {text}"),
+            "sum-birds",
+            label,
             vh.clone(),
-            |view, _| view.filter.text_search = None,
+            |view, _| {
+                view.filter.bird_names.clear();
+                // 下拉选中集独立于 filter，标记重建以同步清空
+                view.bird_options_dirty = true;
+            },
         ));
     }
     if let Some(r) = view.filter.min_rating {
@@ -79,14 +98,6 @@ pub fn render_filter_bar(
             format!("识别: {}", recognition_filter_label(view.filter.recognition_filter)),
             vh.clone(),
             |view, _| view.filter.recognition_filter = RecognitionFilter::All,
-        ));
-    }
-    if let Some(p) = view.filter.paired_only {
-        summary_chips.push(summary_chip(
-            "sum-paired",
-            if p { "仅配对" } else { "仅单张" },
-            vh.clone(),
-            |view, _| view.filter.paired_only = None,
         ));
     }
     if let Some(fmt) = &view.filter.format_filter {
@@ -218,7 +229,7 @@ pub fn render_filter_bar(
             .gap_2()
             .border_t_1()
             .border_color(theme::colors().border_variant)
-            .child(filter_group("搜索", render_text_search(view, cx)))
+            .child(filter_group("鸟种", render_bird_select(view)))
             .child(filter_group("评分", render_rating_filter(view, cx)))
             .child(filter_group("旗标", render_flag_filter(view, cx)))
             .child(filter_group("识别", render_recognition_filter(view, cx)))
@@ -356,111 +367,14 @@ fn summary_chip(
 
 // ── 条件组（从 sidebar 移植，适配水平过滤栏布局）─────────────────
 
-fn render_text_search(view: &RootView, cx: &mut Context<RootView>) -> impl IntoElement {
-    let current = view.filter.text_search.as_deref().unwrap_or("");
-    let placeholder = if current.is_empty() {
-        "输入名称...".to_string()
-    } else {
-        current.to_string()
-    };
-    let placeholder_color = if current.is_empty() {
-        theme::colors().text_muted
-    } else {
-        theme::colors().text
-    };
-    let has_text = view.filter.text_search.is_some();
-
-    // pill 形搜索框
-    div()
-        .bg(theme::colors().element_background)
-        .border_1()
-        .border_color(theme::colors().border_variant)
-        .rounded_full()
-        .px_3()
-        .py_1()
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .child(
-                    Icon::new(IconName::Search)
-                        .small()
-                        .text_color(theme::colors().text_muted),
-                )
-                .child(
-                    div()
-                        .id(ElementId::Name("fbar-text-search".into()))
-                        .flex_grow(1.0)
-                        .h(px(28.))
-                        .px_1()
-                        .text_color(placeholder_color)
-                        .cursor_text()
-                        .child(placeholder)
-                        .focusable()
-                        .on_key_down(
-                            cx.listener(|view, event: &KeyDownEvent, _window, cx| {
-                                let changed = match event.keystroke.key.as_str() {
-                                    "backspace" => {
-                                        let mut text =
-                                            view.filter.text_search.clone().unwrap_or_default();
-                                        text.pop();
-                                        view.filter.text_search =
-                                            if text.is_empty() { None } else { Some(text) };
-                                        true
-                                    }
-                                    "escape" => {
-                                        let had = view.filter.text_search.is_some();
-                                        view.filter.text_search = None;
-                                        had
-                                    }
-                                    _ => {
-                                        if let Some(ch) = &event.keystroke.key_char {
-                                            if ch.chars().all(|c| !c.is_control()) {
-                                                let mut text = view
-                                                    .filter
-                                                    .text_search
-                                                    .clone()
-                                                    .unwrap_or_default();
-                                                text.push_str(ch);
-                                                view.filter.text_search = Some(text);
-                                                true
-                                            } else {
-                                                false
-                                            }
-                                        } else {
-                                            false
-                                        }
-                                    }
-                                };
-                                if changed {
-                                    view.apply_filter_and_sort();
-                                    cx.notify();
-                                }
-                            }),
-                        ),
-                )
-                .when(has_text, |this| {
-                    this.child(
-                        div()
-                            .id(ElementId::Name("fbar-clear-text".into()))
-                            .cursor_pointer()
-                            .child(
-                                Icon::new(IconName::Close)
-                                    .xsmall()
-                                    .text_color(theme::colors().error),
-                            )
-                            .on_click(
-                                cx.listener(|view, _event: &ClickEvent, _window, cx| {
-                                    view.filter.text_search = None;
-                                    view.apply_filter_and_sort();
-                                    cx.notify();
-                                }),
-                            ),
-                    )
-                }),
-        )
+fn render_bird_select(view: &RootView) -> impl IntoElement + use<> {
+    Combobox::new(&view.bird_select)
+        .placeholder("选择鸟种...")
+        .search_placeholder("搜索鸟种...")
+        .cleanable(true)
+        .menu_width(px(240.))
+        .w(px(220.))
+        .small()
 }
 
 fn render_rating_filter(view: &RootView, cx: &mut Context<RootView>) -> impl IntoElement {

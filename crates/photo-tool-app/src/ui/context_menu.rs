@@ -71,6 +71,7 @@ pub fn capture_menu(
             .menu("放大", cmd(Action::ZoomIn))
             .menu("缩小", cmd(Action::ZoomOut))
             .menu("适应窗口", cmd(Action::ZoomToFit))
+            .menu("实际像素 (100%)", cmd(Action::ZoomActual))
     } else {
         menu
     };

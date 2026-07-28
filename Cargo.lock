@@ -5109,6 +5109,8 @@ dependencies = [
  "tracing-log",
  "tracing-subscriber",
  "zed-font-kit",
+ "zune-core 0.5.1",
+ "zune-jpeg 0.5.15",
 ]
 
 [[package]]
