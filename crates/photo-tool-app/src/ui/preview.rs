@@ -210,10 +210,17 @@ pub fn render_preview(
                             move |event: &MouseDownEvent, _window, cx| {
                                 if let Some(view) = vh.upgrade() {
                                     let pos = event.position;
-                                    let _ = cx.update_entity(&view, |root_view, _cx| {
+                                    let shift = event.modifiers.shift;
+                                    let _ = cx.update_entity(&view, |root_view, root_cx| {
                                         let x: f32 = pos.x.into();
                                         let y: f32 = pos.y.into();
-                                        root_view.preview_drag = Some((x, y, root_view.preview_pan.0, root_view.preview_pan.1));
+                                        // Shift+拖拽 = 手动框选识别；普通拖拽 = 平移
+                                        if shift && root_view.get_focused_capture().is_some() {
+                                            root_view.box_draw = Some((x, y, x, y));
+                                            root_cx.notify();
+                                        } else {
+                                            root_view.preview_drag = Some((x, y, root_view.preview_pan.0, root_view.preview_pan.1));
+                                        }
                                     });
                                 }
                             }
@@ -225,9 +232,15 @@ pub fn render_preview(
                                 if let Some(view) = vh.upgrade() {
                                     let pos = event.position;
                                     let _ = cx.update_entity(&view, |root_view, root_cx| {
+                                        let cx_pos: f32 = pos.x.into();
+                                        let cy_pos: f32 = pos.y.into();
+                                        // 画框优先：更新当前角点
+                                        if let Some((sx, sy, _, _)) = root_view.box_draw {
+                                            root_view.box_draw = Some((sx, sy, cx_pos, cy_pos));
+                                            root_cx.notify();
+                                            return;
+                                        }
                                         if let Some((sx, sy, spx, spy)) = root_view.preview_drag {
-                                            let cx_pos: f32 = pos.x.into();
-                                            let cy_pos: f32 = pos.y.into();
                                             root_view.preview_pan = (spx + (cx_pos - sx), spy + (cy_pos - sy));
                                             root_view.clamp_preview_pan();
                                             root_cx.notify();
@@ -240,7 +253,11 @@ pub fn render_preview(
                             let vh = view_handle.clone();
                             move |_event: &MouseUpEvent, _window, cx| {
                                 if let Some(view) = vh.upgrade() {
-                                    let _ = cx.update_entity(&view, |root_view, _cx| {
+                                    let _ = cx.update_entity(&view, |root_view, root_cx| {
+                                        // 画框结束 → 提交手动框选识别（内部清除 box_draw）
+                                        if root_view.box_draw.is_some() {
+                                            root_view.submit_box_draw(root_cx);
+                                        }
                                         root_view.preview_drag = None;
                                     });
                                 }
@@ -333,6 +350,35 @@ pub fn render_preview(
                                     None
                                 };
 
+                                // 鸟眼角标（info 色 L 形四角标，不遮挡眼睛本体；随 V 键 bbox_visible 开关）
+                                let eye_el: Option<AnyElement> = if view.bbox_visible {
+                                    view.focused_recognition
+                                        .as_ref()
+                                        .and_then(|r| r.eye_bbox)
+                                        .map(|eye| {
+                                            eye_corner_marks(eye, disp_w, disp_h, theme::colors().info)
+                                        })
+                                } else {
+                                    None
+                                };
+
+                                // 手动框选已提交、识别中的 pending 框（accent 色，区别于正式检测框）
+                                let pending_el: Option<AnyElement> = view.pending_region.map(|bbox| {
+                                    let accent = theme::colors().text_accent;
+                                    let mut fill = accent;
+                                    fill.a = 0.10;
+                                    div()
+                                        .absolute()
+                                        .left(px(bbox.x1 * disp_w))
+                                        .top(px(bbox.y1 * disp_h))
+                                        .w(px((bbox.x2 - bbox.x1) * disp_w))
+                                        .h(px((bbox.y2 - bbox.y1) * disp_h))
+                                        .border_2()
+                                        .border_color(accent)
+                                        .bg(fill)
+                                        .into_any_element()
+                                });
+
                                 let mut container = div()
                                     .absolute()
                                     .left(px(img_x + pad_px))
@@ -343,6 +389,12 @@ pub fn render_preview(
                                             .h(px(disp_h)),
                                     );
                                 if let Some(el) = bbox_el {
+                                    container = container.child(el);
+                                }
+                                if let Some(el) = eye_el {
+                                    container = container.child(el);
+                                }
+                                if let Some(el) = pending_el {
                                     container = container.child(el);
                                 }
                                 container.into_any_element()
@@ -384,6 +436,22 @@ pub fn render_preview(
                         })
                         .children(fullres_chip)
                         .children(preview_chip)
+                        // Shift+拖拽画框中的实时框（窗口坐标 → 图片区相对坐标）
+                        .children(view.box_draw.map(|(x1, y1, x2, y2)| {
+                            let accent = theme::colors().text_accent;
+                            let mut fill = accent;
+                            fill.a = 0.08;
+                            div()
+                                .absolute()
+                                .left(px(x1.min(x2) - m.0))
+                                .top(px(y1.min(y2) - m.1))
+                                .w(px((x2 - x1).abs()))
+                                .h(px((y2 - y1).abs()))
+                                .border_2()
+                                .border_color(accent)
+                                .bg(fill)
+                                .into_any_element()
+                        }))
                 )
         )
         .child(crate::ui::filmstrip::render_filmstrip(view, cx))
@@ -460,4 +528,49 @@ fn zoom_button(icon: IconName, id: &str, action: crate::action::Action, active: 
                 });
             }
         })
+}
+
+/// 鸟眼角标：眼框四角的 L 形标记（不遮挡眼睛本体）。
+///
+/// 输入为归一化全图坐标，输出元素在显示图容器内绝对定位（与检测框同坐标系）。
+fn eye_corner_marks(eye: photo_domain::BBox, disp_w: f32, disp_h: f32, color: Hsla) -> AnyElement {
+    let l = eye.x1 * disp_w;
+    let t = eye.y1 * disp_h;
+    let w = (eye.x2 - eye.x1) * disp_w;
+    let h = (eye.y2 - eye.y1) * disp_h;
+    let thick = 2.0;
+    // 臂长随框大小缩放，夹紧 [4, 14] px
+    let arm = (w.min(h) * 0.35).clamp(4.0, 14.0);
+
+    let h_arm = |x: f32, y: f32| {
+        div()
+            .absolute()
+            .left(px(x))
+            .top(px(y))
+            .w(px(arm))
+            .h(px(thick))
+            .bg(color)
+    };
+    let v_arm = |x: f32, y: f32| {
+        div()
+            .absolute()
+            .left(px(x))
+            .top(px(y))
+            .w(px(thick))
+            .h(px(arm))
+            .bg(color)
+    };
+
+    div()
+        .absolute()
+        .size_full()
+        .child(h_arm(l, t))
+        .child(v_arm(l, t))
+        .child(h_arm(l + w - arm, t))
+        .child(v_arm(l + w - thick, t))
+        .child(h_arm(l, t + h - thick))
+        .child(v_arm(l, t + h - arm))
+        .child(h_arm(l + w - arm, t + h - thick))
+        .child(v_arm(l + w - thick, t + h - arm))
+        .into_any_element()
 }

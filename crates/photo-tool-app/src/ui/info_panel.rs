@@ -627,6 +627,10 @@ fn render_recognition_content(
                             colors.success_border,
                         )),
                 )
+                // 鸟眼锐度
+                .when_some(r.eye_sharpness, |this, s| {
+                    this.child(eye_sharpness_row(&colors, s))
+                })
                 .into_any_element()
         }
         RecognitionStatus::NeedsReview => {
@@ -661,6 +665,10 @@ fn render_recognition_content(
                             .child(format!("最接近：{} {:.1}%", name, conf)),
                     )
                 })
+                // 鸟眼锐度
+                .when_some(r.eye_sharpness, |this, s| {
+                    this.child(eye_sharpness_row(&colors, s))
+                })
                 .into_any_element()
         }
         RecognitionStatus::Unrecognized => {
@@ -674,9 +682,40 @@ fn render_recognition_content(
                     colors.element_background,
                     colors.border_variant,
                 ))
+                .when_some(r.eye_sharpness, |this, s| {
+                    this.child(eye_sharpness_row(&colors, s))
+                })
                 .into_any_element()
         }
     }
+}
+
+/// 鸟眼锐度行：分数 + info 图标（悬浮显示评分公式）
+fn eye_sharpness_row(colors: &theme::ThemeColors, score: f32) -> AnyElement {
+    h_flex()
+        .gap_1()
+        .items_center()
+        .child(
+            div()
+                .text_color(colors.text_muted)
+                .child(format!("眼锐度 {:.2}", score)),
+        )
+        .child(
+            div()
+                .id("eye-sharpness-help")
+                .tooltip(|window, cx| {
+                    gpui_component::tooltip::Tooltip::new(
+                        "0.5·ln(1+拉普拉斯方差) + 0.3·ln(1+梯度幅值均值) + 0.2·ln(1+边缘密度)；仅保证单调性，越高越锐利，权重待样片标定",
+                    )
+                    .build(window, cx)
+                })
+                .child(
+                    gpui_component::Icon::new(IconName::Info)
+                        .small()
+                        .text_color(colors.text_muted),
+                ),
+        )
+        .into_any_element()
 }
 
 /// 识别动作按钮行：重新识别 + 切换检测框

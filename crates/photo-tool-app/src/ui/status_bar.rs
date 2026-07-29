@@ -226,7 +226,7 @@ pub fn render_status_bar(
                         } else {
                             theme::colors().text_muted
                         })
-                        .child(if scanning { "扫描中…" } else { "就绪" })
+                        .child(if scanning { "扫描中…" } else { "就绪 · Shift+拖拽框选识别" })
                         .into_any_element()
                 })
 

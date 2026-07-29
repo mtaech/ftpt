@@ -12,7 +12,7 @@ use gpui_component::select::{SearchableVec, SelectEvent, SelectState};
 use std::sync::LazyLock;
 use photo_config::AppConfig;
 use photo_domain::{
-    BatchOpType, CaptureMeta, ColorLabel, FilterCriteria, Flag, Rating,
+    BatchOpType, BBox, CaptureMeta, ColorLabel, FilterCriteria, Flag, Rating,
     SortBy, SortDirection,
 };
 use photo_recognize::Recognizer;
@@ -96,6 +96,42 @@ pub(crate) fn pan_after_cursor_zoom(
         axis(old_disp.0, new_disp.0, container.0, pan.0, cursor.0),
         axis(old_disp.1, new_disp.1, container.1, pan.1, cursor.1),
     )
+}
+
+/// 窗口坐标 → 图片归一化坐标（0-1，相对原图）。
+///
+/// 与 preview.rs 渲染公式严格一致（改动需同步）：
+/// 图片左上角窗口坐标 = 图片区原点 + p_4 内边距 + 居中偏移 + 平移。
+/// 返回值可能出界（超出 [0,1]），由调用方钳制。
+pub(crate) fn window_pos_to_image_norm(
+    wx: f32,
+    wy: f32,
+    area: (f32, f32, f32, f32),
+    img: (u32, u32),
+    zoom: f32,
+    pan: (f32, f32),
+) -> Option<(f32, f32)> {
+    if area.2 <= 0. || img.0 == 0 || img.1 == 0 {
+        return None;
+    }
+    let pad = 16.0;
+    let container_w = (area.2 - pad * 2.).max(1.);
+    let container_h = (area.3 - pad * 2.).max(1.);
+    let scale = (container_w / img.0 as f32)
+        .min(container_h / img.1 as f32)
+        .min(1.0);
+    let (fit_w, fit_h) = (img.0 as f32 * scale, img.1 as f32 * scale);
+    let (disp_w, disp_h) = if zoom == 0.0 {
+        (img.0 as f32, img.1 as f32)
+    } else {
+        (fit_w * zoom, fit_h * zoom)
+    };
+    if disp_w <= 0. || disp_h <= 0. {
+        return None;
+    }
+    let img_left = area.0 + pad + preview_center_offset(disp_w, container_w) + pan.0;
+    let img_top = area.1 + pad + preview_center_offset(disp_h, container_h) + pan.1;
+    Some(((wx - img_left) / disp_w, (wy - img_top) / disp_h))
 }
 
 /// 将 JPEG/常规图字节解码为可直接绘制的 RenderImage（worker 线程执行）。
@@ -193,6 +229,10 @@ pub struct RootView {
     pub preview_pan: (f32, f32),
     /// 拖拽起始状态：(鼠标x, 鼠标y, 起始pan_x, 起始pan_y)
     pub preview_drag: Option<(f32, f32, f32, f32)>,
+    /// Shift+拖拽手动框选中：(起始x, 起始y, 当前x, 当前y)（窗口坐标）
+    pub box_draw: Option<(f32, f32, f32, f32)>,
+    /// 已提交、等待识别结果的手动框（归一化坐标，渲染「识别中」overlay）
+    pub pending_region: Option<BBox>,
     // ── 批量文件操作 ──
     pub batch_compare_dir: String,
     pub batch_source_format: String,
@@ -301,6 +341,8 @@ impl RootView {
             preview_zoom: 1.0,
             preview_pan: (0.0, 0.0),
             preview_drag: None,
+            box_draw: None,
+            pending_region: None,
             thumbnail_data: HashMap::new(),
             preview_data: HashMap::new(),
             preview_order: VecDeque::new(),
@@ -2108,6 +2150,173 @@ impl RootView {
         );
     }
 
+    /// 窗口坐标 → 图片归一化坐标（0-1，相对原图），委托给同名纯函数。
+    pub(crate) fn window_pos_to_image_norm(&self, wx: f32, wy: f32) -> Option<(f32, f32)> {
+        let area = *self.preview_area_bounds.borrow();
+        let meta = self.get_focused_capture()?;
+        let img = (meta.image_width?, meta.image_height?);
+        window_pos_to_image_norm(wx, wy, area, img, self.preview_zoom, self.preview_pan)
+    }
+
+    /// Shift+拖拽画框结束：换算为归一化 bbox 并触发手动框选识别。
+    ///
+    /// 过小的框（任一方向 <8 显示像素，多为误触）直接忽略；识别进行中拒绝并提示。
+    pub(crate) fn submit_box_draw(&mut self, cx: &mut Context<Self>) {
+        let Some((x1, y1, x2, y2)) = self.box_draw.take() else {
+            return;
+        };
+        cx.notify();
+        if (x2 - x1).abs() < 8. || (y2 - y1).abs() < 8. {
+            return;
+        }
+        if self.recognizing_single.is_some() || self.batch_recognizing {
+            self.show_toast("识别进行中，稍后再试", cx);
+            return;
+        }
+        let (Some((ax1, ay1)), Some((ax2, ay2))) = (
+            self.window_pos_to_image_norm(x1, y1),
+            self.window_pos_to_image_norm(x2, y2),
+        ) else {
+            return;
+        };
+        // 反向拖拽归一化；出界由 BBox::new 钳制到 [0,1]
+        let bbox = BBox::new(ax1.min(ax2), ay1.min(ay2), ax1.max(ax2), ay1.max(ay2));
+        self.pending_region = Some(bbox);
+        self.recognize_region_single(bbox, cx);
+    }
+
+    /// 手动框选区域识别（预览界面 Shift+拖拽画框）。
+    ///
+    /// 跳过 YOLO 检测，直接对用户框分类；结果覆盖该文件旧识别行。
+    fn recognize_region_single(&mut self, bbox: BBox, cx: &mut Context<Self>) {
+        if self.recognizing_single.is_some() || self.batch_recognizing {
+            self.pending_region = None;
+            self.show_toast("识别进行中，稍后再试", cx);
+            return;
+        }
+        let Some(focus_di) = self.focus_index else {
+            self.pending_region = None;
+            return;
+        };
+        let Some(&capture_idx) = self.display_order.get(focus_di) else {
+            self.pending_region = None;
+            return;
+        };
+        let Some(meta) = self.captures.get(capture_idx) else {
+            self.pending_region = None;
+            return;
+        };
+        let dir = match self.dir_path.clone() {
+            Some(d) => d,
+            None => {
+                self.pending_region = None;
+                return;
+            }
+        };
+        if self.folder_db.is_none() {
+            self.pending_region = None;
+            return;
+        }
+
+        let primary_path = std::path::PathBuf::from(&meta.primary_path);
+        let rel_path = primary_path
+            .strip_prefix(&dir)
+            .ok()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        let rel_path_clone = rel_path.clone();
+
+        let Some(capture) = self.build_capture_from_meta(meta) else {
+            tracing::error!("构建 Capture 失败: {}", meta.base_name);
+            self.pending_region = None;
+            return;
+        };
+
+        self.recognizing_single = Some(capture_idx);
+        self.recognize_stage = Some("分类中".into());
+        cx.notify();
+
+        self.worker.spawn(
+            cx,
+            move || {
+                // 工作线程侧懒加载 Recognizer（与单张识别同路径）
+                let rec_result = (|| -> Result<photo_domain::Recognition, String> {
+                    let exe_dir = std::env::current_exe()
+                        .map_err(|e| format!("获取 exe 路径失败: {e}"))?
+                        .parent()
+                        .ok_or_else(|| "无法确定 exe 目录".to_string())?
+                        .to_path_buf();
+                    let models_dir = exe_dir.join("models");
+                    let catalog_db = exe_dir.join("data").join("pica_ref.db");
+                    let mut recognizer =
+                        photo_recognize::Recognizer::new(&models_dir, &catalog_db)
+                            .map_err(|e| format!("加载识别模型失败: {e}"))?;
+                    tracing::info!("手动框选识别开始，推理后端: {}", recognizer.backend());
+                    recognizer
+                        .recognize_region(&capture, bbox, None)
+                        .map_err(|e| format!("识别失败: {e}"))
+                })();
+                (rec_result, rel_path_clone, capture_idx, dir)
+            },
+            move |this, (result, rel, idx, _scan_dir), cx| {
+                this.pending_region = None;
+                match result {
+                    Ok(rec) => {
+                        // upsert 到 FolderDb（覆盖旧识别行）
+                        if let Some(db) = &this.folder_db {
+                            if let Err(e) = db.upsert_recognition(&rel, &rec) {
+                                tracing::error!("写入识别结果失败 {}: {e}", rel);
+                            }
+                        }
+                        // enrich CaptureMeta
+                        if let Some(meta) = this.captures.iter_mut().find(|m| m.index == idx) {
+                            meta.enrich_with_recognition(&rec);
+                        }
+                        // 刷新 focused_recognition；强制显示新检测框
+                        this.refresh_focused_recognition();
+                        this.recognizing_single = None;
+                        this.recognize_stage = None;
+                        this.bbox_visible = true;
+                        this.apply_filter_and_sort();
+                        this.refresh_bird_options();
+                        cx.notify();
+
+                        // toast（与单张识别一致）
+                        match rec.status {
+                            photo_domain::RecognitionStatus::Confirmed => {
+                                let bird_name = rec
+                                    .bird
+                                    .as_ref()
+                                    .map(|b| b.cn_name.as_str())
+                                    .unwrap_or("未知");
+                                let conf = rec.confidence.unwrap_or(0.0);
+                                this.show_toast(
+                                    format!("{} · 置信度 {:.1}%", bird_name, conf),
+                                    cx,
+                                );
+                            }
+                            photo_domain::RecognitionStatus::Unrecognized => {
+                                this.show_toast("未检测到鸟类", cx);
+                            }
+                            photo_domain::RecognitionStatus::NeedsReview => {
+                                let reason = rec.failure_stage.user_message();
+                                this.show_toast(format!("待复核·{}", reason), cx);
+                            }
+                        }
+                        tracing::info!("手动框选识别完成: {} 状态={:?}", rel, rec.status);
+                    }
+                    Err(e) => {
+                        tracing::error!("手动框选识别错误 {}: {e}", rel);
+                        this.recognizing_single = None;
+                        this.recognize_stage = None;
+                        this.show_toast(format!("识别失败: {e}"), cx);
+                        cx.notify();
+                    }
+                }
+            },
+        );
+    }
+
     /// 多选识别：选中超过一张时批量识别所有选中照片
     fn recognize_selected(&mut self, cx: &mut Context<Self>) {
         if self.recognizing_single.is_some() || self.batch_recognizing {
@@ -2416,7 +2625,9 @@ impl Render for RootView {
 #[cfg(test)]
 mod tests {
     // 不用 super::*：gpui 根导出的 test 属性宏会遮蔽内建 #[test] 导致宏展开递归
-    use super::{clamp_pan_axis, pan_after_cursor_zoom, preview_center_offset};
+    use super::{
+        clamp_pan_axis, pan_after_cursor_zoom, preview_center_offset, window_pos_to_image_norm,
+    };
 
     #[test]
     fn test_decode_render_image_bgra_channel_order() {
@@ -2486,5 +2697,42 @@ mod tests {
         );
         assert!((frac_before.0 - frac_after.0).abs() < 1e-4, "x 分数坐标应不变");
         assert!((frac_before.1 - frac_after.1).abs() < 1e-4, "y 分数坐标应不变");
+    }
+
+    #[test]
+    fn test_window_pos_to_image_norm_fit_mode() {
+        // 适配模式（zoom=1.0）：500×300 图放入 1000×600 容器（area 含 16px 内边距）
+        // 图片左上角窗口坐标 = (0+16+250, 0+16+150) = (266, 166)
+        let area = (0., 0., 1032., 632.);
+        let img = (500, 300);
+        let top_left = window_pos_to_image_norm(266., 166., area, img, 1.0, (0., 0.)).unwrap();
+        assert!(top_left.0.abs() < 1e-4 && top_left.1.abs() < 1e-4, "左上角应映射 (0,0): {top_left:?}");
+        let center = window_pos_to_image_norm(516., 316., area, img, 1.0, (0., 0.)).unwrap();
+        assert!((center.0 - 0.5).abs() < 1e-4 && (center.1 - 0.5).abs() < 1e-4, "图中心应映射 (0.5,0.5): {center:?}");
+    }
+
+    #[test]
+    fn test_window_pos_to_image_norm_outside_gives_out_of_range() {
+        // 图片外点击不归一化钳制（由调用方 BBox::new 钳制）：左侧点击 x < 0
+        let area = (0., 0., 1032., 632.);
+        let (nx, _) = window_pos_to_image_norm(16., 316., area, (500, 300), 1.0, (0., 0.)).unwrap();
+        assert!(nx < 0., "图片左侧点击 x 应为负: {nx}");
+    }
+
+    #[test]
+    fn test_window_pos_to_image_norm_zoomed_with_pan() {
+        // 2x 缩放 + 平移：disp = 1000×600 恰好填满容器，居中偏移为 0
+        // 图片左上角 = (16 + pan.0, 16 + pan.1) = (-84, -34)
+        let area = (0., 0., 1032., 632.);
+        let img = (500, 300);
+        let (nx, ny) = window_pos_to_image_norm(16., 16., area, img, 2.0, (-100., -50.)).unwrap();
+        assert!((nx - 0.1).abs() < 1e-4, "x 应为 0.1: {nx}");
+        assert!((ny - 0.0833).abs() < 1e-3, "y 应约为 0.083: {ny}");
+    }
+
+    #[test]
+    fn test_window_pos_to_image_norm_no_measurement_returns_none() {
+        // 图片区尚未实测（首帧前）→ None，调用方不得触发识别
+        assert!(window_pos_to_image_norm(100., 100., (0., 0., 0., 0.), (500, 300), 1.0, (0., 0.)).is_none());
     }
 }
