@@ -78,7 +78,6 @@ pub enum RecognizeError {
     RawPreview(String),
 }
 
-
 /// 推理后端。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
@@ -120,7 +119,7 @@ impl Recognizer {
     /// 创建识别器。
     ///
     /// # 参数
-    /// - `models_dir`: 包含 `yolo26l.onnx` 和 `bird_model.onnx` 的目录
+    /// - `models_dir`: 包含 `detect.onnx` 和 `bird_model.onnx` 的目录
     /// - `catalog_db`: 名录库 `pica_ref.db` 路径
     ///
     /// # 模型路径约定（便携模式）
@@ -131,12 +130,12 @@ impl Recognizer {
     /// - Windows: DirectML → 失败回退 CPU 并 `tracing::warn` 记录原因
     /// - 非 Windows: CPU
     pub fn new(models_dir: &Path, catalog_db: &Path) -> Result<Self, RecognizeError> {
-        let yolo_path = models_dir.join("yolo26l.onnx");
+        let yolo_path = models_dir.join("detect.onnx");
         let bird_path = models_dir.join("bird_model.onnx");
 
         if !yolo_path.exists() {
             return Err(RecognizeError::ModelLoad(format!(
-                "YOLO 模型文件不存在: {}。请将 yolo26l.onnx 放入 models/ 目录",
+                "YOLO 模型文件不存在: {}。请将 detect.onnx 放入 models/ 目录",
                 yolo_path.display()
             )));
         }
@@ -228,14 +227,11 @@ fn load_model(path: &Path) -> Result<(Session, Backend), RecognizeError> {
         // 否则默认可能落在核显（如 Radeon 780M）上
         match (|| -> Result<_, ort::Error> {
             let builder = Session::builder()?;
-            let mut builder = builder.with_execution_providers([
-                ep::DirectML::default()
-                    .with_performance_preference(ep::directml::PerformancePreference::HighPerformance)
-                    .build(),
-            ])?;
+            let mut builder = builder.with_execution_providers([ep::DirectML::default()
+                .with_performance_preference(ep::directml::PerformancePreference::HighPerformance)
+                .build()])?;
             builder.commit_from_file(path)
-        })()
-        {
+        })() {
             Ok(session) => {
                 tracing::info!("模型加载成功 (DirectML): {}", path.display());
                 return Ok((session, Backend::DirectML));
@@ -276,7 +272,7 @@ fn engine_raw_preview(path: &Path) -> Result<Vec<u8>, RecognizeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photo_domain::{RecognitionFailureStage, RecognitionStatus, SourceFile, ImageFormat, BBox};
+    use photo_domain::{BBox, ImageFormat, RecognitionFailureStage, RecognitionStatus, SourceFile};
     use std::path::PathBuf;
 
     /// 验证失败阶段 → 识别状态的映射表
@@ -443,7 +439,7 @@ mod tests {
         let models_dir = workspace_root.join("models");
         let catalog_db = workspace_root.join("data").join("pica_ref.db");
 
-        if !models_dir.join("yolo26l.onnx").exists() || !catalog_db.exists() {
+        if !models_dir.join("detect.onnx").exists() || !catalog_db.exists() {
             eprintln!("SKIP: 模型或名录库不存在，请确保 worktree 根有 models/ 和 data/");
             return;
         }

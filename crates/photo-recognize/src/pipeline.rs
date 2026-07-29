@@ -17,9 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use image::DynamicImage;
 use ort::session::Session;
 
-use photo_domain::{
-    Capture, Recognition, RecognitionFailureStage, RecognitionStatus,
-};
+use photo_domain::{Capture, Recognition, RecognitionFailureStage, RecognitionStatus};
 
 use crate::catalog::{CatalogDb, ClassificationOutput};
 use crate::detect;
@@ -50,7 +48,9 @@ pub(crate) enum ResolvedSource {
 /// 2. JPEG/PNG 等标准格式 → `image::open` 直接解码
 /// 3. RAW 格式 → `photo_engine::thumbnail::decode_raw_preview` 提取内嵌 JPEG 预览
 /// 4. 均失败 → `NeedsReview(Assets)`
-pub(crate) fn resolve_source(capture: &Capture) -> Result<ResolvedSource, (RecognitionFailureStage, &'static str)> {
+pub(crate) fn resolve_source(
+    capture: &Capture,
+) -> Result<ResolvedSource, (RecognitionFailureStage, &'static str)> {
     let primary = &capture.source_files[capture.primary_index];
     let path = &primary.path;
 
@@ -67,15 +67,13 @@ pub(crate) fn resolve_source(capture: &Capture) -> Result<ResolvedSource, (Recog
         | photo_domain::ImageFormat::Heif
         | photo_domain::ImageFormat::WebP
         | photo_domain::ImageFormat::Bmp
-        | photo_domain::ImageFormat::Gif => {
-            match image::open(path) {
-                Ok(img) => Ok(ResolvedSource::Image(img)),
-                Err(e) => {
-                    tracing::warn!("标准图片解码失败: {} — {e}", path.display());
-                    Err((RecognitionFailureStage::Assets, "无法解码图片"))
-                }
+        | photo_domain::ImageFormat::Gif => match image::open(path) {
+            Ok(img) => Ok(ResolvedSource::Image(img)),
+            Err(e) => {
+                tracing::warn!("标准图片解码失败: {} — {e}", path.display());
+                Err((RecognitionFailureStage::Assets, "无法解码图片"))
             }
-        }
+        },
         // RAW 格式提取内嵌预览（与 pica 不同：pica 直接用 image 解码失败后退出，这里尝试 RAW 提取）
         photo_domain::ImageFormat::Raw(_) => {
             // 先尝试用 `image` 直接解码（部分 RAW 如 DNG 可能被 image 支持）
@@ -84,15 +82,13 @@ pub(crate) fn resolve_source(capture: &Capture) -> Result<ResolvedSource, (Recog
                 Err(_) => {
                     // 使用 photo-engine 的 RAW 预览提取
                     match crate::engine_raw_preview(path) {
-                        Ok(jpeg_bytes) => {
-                            match image::load_from_memory(&jpeg_bytes) {
-                                Ok(img) => Ok(ResolvedSource::Image(img)),
-                                Err(e) => {
-                                    tracing::warn!("RAW 预览 JPEG 解码失败: {} — {e}", path.display());
-                                    Err((RecognitionFailureStage::Assets, "RAW 预览解码失败"))
-                                }
+                        Ok(jpeg_bytes) => match image::load_from_memory(&jpeg_bytes) {
+                            Ok(img) => Ok(ResolvedSource::Image(img)),
+                            Err(e) => {
+                                tracing::warn!("RAW 预览 JPEG 解码失败: {} — {e}", path.display());
+                                Err((RecognitionFailureStage::Assets, "RAW 预览解码失败"))
                             }
-                        }
+                        },
                         Err(e) => {
                             tracing::warn!("RAW 预览提取失败: {} — {e}", path.display());
                             Err((RecognitionFailureStage::Assets, "RAW 文件无法解码"))
@@ -185,34 +181,32 @@ pub fn recognize_capture(
 
     // ---- 3. 分类（pica recognition_pipeline_service.dart:80-85） ----
     report_progress(on_progress, 0.7, "分类中");
-    let classified: ClassificationOutput = match crate::classify::run_classification(
-        classification_session,
-        &img,
-        bbox,
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            // 分类失败 → NeedsReview(Classification)（pica recognition_pipeline_service.dart:88-117）
-            tracing::error!("[识别] 分类错误: {e}");
-            return Ok(Recognition {
-                status: RecognitionStatus::NeedsReview,
-                bird: None,
-                class_index: None,
-                confidence: None,
-                bbox: Some(bbox),
-                candidates: vec![],
-                failure_stage: RecognitionFailureStage::Classification,
-                recognized_at,
-            });
-        }
-    };
+    let classified: ClassificationOutput =
+        match crate::classify::run_classification(classification_session, &img, bbox) {
+            Ok(c) => c,
+            Err(e) => {
+                // 分类失败 → NeedsReview(Classification)（pica recognition_pipeline_service.dart:88-117）
+                tracing::error!("[识别] 分类错误: {e}");
+                return Ok(Recognition {
+                    status: RecognitionStatus::NeedsReview,
+                    bird: None,
+                    class_index: None,
+                    confidence: None,
+                    bbox: Some(bbox),
+                    candidates: vec![],
+                    failure_stage: RecognitionFailureStage::Classification,
+                    recognized_at,
+                });
+            }
+        };
     report_progress(on_progress, 0.85, "名录映射中");
 
     // ---- 4. 名录映射（pica bird_label_resolver.dart:13-59） ----
     let (bird, map_stage) = catalog.resolve_class(classified.class_index);
 
     // 候选列表：Top-5 跳过 Top-1 自身，最多 5 条（未映射项 bird=None 也保留）
-    let candidates = catalog.resolve_top_candidates(&classified.top_candidates, classified.class_index);
+    let candidates =
+        catalog.resolve_top_candidates(&classified.top_candidates, classified.class_index);
 
     // 状态推断（pica recognition_pipeline_service.dart:88-145）
     let (status, failure_stage) = match map_stage {
@@ -303,25 +297,37 @@ mod tests {
         // 检测无框 → Unrecognized(Detection)
         assert_eq!(
             stage_to_status(RecognitionFailureStage::Detection, true),
-            (RecognitionStatus::Unrecognized, RecognitionFailureStage::Detection)
+            (
+                RecognitionStatus::Unrecognized,
+                RecognitionFailureStage::Detection
+            )
         );
 
         // 分类异常 → NeedsReview(Classification)
         assert_eq!(
             stage_to_status(RecognitionFailureStage::Classification, false),
-            (RecognitionStatus::NeedsReview, RecognitionFailureStage::Classification)
+            (
+                RecognitionStatus::NeedsReview,
+                RecognitionFailureStage::Classification
+            )
         );
 
         // 映射失败 → NeedsReview(Mapping)
         assert_eq!(
             stage_to_status(RecognitionFailureStage::Mapping, false),
-            (RecognitionStatus::NeedsReview, RecognitionFailureStage::Mapping)
+            (
+                RecognitionStatus::NeedsReview,
+                RecognitionFailureStage::Mapping
+            )
         );
 
         // 资源不可用 → NeedsReview(Assets)
         assert_eq!(
             stage_to_status(RecognitionFailureStage::Assets, false),
-            (RecognitionStatus::NeedsReview, RecognitionFailureStage::Assets)
+            (
+                RecognitionStatus::NeedsReview,
+                RecognitionFailureStage::Assets
+            )
         );
 
         // 全部成功 → Confirmed(None)
@@ -337,9 +343,10 @@ mod tests {
         is_detection_failure: bool,
     ) -> (RecognitionStatus, RecognitionFailureStage) {
         match failure_stage {
-            RecognitionFailureStage::Detection if is_detection_failure => {
-                (RecognitionStatus::Unrecognized, RecognitionFailureStage::Detection)
-            }
+            RecognitionFailureStage::Detection if is_detection_failure => (
+                RecognitionStatus::Unrecognized,
+                RecognitionFailureStage::Detection,
+            ),
             RecognitionFailureStage::None => {
                 (RecognitionStatus::Confirmed, RecognitionFailureStage::None)
             }

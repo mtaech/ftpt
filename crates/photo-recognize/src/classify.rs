@@ -10,8 +10,8 @@ use ort::value::Tensor;
 
 use photo_domain::BBox;
 
-use crate::RecognizeError;
 use crate::catalog::ClassificationOutput;
+use crate::RecognizeError;
 
 /// 分类模型输入尺寸（pica bird_model_classifier.dart:16）
 const CLASSIFY_INPUT_SIZE: usize = 224;
@@ -203,10 +203,7 @@ mod tests {
         indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         for i in 1..TOP_N.min(indexed.len()) {
-            assert!(
-                indexed[i - 1].1 >= indexed[i].1,
-                "候选应降序排列"
-            );
+            assert!(indexed[i - 1].1 >= indexed[i].1, "候选应降序排列");
         }
 
         // Top-1 应为最大 logit

@@ -191,7 +191,13 @@ mod tests {
     fn test_top_candidates_skip_self() {
         let (_dir, db) = create_test_db();
         // Top-5: [(100, 95.0), (200, 80.0), (300, 60.0), (400, 40.0), (100, 30.0)]
-        let indices = [(100u32, 95.0f32), (200, 80.0), (300, 60.0), (400, 40.0), (100, 30.0)];
+        let indices = [
+            (100u32, 95.0f32),
+            (200, 80.0),
+            (300, 60.0),
+            (400, 40.0),
+            (100, 30.0),
+        ];
         let candidates = db.resolve_top_candidates(&indices, 100);
         // 跳过 class_index=100 的自身，保留其他
         // 200 -> 唯一匹配；300 -> 歧义（保留但 bird=None）；400 -> 无映射（保留但 bird=None）

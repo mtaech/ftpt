@@ -18,7 +18,7 @@
 
 ```
 photo-tool.exe
-├── models/{yolo26l.onnx, bird_model.onnx}   121MB，缺失时明确报错
+├── models/{detect.onnx, bird_model.onnx}   121MB，缺失时明确报错
 └── data/pica_ref.db                          名录库，裁剪自 pica.db，只读打开
 ```
 

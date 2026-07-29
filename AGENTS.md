@@ -238,7 +238,7 @@ gpui-component 项目位于 `D:\Dev\Code\gpui-component`，含完整源码和本
 
 - **Linux**：需 `libraw.so` 可链接/可加载——放 `local-lib/` 或系统安装；`.cargo/config.toml` 已配 `-L local-lib` 与 `LD_LIBRARY_PATH`；识别管线在 Linux 走 CPU EP
 - **Windows**：无特殊配置（Windows 11 为开发/测试环境）；识别走 DirectML（系统内置），发布包需附带 `DirectML.dll`
-- **识别资产**：`models/`（yolo26l.onnx + bird_model.onnx，约 250MB）与 `data/pica_ref.db`（名录库）必须位于 **exe 同级目录**（便携约定，不入库，`.gitignore` 已排除）；开发时即 `target/debug/` 或 `target/release/` 下
+- **识别资产**：`models/`（detect.onnx + bird_model.onnx，约 250MB）与 `data/pica_ref.db`（名录库）必须位于 **exe 同级目录**（便携约定，不入库，`.gitignore` 已排除）；开发时即 `target/debug/` 或 `target/release/` 下
 
 ---
 
