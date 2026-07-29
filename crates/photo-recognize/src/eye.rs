@@ -1,12 +1,13 @@
-//! 鸟眼检测：从裁剪的鸟体区域跑 eye.onnx → 检测眼框。
+//! 鸟眼检测：从裁剪的鸟体区域跑 eye.onnx → 定位眼关键点。
 //!
 //! 管线位置：第四阶段「鸟眼锐度」——在识别管线得到鸟框之后运行。
 //!
-//! ## 坐标映射
+//! ## 模型输出（YOLO26 系端到端姿态头，NMS-free）
 //!
-//! - eye.onnx 输入：鸟框裁剪图经 resize 至模型输入尺寸
-//! - 模型输出：归一化坐标（相对模型输入尺寸）
-//! - 最终眼框：归一化坐标映射回全图，与检测框同坐标系
+//! 输出张量 `[1, 300, 12]`，每行：
+//! `[x1, y1, x2, y2(像素), conf, cls, kpt1(x, y, conf), kpt2(x, y, conf)]`
+//! ——鸟框恒为整幅（训练集即整幅鸟图），实际只用两个眼关键点；
+//! 取置信度最高的关键点，展开为方形小框后映射回全图坐标。
 
 use image::{DynamicImage, GenericImageView};
 use ort::session::Session;
@@ -15,6 +16,16 @@ use ort::value::Tensor;
 use photo_domain::BBox;
 
 use crate::RecognizeError;
+
+// ---------------------------------------------------------------------------
+// 常量
+// ---------------------------------------------------------------------------
+
+/// 眼关键点置信度阈值（实测：真眼 0.86–0.93，噪声 <0.1，余量充足）
+const EYE_KPT_CONF_THRESHOLD: f32 = 0.5;
+
+/// 眼框边长相对裁剪区域的比例（覆盖眼睛及周围羽毛供锐度统计）
+const EYE_BOX_SIDE_RATIO: f32 = 0.15;
 
 // ---------------------------------------------------------------------------
 // 公共接口
@@ -117,80 +128,54 @@ pub fn detect_eye(
     let output = &outputs[0];
 
     // ---- 解析输出 ----
-    let (shape, flat) = output.try_extract_tensor::<f32>()?;
-
-    if flat.is_empty() {
+    // eye.onnx 是 YOLO26 系端到端姿态头（NMS-free），输出 [1, 300, 12]，
+    // 每行 12 值：[x1,y1,x2,y2(像素), conf, cls, kpt1(x,y,conf), kpt2(x,y,conf)]。
+    // 鸟框对本场景无用（训练集即整幅鸟图，框恒为整幅），只用两个眼关键点。
+    let (_shape, flat) = output.try_extract_tensor::<f32>()?;
+    let Some((nx, ny, _conf)) = pick_best_eye_keypoint(&flat, input_w, input_h) else {
         return Ok(None);
-    }
-
-    let total_len = flat.len();
-
-    let stride = if shape.len() >= 3 && shape[shape.len() - 1] == 6 {
-        6
-    } else if shape.len() >= 2 && shape[shape.len() - 1] == 6 {
-        6
-    } else if total_len % 6 == 0 && total_len > 0 {
-        6
-    } else if total_len % 4 == 0 {
-        4
-    } else {
-        return Err(RecognizeError::ModelLoad(format!(
-            "eye.onnx 输出形状无法解析: len={}", total_len
-        )));
     };
 
-    // ---- 后处理：筛选最高分眼框 ----
-    let score_threshold = 0.25;
-    let mut best: Option<(f32, f32, f32, f32, f32)> = None;
+    // 关键点 → 以眼为中心的方形小框（crop 归一化），再映射回全图
+    let half = EYE_BOX_SIDE_RATIO / 2.0;
+    let (ex1, ey1) = ((nx - half).clamp(0.0, 1.0), (ny - half).clamp(0.0, 1.0));
+    let (ex2, ey2) = ((nx + half).clamp(0.0, 1.0), (ny + half).clamp(0.0, 1.0));
 
-    for offset in (0..total_len - (stride - 1)).step_by(stride) {
-        let score = if stride >= 5 { flat[offset + 4] } else { 1.0 };
+    let fw = full_w as f32;
+    let fh = full_h as f32;
+    let cw = crop_w as f32;
+    let ch = crop_h as f32;
+    let cox = px1 as f32;
+    let coy = py1 as f32;
 
-        if score < score_threshold {
-            continue;
-        }
+    Ok(Some(BBox::new(
+        (cox + ex1 * cw) / fw,
+        (coy + ey1 * ch) / fh,
+        (cox + ex2 * cw) / fw,
+        (coy + ey2 * ch) / fh,
+    )))
+}
 
-        let x1_raw = flat[offset];
-        let y1_raw = flat[offset + 1];
-        let x2_raw = flat[offset + 2];
-        let y2_raw = flat[offset + 3];
-
-        let x1 = (x1_raw / input_w as f32).clamp(0.0, 1.0);
-        let y1 = (y1_raw / input_h as f32).clamp(0.0, 1.0);
-        let x2 = (x2_raw / input_w as f32).clamp(0.0, 1.0);
-        let y2 = (y2_raw / input_h as f32).clamp(0.0, 1.0);
-
-        if x2 <= x1 || y2 <= y1 {
-            continue;
-        }
-
-        let is_better = match &best {
-            None => true,
-            Some(b) => score > b.4,
-        };
-        if is_better {
-            best = Some((x1, y1, x2, y2, score));
+/// 从姿态头输出中挑选置信度最高的眼关键点（ADR 0005：取最高置信度单眼）。
+///
+/// 输入为展平的 f32 输出（每 12 值一行），返回 (crop 归一化 x, y, conf)。
+fn pick_best_eye_keypoint(flat: &[f32], input_w: usize, input_h: usize) -> Option<(f32, f32, f32)> {
+    if flat.len() < 12 || flat.len() % 12 != 0 {
+        return None;
+    }
+    let mut best: Option<(f32, f32, f32)> = None;
+    for row in flat.chunks_exact(12) {
+        for kpt in [&row[6..9], &row[9..12]] {
+            let (kx, ky, kc) = (kpt[0], kpt[1], kpt[2]);
+            if kc < EYE_KPT_CONF_THRESHOLD {
+                continue;
+            }
+            if best.is_none_or(|b| kc > b.2) {
+                best = Some((kx / input_w as f32, ky / input_h as f32, kc));
+            }
         }
     }
-
-    // 将 crop 内的归一化坐标映射回全图
-    let eye_bbox = best.map(|(x1, y1, x2, y2, _score)| {
-        let fw = full_w as f32;
-        let fh = full_h as f32;
-        let cw = crop_w as f32;
-        let ch = crop_h as f32;
-        let cox = px1 as f32;
-        let coy = py1 as f32;
-
-        BBox::new(
-            (cox + x1 * cw) / fw,
-            (coy + y1 * ch) / fh,
-            (cox + x2 * cw) / fw,
-            (coy + y2 * ch) / fh,
-        )
-    });
-
-    Ok(eye_bbox)
+    best
 }
 
 #[cfg(test)]
@@ -279,5 +264,39 @@ mod tests {
         assert_eq!(py1, 0);
         assert!(px2 >= px1 + 1);
         assert!(py2 >= py1 + 1);
+    }
+
+    /// 关键点解析：取置信度最高的单眼（跨行、跨两个关键点位）
+    #[test]
+    fn test_pick_best_eye_keypoint_picks_highest_conf() {
+        let row = |k1: (f32, f32, f32), k2: (f32, f32, f32)| -> Vec<f32> {
+            vec![
+                0.0, 0.0, 640.0, 640.0, 0.9, 0.0, k1.0, k1.1, k1.2, k2.0, k2.1, k2.2,
+            ]
+        };
+        let mut flat = row((100.0, 100.0, 0.6), (200.0, 200.0, 0.9));
+        flat.extend(row((300.0, 300.0, 0.7), (50.0, 50.0, 0.8)));
+
+        let (nx, ny, conf) = pick_best_eye_keypoint(&flat, 640, 640).unwrap();
+        assert!((conf - 0.9).abs() < 1e-6);
+        assert!((nx - 200.0 / 640.0).abs() < 1e-6);
+        assert!((ny - 200.0 / 640.0).abs() < 1e-6);
+    }
+
+    /// 全部关键点低于阈值 → None
+    #[test]
+    fn test_pick_best_eye_keypoint_below_threshold() {
+        let flat = vec![
+            0.0, 0.0, 640.0, 640.0, 0.9, 0.0, 100.0, 100.0, 0.3, 200.0, 200.0, 0.49,
+        ];
+        assert!(pick_best_eye_keypoint(&flat, 640, 640).is_none());
+    }
+
+    /// 长度非法（非 12 的倍数 / 空）→ None 而非 panic
+    #[test]
+    fn test_pick_best_eye_keypoint_malformed_input() {
+        assert!(pick_best_eye_keypoint(&[], 640, 640).is_none());
+        assert!(pick_best_eye_keypoint(&[1.0; 6], 640, 640).is_none());
+        assert!(pick_best_eye_keypoint(&[1.0; 13], 640, 640).is_none());
     }
 }

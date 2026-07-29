@@ -261,7 +261,7 @@ gpui-component 项目位于 `E:\Dev\Code\gpui-component`，含完整源码和本
 | `photo-engine::convert.rs` | 7 | resize 三分支、格式分发、RAW 错误、输出路径命名 |
 | `photo-engine::xmp.rs` | 6 | xmp_path、读写往返、不存在的文件返回默认值、更新已有文件 |
 | `photo-engine::folder_db.rs` | 15 | 识别表建表/迁移（含 eye_sharpness/eye_bbox 列）、upsert/get/delete、rename/copy 同步、all_recognitions、旧版 cache.db 迁移 |
-| `photo-recognize::lib.rs/pipeline.rs/eye.rs/sharpness.rs` | 28 | 阶段→状态映射、输入源解析（JPEG/RAW）、检测框变换、softmax/Top-5、名录映射 0/1/多、进度回调、眼检测坐标映射、锐度融合单调性、eye.onnx 缺失报错；另 1 个 `#[ignore]` 真机冒烟 |
+| `photo-recognize::lib.rs/pipeline.rs/eye.rs/sharpness.rs` | 30 | 阶段→状态映射、输入源解析（JPEG/RAW）、检测框变换、softmax/Top-5、名录映射 0/1/多、进度回调、眼关键点解析与坐标映射、锐度融合单调性、eye.onnx 缺失报错；另 1 个 `#[ignore]` 真机冒烟 |
 | `photo-tool-app` | 19 | action/状态工具函数 |
 
 ### 测试辅助
