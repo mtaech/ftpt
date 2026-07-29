@@ -6,7 +6,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 
 - `photo-domain` — 纯类型叶子 crate（Capture, ExifMetadata, XmpMetadata, Recognition 类型, 枚举），零外部依赖
 - `photo-engine` — 文件操作引擎（scanner, exif/xmp 读写, thumbnail, ops, convert, folder_db），**全同步**
-- `photo-recognize` — 鸟类识别管线（YOLO 检测 → 鸟种分类 → 名录映射，ONNX Runtime），**全同步**
+- `photo-recognize` — 鸟类识别管线（YOLO 检测 → 鸟种分类 → 名录映射 → 鸟眼锐度，ONNX Runtime），**全同步**
 - `photo-config` — 配置读写（TOML + SQLite 持久化）
 - `photo-tool-app` — GPUI 前端（暗色主题，三栏布局，全键盘操作）
 核心工作流：**目录扫描 → RAW+JPEG 配对 → 浏览/标记/筛选 → 鸟类识别（单张/批量）→ 文件操作（删除/移动/复制/重命名）→ 格式转换**。识别子系统设计见 `docs/adr/0003-recognition-subsystem.md`。
@@ -48,7 +48,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 3. **Capture** → **ops**：删除（回收站/永久）/移动（跨设备 copy+delete 回退）/复制/批量重命名
 4. **SourceFile** → **thumbnail**：磁盘缓存 JPEG 字节（缓存键 = `DefaultHasher(path+size)` 的 `{:016x}.jpg`）；RAW 提取内嵌预览，常规图优先 EXIF 内嵌缩略图
 5. **Capture** → **convert**：RAW 内嵌预览→JPEG、常规图缩放（Lanczos3）
-6. **Capture** → **recognize**：`photo-recognize` 管线（YOLO 检测鸟体 → bird_model 分类 Top-5 → `sp_cls_map` JOIN `animal_info` 名录映射）→ `Recognition` 三态（Confirmed/NeedsReview/Unrecognized）→ `folder_db` upsert 到文件夹级 `.pt/data.db`
+6. **Capture** → **recognize**：`photo-recognize` 管线（YOLO 检测鸟体 → 鸟框内 eye.onnx 检测眼 → bird_model 分类 Top-5 → `sp_cls_map` JOIN `animal_info` 名录映射）→ `Recognition` 三态（Confirmed/NeedsReview/Unrecognized）+ 连续鸟眼锐度分（NULL 兜底，不影响三态）→ `folder_db` upsert 到文件夹级 `.pt/data.db`。鸟眼锐度设计见 `docs/adr/0005-eye-sharpness-stage.md`
 7. **import**（近期移除，待重建）：检测可移动设备 → DCIM 递归扫描 → 按 EXIF 日期建子目录 → 委托 **ops** 移动/复制
 
 ### 模块依赖关系
@@ -200,7 +200,7 @@ app.run(move |cx| {
 
 ## gpui-component 本地源码与文档
 
-gpui-component 项目位于 `D:\Dev\Code\gpui-component`，含完整源码和本地文档：
+gpui-component 项目位于 `E:\Dev\Code\gpui-component`，含完整源码和本地文档：
 
 |路径|内容|
 |---|---|
@@ -238,21 +238,21 @@ gpui-component 项目位于 `D:\Dev\Code\gpui-component`，含完整源码和本
 
 - **Linux**：需 `libraw.so` 可链接/可加载——放 `local-lib/` 或系统安装；`.cargo/config.toml` 已配 `-L local-lib` 与 `LD_LIBRARY_PATH`；识别管线在 Linux 走 CPU EP
 - **Windows**：无特殊配置（Windows 11 为开发/测试环境）；识别走 DirectML（系统内置），发布包需附带 `DirectML.dll`
-- **识别资产**：`models/`（detect.onnx + bird_model.onnx，约 250MB）与 `data/pica_ref.db`（名录库）必须位于 **exe 同级目录**（便携约定，不入库，`.gitignore` 已排除）；开发时即 `target/debug/` 或 `target/release/` 下
+- **识别资产**：`models/`（detect.onnx + bird_model.onnx + eye.onnx）与 `data/pica_ref.db`（名录库）必须位于 **exe 同级目录**（便携约定，不入库，`.gitignore` 已排除）；开发时即 `target/debug/` 或 `target/release/` 下
 
 ---
 
 ## 测试与 QA
 
-- 全部 **123 个 `#[test]`**（+ 1 个 `#[ignore]` 真机冒烟）分布在 4 个 crate 的源文件末尾内联 `#[cfg(test)] mod tests
+- 全部 **135 个 `#[test]`**（+ 1 个 `#[ignore]` 真机冒烟）分布在 4 个 crate 的源文件末尾内联 `#[cfg(test)] mod tests
 - 无外部 `tests/` 目录、无异步测试、无第三方测试框架（唯一 dev-dep：`tempfile`）
-- 真机识别冒烟：`cargo test -p photo-recognize -- --ignored`（需 worktree/发布根有 `models/` 与 `data/pica_ref.db`）；单文件手动识别工具：`cargo run -p photo-recognize --example recognize_file -- <图片路径>`
+- 真机识别冒烟：`cargo test -p photo-recognize -- --ignored`（需 worktree/发布根有 `models/` 与 `data/pica_ref.db`）；单文件手动识别工具：`cargo run -p photo-recognize --example recognize_file -- <图片路径>`（全管线）/ `recognize_region -- <图片> <x1> <y1> <x2> <y2>`（跳过检测，手动框选区域直接分类）
 
 ### 测试分布
 
 | 模块（新 crate） | 测试数 | 覆盖内容 |
 |---|---|---|
-| `photo-domain::domain.rs` | 25 | 扩展名解析、RAW 白名单、enrich_with_xmp/recognition、ExifMetadata 默认/摘要、XmpMetadata 枚举转换、BBox/RecognitionStatus/RecognitionFilter 序列化与状态映射 |
+| `photo-domain::domain.rs` | 23 | 扩展名解析、RAW 白名单、enrich_with_xmp/recognition、ExifMetadata 默认/摘要、XmpMetadata 枚举转换、BBox/RecognitionStatus/RecognitionFilter 序列化与状态映射 |
 | `photo-config::lib.rs` (config) | 6 | 默认值、TOML 保存/加载往返、配置路径 |
 | `photo-engine::scanner.rs` | 8 | JPEG+RAW 配对、大小写、sidecar 分离、忽略视频 |
 | `photo-engine::ops.rs` | 8+ | 移动/复制/重命名/删除（含 sidecar）、命名冲突、批量跳过缺失、识别行同步（sync_delete/copy/rename） |
@@ -260,9 +260,9 @@ gpui-component 项目位于 `D:\Dev\Code\gpui-component`，含完整源码和本
 | `photo-engine::exif.rs` | 5 | 无 EXIF 报错、不存在文件、file_size 始终填充 |
 | `photo-engine::convert.rs` | 7 | resize 三分支、格式分发、RAW 错误、输出路径命名 |
 | `photo-engine::xmp.rs` | 6 | xmp_path、读写往返、不存在的文件返回默认值、更新已有文件 |
-| `photo-engine::folder_db.rs` | 7 | 识别表建表/迁移、upsert/get/delete、rename/copy 同步、all_recognitions、旧版 cache.db 迁移 |
-| `photo-recognize::lib.rs/pipeline.rs` | 22 | 阶段→状态映射、输入源解析（JPEG/RAW）、检测框变换、softmax/Top-5、名录映射 0/1/多、进度回调；另 1 个 `#[ignore]` 真机冒烟 |
-| `photo-tool-app` | 9 | action/状态工具函数 |
+| `photo-engine::folder_db.rs` | 15 | 识别表建表/迁移（含 eye_sharpness/eye_bbox 列）、upsert/get/delete、rename/copy 同步、all_recognitions、旧版 cache.db 迁移 |
+| `photo-recognize::lib.rs/pipeline.rs/eye.rs/sharpness.rs` | 28 | 阶段→状态映射、输入源解析（JPEG/RAW）、检测框变换、softmax/Top-5、名录映射 0/1/多、进度回调、眼检测坐标映射、锐度融合单调性、eye.onnx 缺失报错；另 1 个 `#[ignore]` 真机冒烟 |
+| `photo-tool-app` | 19 | action/状态工具函数 |
 
 ### 测试辅助
 
@@ -274,7 +274,7 @@ gpui-component 项目位于 `D:\Dev\Code\gpui-component`，含完整源码和本
 
 ## GPUI 前端参考
 
-> 来源：`D:\Dev\Code\zed-main\crates\gpui\docs\` 和 `docs\src\development\glossary.md`
+> 来源：`E:\Dev\Code\zed-main\crates\gpui\docs\` 和 `docs\src\development\glossary.md`
 
 ### 架构概述
 

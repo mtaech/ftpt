@@ -86,6 +86,15 @@ fn main() {
             bbox.x1, bbox.y1, bbox.x2, bbox.y2
         );
     }
+    if let Some(score) = result.eye_sharpness {
+        println!("eye_sharpness: {score:.2}");
+    }
+    if let Some(eye) = &result.eye_bbox {
+        println!(
+            "eye_bbox:      [{:.3}, {:.3}, {:.3}, {:.3}]",
+            eye.x1, eye.y1, eye.x2, eye.y2
+        );
+    }
     println!("candidates:    {}", result.candidates.len());
     for c in &result.candidates {
         let name = c

@@ -17,10 +17,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use image::DynamicImage;
 use ort::session::Session;
 
-use photo_domain::{Capture, Recognition, RecognitionFailureStage, RecognitionStatus};
+use photo_domain::{BBox, Capture, Recognition, RecognitionFailureStage, RecognitionStatus};
 
 use crate::catalog::{CatalogDb, ClassificationOutput};
 use crate::detect;
+use crate::eye;
+use crate::sharpness;
 use crate::RecognizeError;
 
 /// 进度回调：进度 0.0-1.0 + 阶段文本
@@ -107,6 +109,7 @@ pub(crate) fn resolve_source(
 /// # 参数
 /// - `detection_session`: YOLO 检测 session
 /// - `classification_session`: 鸟种分类 session
+/// - `eye_session`: 鸟眼检测 session
 /// - `catalog`: 名录映射
 /// - `capture`: 待识别的 Capture
 /// - `on_progress`: 可选进度回调
@@ -116,6 +119,7 @@ pub(crate) fn resolve_source(
 pub fn recognize_capture(
     detection_session: &mut Session,
     classification_session: &mut Session,
+    eye_session: &mut Session,
     catalog: &CatalogDb,
     capture: &Capture,
     on_progress: Option<&ProgressCallback>,
@@ -133,6 +137,8 @@ pub fn recognize_capture(
                 class_index: None,
                 confidence: None,
                 bbox: None,
+                eye_sharpness: None,
+                eye_bbox: None,
                 candidates: vec![],
                 failure_stage: stage,
                 recognized_at,
@@ -155,6 +161,8 @@ pub fn recognize_capture(
                 class_index: None,
                 confidence: None,
                 bbox: None,
+                eye_sharpness: None,
+                eye_bbox: None,
                 candidates: vec![],
                 failure_stage: RecognitionFailureStage::Detection,
                 recognized_at,
@@ -170,6 +178,8 @@ pub fn recognize_capture(
                 class_index: None,
                 confidence: None,
                 bbox: None,
+                eye_sharpness: None,
+                eye_bbox: None,
                 candidates: vec![],
                 failure_stage: RecognitionFailureStage::Classification,
                 recognized_at,
@@ -179,29 +189,120 @@ pub fn recognize_capture(
     let bbox = detection.bbox;
     report_progress(on_progress, 0.5, "检测完成");
 
-    // ---- 3. 分类（pica recognition_pipeline_service.dart:80-85） ----
+    // ---- 3. 鸟眼锐度（第四阶段） ----
+    report_progress(on_progress, 0.6, "鸟眼锐度");
+    let (eye_sharpness, eye_bbox) = run_eye_stage(eye_session, &img, bbox);
+
+    // ---- 4-5. 分类 + 名录映射（与 recognize_region 共用尾部管线） ----
     report_progress(on_progress, 0.7, "分类中");
+    Ok(classify_and_map(
+        classification_session,
+        catalog,
+        &img,
+        bbox,
+        eye_sharpness,
+        eye_bbox,
+        on_progress,
+        recognized_at,
+    ))
+}
+
+/// 用户手动框选区域识别：跳过 YOLO 检测，直接对用户给的 bbox 分类 + 名录映射。
+///
+/// 用于预览界面「重新框选」：用户画的框即鸟体框，人工定位比检测更可信，
+/// 因此映射成功时状态同样为 `Confirmed`。
+///
+/// # 参数
+/// - `bbox`: 用户框选区域（归一化 0-1 坐标，相对原图）
+/// - 其余同 `recognize_capture`
+pub fn recognize_region(
+    classification_session: &mut Session,
+    eye_session: &mut Session,
+    catalog: &CatalogDb,
+    capture: &Capture,
+    bbox: BBox,
+    on_progress: Option<&ProgressCallback>,
+) -> Result<Recognition, RecognizeError> {
+    let recognized_at = chrono::Utc::now().to_rfc3339();
+
+    // ---- 1. 输入源解析（与自动识别同源） ----
+    let source = match resolve_source(capture) {
+        Ok(s) => s,
+        Err((stage, msg)) => {
+            tracing::warn!("[识别] 手动框选输入源解析失败: {} — {}", capture.base_name, msg);
+            return Ok(Recognition {
+                status: RecognitionStatus::NeedsReview,
+                bird: None,
+                class_index: None,
+                confidence: None,
+                bbox: Some(bbox),
+                eye_sharpness: None,
+                eye_bbox: None,
+                candidates: vec![],
+                failure_stage: stage,
+                recognized_at,
+            });
+        }
+    };
+    report_progress(on_progress, 0.2, "图片加载完成");
+
+    let ResolvedSource::Image(img) = source;
+
+    // ---- 2. 鸟眼锐度（用户框视为鸟框） ----
+    report_progress(on_progress, 0.4, "鸟眼锐度");
+    let (eye_sharpness, eye_bbox) = run_eye_stage(eye_session, &img, bbox);
+
+    // ---- 3. 分类 + 名录映射（跳过检测） ----
+    report_progress(on_progress, 0.5, "分类中");
+    Ok(classify_and_map(
+        classification_session,
+        catalog,
+        &img,
+        bbox,
+        eye_sharpness,
+        eye_bbox,
+        on_progress,
+        recognized_at,
+    ))
+}
+
+/// 分类 → 名录映射 → 候选解析，构建最终 Recognition。
+///
+/// `recognize_capture`（YOLO 检测框）与 `recognize_region`（用户手动画框）共用的尾部管线。
+fn classify_and_map(
+    classification_session: &mut Session,
+    catalog: &CatalogDb,
+    img: &DynamicImage,
+    bbox: BBox,
+    eye_sharpness: Option<f32>,
+    eye_bbox: Option<BBox>,
+    on_progress: Option<&ProgressCallback>,
+    recognized_at: String,
+) -> Recognition {
+    // ---- 分类（pica recognition_pipeline_service.dart:80-85） ----
     let classified: ClassificationOutput =
-        match crate::classify::run_classification(classification_session, &img, bbox) {
+        match crate::classify::run_classification(classification_session, img, bbox) {
             Ok(c) => c,
             Err(e) => {
                 // 分类失败 → NeedsReview(Classification)（pica recognition_pipeline_service.dart:88-117）
                 tracing::error!("[识别] 分类错误: {e}");
-                return Ok(Recognition {
+                return Recognition {
                     status: RecognitionStatus::NeedsReview,
                     bird: None,
                     class_index: None,
                     confidence: None,
                     bbox: Some(bbox),
+                    eye_sharpness,
+                    eye_bbox,
                     candidates: vec![],
                     failure_stage: RecognitionFailureStage::Classification,
                     recognized_at,
-                });
+                };
             }
         };
     report_progress(on_progress, 0.85, "名录映射中");
 
-    // ---- 4. 名录映射（pica bird_label_resolver.dart:13-59） ----
+    // ---- 名录映射（pica bird_label_resolver.dart:13-59） ----
     let (bird, map_stage) = catalog.resolve_class(classified.class_index);
 
     // 候选列表：Top-5 跳过 Top-1 自身，最多 5 条（未映射项 bird=None 也保留）
@@ -220,16 +321,18 @@ pub fn recognize_capture(
         }
     };
 
-    Ok(Recognition {
+    Recognition {
         status,
         bird,
         class_index: Some(classified.class_index),
         confidence: Some(classified.confidence),
         bbox: Some(bbox),
+        eye_sharpness,
+        eye_bbox,
         candidates,
         failure_stage,
         recognized_at,
-    })
+    }
 }
 
 /// 批量识别。
@@ -238,6 +341,7 @@ pub fn recognize_capture(
 pub fn recognize_captures(
     detection_session: &mut Session,
     classification_session: &mut Session,
+    eye_session: &mut Session,
     catalog: &CatalogDb,
     captures: &[Capture],
     on_progress: Option<&ProgressCallback>,
@@ -251,6 +355,7 @@ pub fn recognize_captures(
         match recognize_capture(
             detection_session,
             classification_session,
+            eye_session,
             catalog,
             capture,
             on_progress,
@@ -267,6 +372,8 @@ pub fn recognize_captures(
                         class_index: None,
                         confidence: None,
                         bbox: None,
+                        eye_sharpness: None,
+                        eye_bbox: None,
                         candidates: vec![],
                         failure_stage: RecognitionFailureStage::Assets,
                         recognized_at: chrono::Utc::now().to_rfc3339(),
@@ -282,6 +389,26 @@ fn report_progress(on_progress: Option<&ProgressCallback>, value: f32, stage: &'
     if let Some(cb) = on_progress {
         cb(RecognitionProgress { value, stage });
     }
+}
+
+/// 运行鸟眼锐度阶段：眼检测 → 锐度计算。
+///
+/// 任何一步失败均返回 (None, None)，不影响管线主状态。
+fn run_eye_stage(
+    eye_session: &mut Session,
+    img: &DynamicImage,
+    bird_bbox: BBox,
+) -> (Option<f32>, Option<BBox>) {
+    // 眼检测
+    let eye_bbox = match eye::detect_eye(eye_session, img, bird_bbox) {
+        Ok(Some(bbox)) => bbox,
+        _ => return (None, None),
+    };
+
+    // 锐度计算
+    let sharpness = sharpness::eye_sharpness(img, &eye_bbox);
+
+    (sharpness, Some(eye_bbox))
 }
 
 // ---------------------------------------------------------------------------

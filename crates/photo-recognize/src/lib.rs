@@ -25,7 +25,9 @@
 mod catalog;
 mod classify;
 mod detect;
+mod eye;
 mod pipeline;
+mod sharpness;
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -33,7 +35,7 @@ use std::sync::atomic::AtomicBool;
 use ort::ep;
 use ort::session::Session;
 
-use photo_domain::{Capture, Recognition};
+use photo_domain::{BBox, Capture, Recognition};
 
 pub use catalog::CatalogDb;
 pub use catalog::ClassificationOutput;
@@ -97,7 +99,7 @@ impl std::fmt::Display for Backend {
 // Recognizer
 // ---------------------------------------------------------------------------
 
-/// 识别器：持有两个 ONNX Session + 名录库连接。
+/// 识别器：持有三个 ONNX Session + 名录库连接。
 ///
 /// 示例：
 /// ```no_run
@@ -111,6 +113,7 @@ impl std::fmt::Display for Backend {
 pub struct Recognizer {
     detection_session: Session,
     classification_session: Session,
+    eye_session: Session,
     catalog: CatalogDb,
     backend: Backend,
 }
@@ -119,7 +122,7 @@ impl Recognizer {
     /// 创建识别器。
     ///
     /// # 参数
-    /// - `models_dir`: 包含 `detect.onnx` 和 `bird_model.onnx` 的目录
+    /// - `models_dir`: 包含 `detect.onnx`、`bird_model.onnx` 和 `eye.onnx` 的目录
     /// - `catalog_db`: 名录库 `pica_ref.db` 路径
     ///
     /// # 模型路径约定（便携模式）
@@ -132,6 +135,7 @@ impl Recognizer {
     pub fn new(models_dir: &Path, catalog_db: &Path) -> Result<Self, RecognizeError> {
         let yolo_path = models_dir.join("detect.onnx");
         let bird_path = models_dir.join("bird_model.onnx");
+        let eye_path = models_dir.join("eye.onnx");
 
         if !yolo_path.exists() {
             return Err(RecognizeError::ModelLoad(format!(
@@ -145,8 +149,15 @@ impl Recognizer {
                 bird_path.display()
             )));
         }
+        if !eye_path.exists() {
+            return Err(RecognizeError::ModelLoad(format!(
+                "eye 模型文件不存在: {}。请将 eye.onnx 放入 models/ 目录",
+                eye_path.display()
+            )));
+        }
         let (detection_session, backend) = load_model(&yolo_path)?;
         let (classification_session, _) = load_model(&bird_path)?;
+        let (eye_session, _) = load_model(&eye_path)?;
         let catalog = CatalogDb::open(catalog_db)?;
 
         tracing::info!("识别器初始化完成，推理后端: {}", backend);
@@ -154,6 +165,7 @@ impl Recognizer {
         Ok(Self {
             detection_session,
             classification_session,
+            eye_session,
             catalog,
             backend,
         })
@@ -171,8 +183,30 @@ impl Recognizer {
         pipeline::recognize_capture(
             &mut self.detection_session,
             &mut self.classification_session,
+            &mut self.eye_session,
             &self.catalog,
             capture,
+            on_progress,
+        )
+    }
+
+    /// 手动框选区域识别。
+    ///
+    /// 跳过 YOLO 检测，直接对用户给的 `bbox`（归一化 0-1 坐标）分类 + 名录映射。
+    /// 用于预览界面「重新框选」。业务失败体现在 `Recognition.status`，
+    /// `Err` 仅用于模型/库不可用等系统性故障。
+    pub fn recognize_region(
+        &mut self,
+        capture: &Capture,
+        bbox: BBox,
+        on_progress: Option<&pipeline::ProgressCallback>,
+    ) -> Result<Recognition, RecognizeError> {
+        pipeline::recognize_region(
+            &mut self.classification_session,
+            &mut self.eye_session,
+            &self.catalog,
+            capture,
+            bbox,
             on_progress,
         )
     }
@@ -190,6 +224,7 @@ impl Recognizer {
         pipeline::recognize_captures(
             &mut self.detection_session,
             &mut self.classification_session,
+            &mut self.eye_session,
             &self.catalog,
             captures,
             on_progress,
@@ -205,6 +240,11 @@ impl Recognizer {
     /// 返回分类 session 的可变引用（供直接调用 classify 模块用）
     pub fn classification_session(&mut self) -> &mut Session {
         &mut self.classification_session
+    }
+
+    /// 返回眼检测 session 的可变引用（供直接调用 eye 模块用）
+    pub fn eye_session(&mut self) -> &mut Session {
+        &mut self.eye_session
     }
 
     /// 返回当前使用的推理后端。
@@ -285,6 +325,8 @@ mod tests {
             class_index: None,
             confidence: None,
             bbox: None,
+            eye_sharpness: None,
+            eye_bbox: None,
             candidates: vec![],
             failure_stage: RecognitionFailureStage::Detection,
             recognized_at: String::new(),
@@ -299,6 +341,8 @@ mod tests {
             class_index: None,
             confidence: None,
             bbox: None,
+            eye_sharpness: None,
+            eye_bbox: None,
             candidates: vec![],
             failure_stage: RecognitionFailureStage::Classification,
             recognized_at: String::new(),
@@ -313,6 +357,8 @@ mod tests {
             class_index: None,
             confidence: None,
             bbox: None,
+            eye_sharpness: None,
+            eye_bbox: None,
             candidates: vec![],
             failure_stage: RecognitionFailureStage::Mapping,
             recognized_at: String::new(),
@@ -327,6 +373,8 @@ mod tests {
             class_index: None,
             confidence: None,
             bbox: None,
+            eye_sharpness: None,
+            eye_bbox: None,
             candidates: vec![],
             failure_stage: RecognitionFailureStage::Assets,
             recognized_at: String::new(),
@@ -345,6 +393,8 @@ mod tests {
             class_index: Some(100),
             confidence: Some(95.5),
             bbox: Some(BBox::new(0.1, 0.2, 0.5, 0.6)),
+            eye_sharpness: None,
+            eye_bbox: None,
             candidates: vec![],
             failure_stage: RecognitionFailureStage::None,
             recognized_at: "2026-07-28T12:00:00+00:00".into(),
@@ -428,6 +478,36 @@ mod tests {
         let _ = RecognizeError::RawPreview("test".into());
     }
 
+    /// eye.onnx 缺失时应报 ModelLoad 错误
+    #[test]
+    fn test_eye_model_missing_returns_modelload_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let models_dir = dir.path().join("models");
+        std::fs::create_dir(&models_dir).unwrap();
+
+        // 只放 detect.onnx 和 bird_model.onnx，缺 eye.onnx
+        let dummy = b"dummy onnx content";
+        std::fs::write(models_dir.join("detect.onnx"), dummy).unwrap();
+        std::fs::write(models_dir.join("bird_model.onnx"), dummy).unwrap();
+
+        // 也需要有效名录库——用空文件模拟创建
+        let db_path = dir.path().join("pica_ref.db");
+        // CatalogDb::open 会尝试打开 SQLite，可能失败；我们用临时 db
+        // 但本测试只验证 ModelLoad 错误，不会走到 CatalogDb
+        let result = Recognizer::new(&models_dir, &db_path);
+
+        match result {
+            Err(RecognizeError::ModelLoad(msg)) => {
+                assert!(
+                    msg.contains("eye"),
+                    "错误消息应提及 eye.onnx, got: {msg}"
+                );
+            }
+            Err(e) => panic!("期望 ModelLoad 错误，但得到: {e:?}"),
+            Ok(_) => panic!("应返回错误但成功创建了 Recognizer"),
+        }
+    }
+
     /// #[ignore] 真实模型冒烟测试（手动触发：cargo test -- --ignored -p photo-recognize）
     #[test]
     #[ignore]
@@ -439,7 +519,10 @@ mod tests {
         let models_dir = workspace_root.join("models");
         let catalog_db = workspace_root.join("data").join("pica_ref.db");
 
-        if !models_dir.join("detect.onnx").exists() || !catalog_db.exists() {
+        if !models_dir.join("detect.onnx").exists()
+            || !models_dir.join("eye.onnx").exists()
+            || !catalog_db.exists()
+        {
             eprintln!("SKIP: 模型或名录库不存在，请确保 worktree 根有 models/ 和 data/");
             return;
         }

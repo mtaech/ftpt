@@ -608,6 +608,10 @@ pub struct Recognition {
     pub confidence: Option<f32>,
     /// 检测框（检测失败为 None）
     pub bbox: Option<BBox>,
+    /// 鸟眼锐度分（连续，仅保证单调性，阈值后置；无鸟/有鸟无眼/评分失败为 None）
+    pub eye_sharpness: Option<f32>,
+    /// 评分所用眼框（归一化坐标，相对全图；无锐度分为 None）
+    pub eye_bbox: Option<BBox>,
     /// Top-5 候选（含 Top-1 自身除外的备选；分类失败为空）
     pub candidates: Vec<BirdCandidate>,
     pub failure_stage: RecognitionFailureStage,
@@ -908,6 +912,8 @@ mod tests {
             class_index: Some(1066),
             confidence: Some(85.3),
             bbox: Some(BBox::new(0.1, 0.2, 0.8, 0.9)),
+            eye_sharpness: Some(2.35),
+            eye_bbox: Some(BBox::new(0.3, 0.3, 0.4, 0.4)),
             candidates: vec![],
             failure_stage: RecognitionFailureStage::None,
             recognized_at: "2026-07-28T12:00:00Z".into(),
@@ -936,6 +942,8 @@ mod tests {
             class_index: None,
             confidence: None,
             bbox: None,
+            eye_sharpness: None,
+            eye_bbox: None,
             candidates: vec![],
             failure_stage: RecognitionFailureStage::Detection,
             recognized_at: "2026-07-28T12:00:00Z".into(),

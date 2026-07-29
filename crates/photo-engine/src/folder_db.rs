@@ -71,6 +71,10 @@ fn folder_migrations() -> Migrations<'static> {
                 recognized_at TEXT NOT NULL
             );",
         ),
+        M::up(
+            "ALTER TABLE recognition ADD COLUMN eye_sharpness REAL;
+             ALTER TABLE recognition ADD COLUMN eye_bbox TEXT;",
+        ),
     ])
 }
 
@@ -237,11 +241,13 @@ impl FolderDb {
         let normalized = rel_path.replace('\\', "/");
         let bbox_str = rec.bbox.as_ref().map(|b| b.to_db_string());
         let candidates_str = serde_json::to_string(&rec.candidates)?;
+        let eye_bbox_str = rec.eye_bbox.as_ref().map(|b| b.to_db_string());
         conn.execute(
             "INSERT OR REPLACE INTO recognition
              (rel_path, status, bird_id, bird_name, class_index, confidence,
-              bbox, candidates, failure_stage, recognized_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+              bbox, candidates, failure_stage, recognized_at,
+              eye_sharpness, eye_bbox)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             rusqlite::params![
                 normalized,
                 rec.status.as_str(),
@@ -253,6 +259,8 @@ impl FolderDb {
                 candidates_str,
                 rec.failure_stage.as_str(),
                 rec.recognized_at,
+                rec.eye_sharpness,
+                eye_bbox_str,
             ],
         )?;
         Ok(())
@@ -264,7 +272,8 @@ impl FolderDb {
         let normalized = rel_path.replace('\\', "/");
         let mut stmt = conn.prepare_cached(
             "SELECT rel_path, status, bird_id, bird_name, class_index, confidence,
-                    bbox, candidates, failure_stage, recognized_at
+                    bbox, candidates, failure_stage, recognized_at,
+                    eye_sharpness, eye_bbox
              FROM recognition WHERE rel_path = ?1",
         )?;
         match stmt.query_row(rusqlite::params![normalized], |row| row_to_recognition(row)) {
@@ -279,7 +288,8 @@ impl FolderDb {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare_cached(
             "SELECT rel_path, status, bird_id, bird_name, class_index, confidence,
-                    bbox, candidates, failure_stage, recognized_at
+                    bbox, candidates, failure_stage, recognized_at,
+                    eye_sharpness, eye_bbox
              FROM recognition",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -329,7 +339,8 @@ impl FolderDb {
             let conn = self.conn.lock();
             let mut stmt = conn.prepare_cached(
                 "SELECT rel_path, status, bird_id, bird_name, class_index, confidence,
-                        bbox, candidates, failure_stage, recognized_at
+                        bbox, candidates, failure_stage, recognized_at,
+                        eye_sharpness, eye_bbox
                  FROM recognition WHERE rel_path = ?1",
             )?;
             for (src_rel, _dst_rel) in entries {
@@ -639,6 +650,8 @@ fn row_to_recognition(row: &rusqlite::Row) -> rusqlite::Result<Result<Recognitio
     let bbox_str: Option<String> = row.get(6)?;
     let candidates_str: Option<String> = row.get(7)?;
     let recognized_at: String = row.get(9)?;
+    let eye_sharpness: Option<f32> = row.get(10)?;
+    let eye_bbox_str: Option<String> = row.get(11)?;
 
     let bird = match (bird_id, bird_name) {
         (Some(id), Some(cn)) => {
@@ -665,6 +678,8 @@ fn row_to_recognition(row: &rusqlite::Row) -> rusqlite::Result<Result<Recognitio
         candidates,
         failure_stage,
         recognized_at,
+        eye_sharpness,
+        eye_bbox: eye_bbox_str.and_then(|s| BBox::parse(&s)),
     }))
 }
 
@@ -727,6 +742,8 @@ mod tests {
             ],
             failure_stage: RecognitionFailureStage::None,
             recognized_at: "2026-07-28T10:00:00Z".into(),
+            eye_sharpness: Some(42.5),
+            eye_bbox: Some(BBox::new(0.3, 0.4, 0.5, 0.6)),
         }
     }
 
@@ -898,6 +915,72 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn test_recognition_eye_fields_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        let mut rec = make_recognition();
+        rec.eye_sharpness = Some(88.3);
+        rec.eye_bbox = Some(BBox::new(0.2, 0.3, 0.45, 0.55));
+        db.upsert_recognition("photos/owl.jpg", &rec).unwrap();
+        let got = db.get_recognition("photos/owl.jpg").unwrap().expect("should exist");
+        assert_eq!(got.eye_sharpness, Some(88.3));
+        assert_eq!(got.eye_bbox, Some(BBox::new(0.2, 0.3, 0.45, 0.55)));
+    }
+
+    #[test]
+    fn test_recognition_eye_fields_null_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        let mut rec = make_recognition();
+        rec.eye_sharpness = None;
+        rec.eye_bbox = None;
+        db.upsert_recognition("photos/crow.jpg", &rec).unwrap();
+        let got = db.get_recognition("photos/crow.jpg").unwrap().expect("should exist");
+        assert!(got.eye_sharpness.is_none());
+        assert!(got.eye_bbox.is_none());
+    }
+
+    #[test]
+    fn test_recognition_migration_old_rows_null() {
+        let tmp = TempDir::new().unwrap();
+        let pt_dir = tmp.path().join(".pt");
+        std::fs::create_dir_all(&pt_dir).unwrap();
+        let db_path = pt_dir.join("data.db");
+        {
+            // 创建不含 eye 列的旧版数据库，模拟迁移前状态
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS recognition (
+                    rel_path    TEXT PRIMARY KEY,
+                    status      TEXT NOT NULL,
+                    bird_id     INTEGER,
+                    bird_name   TEXT,
+                    class_index INTEGER,
+                    confidence  REAL,
+                    bbox        TEXT,
+                    candidates  TEXT,
+                    failure_stage TEXT,
+                    recognized_at TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+            // 插入旧行
+            conn.execute(
+                "INSERT INTO recognition (rel_path, status, failure_stage, recognized_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params!["old/bird.jpg", "Unrecognized", "None", "2026-01-01T00:00:00Z"],
+            )
+            .unwrap();
+            // 设置 user_version = 3，模拟前三版迁移已执行
+            conn.pragma_update(None, "user_version", 3i64).unwrap();
+        }
+        // 打开（触发迁移 4 追加 eye 列）
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        let got = db.get_recognition("old/bird.jpg").unwrap().expect("old row should exist");
+        assert!(got.eye_sharpness.is_none(), "迁移前旧行的 eye_sharpness 应为 None");
+        assert!(got.eye_bbox.is_none(), "迁移前旧行的 eye_bbox 应为 None");
+    }
+
     fn test_sync_with_scan_stale_delete_and_fingerprint() {
         let tmp = TempDir::new().unwrap();
         let db = FolderDb::open_in_dir(tmp.path()).unwrap();
