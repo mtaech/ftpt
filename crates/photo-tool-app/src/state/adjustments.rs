@@ -178,11 +178,14 @@ impl RootView {
 
     /// slider/重置/裁切变化：更新参数 → 持久化（异步）→ 重算 tone。
     /// 连续拖动时每帧调用，参数相等则跳过。
+    /// **必须无条件 notify**：显示源未就绪时 recompute 提前返回（不重算），
+    /// 但参数已更新——不 notify 则画面/数值文本不刷新，拖动观感为"无反应"。
     pub fn set_adjustment(&mut self, params: AdjustParams, cx: &mut Context<Self>) {
         if self.current_adjust == params {
             return;
         }
         self.current_adjust = params;
+        cx.notify();
         // 持久化（批量池异步，单条 UPSERT 廉价；拖动中不阻塞 UI）
         let Some(meta) = self.get_focused_capture().map(|m| m.primary_path.clone()) else {
             return;
@@ -203,7 +206,11 @@ impl RootView {
 
     /// 按当前参数重算调整渲染（tone 在显示源上，1600px <8ms；只认最新版本）。
     /// 显示源未就绪时静默返回（ensure_adjust_ready 构建完成后触发重算）。
-    fn recompute_adjust_render(&mut self, cx: &mut Context<Self>) {
+    /// **每次调用都取消旧任务 + 新令牌重算**：slider 快速拖动时旧任务在 worker 闭包
+    /// 开头检查令牌快速退出（不堆积），版本号保证只认最新——不设 loading 闸门，
+    /// 否则拖动中/Release 的最终值会因旧任务未完成被跳过。
+    /// pub(crate)：slider Release 事件（app.rs 订阅）确保拖动结束的最终值渲染。
+    pub(crate) fn recompute_adjust_render(&mut self, cx: &mut Context<Self>) {
         if self.current_adjust.is_neutral() {
             self.adjust_render = None;
             cx.notify();
@@ -212,13 +219,10 @@ impl RootView {
         let display16 = self.adjust_display16.clone();
         let display8 = self.adjust_display8.clone();
         if display16.is_none() && display8.is_none() {
-            return; // 源构建中/未构建
+            return;
         }
-        if self.adjust_render_loading {
-            return; // 在飞任务会按版本丢弃旧结果
-        }
-        self.adjust_render_loading = true;
-        // 新任务配新取消令牌（旧任务被取消，不占用 fast 池）
+        // 取消旧任务 + 新令牌（旧任务在 worker 闭包开头检查，快速退出）
+        self.adjust_render_cancel.store(true, Ordering::Relaxed);
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.adjust_render_cancel = cancel.clone();
         self.adjust_render_version += 1;
@@ -241,7 +245,6 @@ impl RootView {
                 }
             },
             move |this, result, cx| {
-                this.adjust_render_loading = false;
                 if generation != this.scan_generation {
                     return;
                 }

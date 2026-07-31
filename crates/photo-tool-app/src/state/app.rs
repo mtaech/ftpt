@@ -173,8 +173,6 @@ pub struct RootView {
     pub adjust_display8: Option<Arc<image::RgbImage>>,
     /// 调整显示源构建中哨兵（防重复 spawn）
     pub adjust_source_loading: bool,
-    /// 调整渲染重算中哨兵
-    pub adjust_render_loading: bool,
     /// 调整渲染取消令牌（slider 快速拖动时取消旧重算）
     pub adjust_render_cancel: Arc<AtomicBool>,
     /// 调整渲染参数版本（只认最新，防旧任务覆盖新参数结果）
@@ -247,26 +245,31 @@ impl RootView {
         // 订阅 slider 拖动事件：Change 实时更新参数 → set_adjustment（worker 重算 tone）。
         // set_value 不触发 SliderEvent，渲染时同步滑块值不会回环；set_adjustment 参数相等自动跳过。
         let adjust_slider_subs = vec![
-            cx.subscribe(&exposure_slider, |view, _, event, cx| {
-                if let SliderEvent::Change(v) = event {
+            cx.subscribe(&exposure_slider, |view, _, event, cx| match event {
+                // Change 实时更新参数并重算；Release 强制重算一次（拖动结束的最终值
+                // 可能因上一个重算任务未完成被跳过，确保落定渲染）
+                SliderEvent::Change(v) => {
                     let mut p = view.current_adjust;
                     p.exposure = v.start();
                     view.set_adjustment(p, cx);
                 }
+                SliderEvent::Release(_) => view.recompute_adjust_render(cx),
             }),
-            cx.subscribe(&contrast_slider, |view, _, event, cx| {
-                if let SliderEvent::Change(v) = event {
+            cx.subscribe(&contrast_slider, |view, _, event, cx| match event {
+                SliderEvent::Change(v) => {
                     let mut p = view.current_adjust;
                     p.contrast = v.start() as i32;
                     view.set_adjustment(p, cx);
                 }
+                SliderEvent::Release(_) => view.recompute_adjust_render(cx),
             }),
-            cx.subscribe(&saturation_slider, |view, _, event, cx| {
-                if let SliderEvent::Change(v) = event {
+            cx.subscribe(&saturation_slider, |view, _, event, cx| match event {
+                SliderEvent::Change(v) => {
                     let mut p = view.current_adjust;
                     p.saturation = v.start() as i32;
                     view.set_adjustment(p, cx);
                 }
+                SliderEvent::Release(_) => view.recompute_adjust_render(cx),
             }),
         ];
 
@@ -342,7 +345,6 @@ impl RootView {
             adjust_display16: None,
             adjust_display8: None,
             adjust_source_loading: false,
-            adjust_render_loading: false,
             adjust_render_cancel: Arc::new(AtomicBool::new(false)),
             adjust_render_version: 0,
             adjust_exporting: false,

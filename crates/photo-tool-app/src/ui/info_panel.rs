@@ -1,7 +1,7 @@
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use photo_domain::{CaptureMeta, ColorLabel, Flag};
-use photo_domain::{AdjustParams, Rating as DomainRating, Recognition, RecognitionStatus};
+use photo_domain::{Rating as DomainRating, Recognition, RecognitionStatus};
 
 use crate::action::Action;
 use crate::state::app::RootView;
@@ -150,23 +150,38 @@ fn render_adjust_panel(
                     .child("当前无调整"),
             )
         })
-        // 曝光（EV ±2.0，步进 0.05）
+        // 曝光（EV ±2.0，步进 0.05）；每项独立重置（非中性时显示）
         .child(adjust_slider_row(
             "曝光",
             format!("{:+.2} EV", params.exposure),
             exposure_slider,
+            reset_adjust_button("reset-exposure", params.exposure != 0.0, &vh, |view, cx| {
+                let mut p = view.current_adjust;
+                p.exposure = 0.0;
+                view.set_adjustment(p, cx);
+            }),
         ))
         // 对比度（±100）
         .child(adjust_slider_row(
             "对比度",
             format!("{:+}", params.contrast),
             contrast_slider,
+            reset_adjust_button("reset-contrast", params.contrast != 0, &vh, |view, cx| {
+                let mut p = view.current_adjust;
+                p.contrast = 0;
+                view.set_adjustment(p, cx);
+            }),
         ))
         // 饱和度（±100）
         .child(adjust_slider_row(
             "饱和度",
             format!("{:+}", params.saturation),
             saturation_slider,
+            reset_adjust_button("reset-saturation", params.saturation != 0, &vh, |view, cx| {
+                let mut p = view.current_adjust;
+                p.saturation = 0;
+                view.set_adjustment(p, cx);
+            }),
         ))
         // 裁切状态：已裁切时显示「清除裁切」按钮（只清 crop，保留色调参数）
         .when(params.crop.is_some(), |this| {
@@ -231,22 +246,6 @@ fn render_adjust_panel(
                         }),
                 )
                 .child(
-                    Button::new("adjust-reset")
-                        .ghost()
-                        .small()
-                        .label("重置")
-                        .on_click({
-                            let vh = vh.clone();
-                            move |_, _window, cx| {
-                                if let Some(e) = vh.upgrade() {
-                                    let _ = cx.update_entity(&e, |view, cx| {
-                                        view.set_adjustment(AdjustParams::default(), cx);
-                                    });
-                                }
-                            }
-                        }),
-                )
-                .child(
                     Button::new("adjust-export")
                         .primary()
                         .small()
@@ -286,14 +285,15 @@ fn render_adjust_panel(
         })
 }
 
-/// 调整 slider 行：左侧标签 + 中部滑块 + 右侧数值（右对齐等宽位）
+/// 调整 slider 行：左侧标签 + 中部滑块 + 右侧数值 + 独立重置按钮（可选）
 fn adjust_slider_row(
     label: &str,
     value_text: String,
     slider: &gpui::Entity<SliderState>,
+    reset: Option<AnyElement>,
 ) -> impl IntoElement {
     h_flex()
-        .gap_2()
+        .gap_1()
         .items_center()
         .child(
             div()
@@ -306,13 +306,37 @@ fn adjust_slider_row(
         .child(div().flex_1().child(Slider::new(slider).horizontal()))
         .child(
             div()
-                .w(px(56.))
+                .w(px(52.))
                 .flex_shrink_0()
                 .text_right()
                 .text_color(theme::colors().text)
                 .text_size(px(12.))
                 .child(value_text),
         )
+        .when_some(reset, |this, el| this.child(el))
+}
+
+/// 单调整项独立重置按钮：非中性时显示，点击将该参数归零（ADR 0007）
+fn reset_adjust_button(
+    id: &'static str,
+    visible: bool,
+    vh: &gpui::WeakEntity<RootView>,
+    apply: impl Fn(&mut RootView, &mut Context<RootView>) + 'static,
+) -> Option<AnyElement> {
+    visible.then(|| {
+        let vh = vh.clone();
+        Button::new(id)
+            .ghost()
+            .small()
+            .icon(IconName::Close)
+            .tooltip("重置该项")
+            .on_click(move |_, _window, cx| {
+                if let Some(e) = vh.upgrade() {
+                    let _ = cx.update_entity(&e, |view, cx| apply(view, cx));
+                }
+            })
+            .into_any_element()
+    })
 }
 
 /// 1px 分隔线
