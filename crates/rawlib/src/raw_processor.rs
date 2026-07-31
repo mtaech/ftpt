@@ -145,6 +145,22 @@ impl DecodeOptions {
         }
     }
 
+    /// 调整母版预设：half_size + bilinear + 16bit + 自动亮度 + sRGB + 相机白平衡
+    ///
+    /// 供参数化调整（ADR 0007）使用：16-bit 输出保证曝光/对比度调整的动态范围，
+    /// 自动亮度确保母版曝光正确（调整以正确曝光为基准）；half_size 把首次就绪压在 2s 内。
+    pub fn preview16() -> Self {
+        DecodeOptions {
+            half_size: true,
+            demosaic_quality: 0,
+            output_bps: 16,
+            no_auto_bright: false,
+            output_color: 1,
+            linear_gamma: false,
+            use_camera_wb: true,
+        }
+    }
+
     /// 全尺寸像素级预设：half_size=false + AHD + 8bit + 自动亮度 + 相机白平衡
     ///
     /// 1:1（zoom==0）查看用：全分辨率 + 高质量去马赛克 + 正确曝光，

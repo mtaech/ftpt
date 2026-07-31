@@ -1,3 +1,4 @@
+pub mod adjustments;
 pub mod app;
 pub mod batch_ops;
 pub mod filter;

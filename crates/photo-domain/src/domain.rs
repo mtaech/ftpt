@@ -506,6 +506,39 @@ impl BBox {
     }
 }
 
+/// 调整参数（参数化非破坏，ADR 0007）：per-capture，全零 = 无调整（短路现有渲染路径）。
+/// 曝光/对比度/饱和度为像素值变换，裁切为几何变换；应用顺序：先裁切 → 再色调 → 缩放显示。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdjustParams {
+    /// 曝光（EV，±2.0，步进 0.05；+1.0 EV = 曝光量翻倍）
+    pub exposure: f32,
+    /// 对比度（-100 ~ +100，0 中性）
+    pub contrast: i32,
+    /// 饱和度（-100 ~ +100，0 中性；-100 = 去饱和）
+    pub saturation: i32,
+    /// 裁切框（归一化矩形，复用 BBox；None = 无裁切/全图）
+    pub crop: Option<BBox>,
+}
+
+impl Default for AdjustParams {
+    fn default() -> Self {
+        Self {
+            exposure: 0.0,
+            contrast: 0,
+            saturation: 0,
+            crop: None,
+        }
+    }
+}
+
+impl AdjustParams {
+    /// 是否为无调整（全零参数 + 无裁切）——渲染路径短路到现有 8-bit 链路
+    pub fn is_neutral(&self) -> bool {
+        self.exposure == 0.0 && self.contrast == 0 && self.saturation == 0 && self.crop.is_none()
+    }
+}
+
 /// 识别状态（三态；无识别记录 = 未识别，不占枚举值）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecognitionStatus {

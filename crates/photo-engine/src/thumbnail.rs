@@ -2,6 +2,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+use crate::adjustments::Rgb16Image;
 use photo_domain::{ImageFormat, SourceFile};
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -278,6 +279,66 @@ impl ThumbnailCache {
 /// 小内嵌（多数相机 160-640px）不再使用——放大会糊，直接完整解码（half_size 预览选项，约 4x 加速）。
 pub fn decode_raw_preview(path: &Path, max_size: u32) -> Result<Vec<u8>, ThumbnailError> {
     decode_raw_impl(path, max_size, None)
+}
+
+/// RAW 16-bit 母版解码（half_size + 16bit + 自动亮度 + sRGB + 相机白平衡，ADR 0007）。
+/// 返回 RGB16 缓冲，供参数化调整：**参数变更只重算像素变换，不重复解码**——
+/// 16-bit 母版是 slider 拖动实时性的前提。在 worker 线程中调用。
+/// 不落磁盘（内存缓冲，随焦点图淘汰，见性能预算 ≤40MB/张）。
+pub fn decode_raw_preview16(
+    path: &Path,
+    cancel: Option<&AtomicBool>,
+) -> Result<Rgb16Image, ThumbnailError> {
+    decode_raw16_with_options(path, &rawlib::DecodeOptions::preview16(), cancel)
+}
+
+/// 按指定选项解码 RAW 为 16-bit RGB 缓冲（小端 ushort RGB 交织 → Rgb16Image）。
+/// 供调整母版（half_size）与导出（全尺寸 quality）共用。
+pub fn decode_raw16_with_options(
+    path: &Path,
+    opts: &rawlib::DecodeOptions,
+    cancel: Option<&AtomicBool>,
+) -> Result<Rgb16Image, ThumbnailError> {
+    if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+        return Err(ThumbnailError::Cancelled);
+    }
+    let path_str = path.to_string_lossy();
+    let img = rawlib::extract_image_with_options(path_str.as_ref(), opts).map_err(|e| {
+        tracing::error!("16-bit 解码失败: {} — {e}", path.display());
+        ThumbnailError::Raw(e.to_string())
+    })?;
+    tracing::info!(
+        "16-bit 解码成功: {} ({}×{} {}-bit)",
+        path.display(),
+        img.width,
+        img.height,
+        img.bits
+    );
+    if img.bits != 16 {
+        return Err(ThumbnailError::Raw(format!(
+            "解码输出位深异常: {}（期望 16，实际 {}）",
+            path.display(),
+            img.bits
+        )));
+    }
+    // LibRaw 16-bit 输出为小端 ushort RGB 交织（本机字节序，x86/ARM LE）
+    let mut data = Vec::with_capacity(img.data.len() / 2);
+    for ch in img.data.chunks_exact(2) {
+        data.push(u16::from_le_bytes([ch[0], ch[1]]));
+    }
+    let data_len = data.len();
+    Rgb16Image::from_raw(img.width as u32, img.height as u32, data).ok_or_else(|| {
+        tracing::error!(
+            "16-bit 缓冲尺寸不符: {}×{} got {}",
+            img.width,
+            img.height,
+            data_len
+        );
+        ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "16-bit buffer size mismatch",
+        )))
+    })
 }
 
 /// RAW 解码共用实现。`cancel` 为合作式取消令牌：完整解码（慢操作）前检查一次。

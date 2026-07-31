@@ -19,6 +19,12 @@ pub fn render_layout(
     window: &mut Window,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
+    // 调整视图激活（右侧面板调整 tab + 非中性参数）时，确保调整显示源/渲染就绪。
+    // preview.rs 的 render_preview 签名是 &RootView（拿不到 &mut），故在此（渲染三栏之前）挂载。
+    if view.right_panel_tab == 1 && !view.current_adjust.is_neutral() {
+        view.ensure_adjust_ready(cx);
+    }
+
     let font_family = view.config.font_family.clone();
 
         v_flex()
@@ -235,7 +241,9 @@ pub fn render_layout(
                                         .bg(theme::colors().background)
                                         .border_color(theme::colors().border_variant)
                                         .border_l_1()
-                                        .child(crate::ui::info_panel::render_info_panel(view, cx))
+                                        .child(crate::ui::info_panel::render_info_panel(
+                                            view, window, cx,
+                                        ))
                                         .into_any_element(),
                                 ),
                         )

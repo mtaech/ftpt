@@ -1,12 +1,15 @@
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use photo_domain::{CaptureMeta, ColorLabel, Flag};
-use photo_domain::{Rating as DomainRating, Recognition, RecognitionStatus};
+use photo_domain::{AdjustParams, Rating as DomainRating, Recognition, RecognitionStatus};
 
 use crate::action::Action;
 use crate::state::app::RootView;
 use gpui_component::rating::Rating;
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::Disableable;
+use gpui_component::slider::{Slider, SliderState};
+use gpui_component::tab::{Tab, TabBar};
 use gpui_component::{Sizable, IconName};
 
 use crate::ui::controls::{clear_link, section_header, segmented_button};
@@ -14,8 +17,12 @@ use crate::ui::theme;
 use crate::ui::format_file_size;
 use gpui_component::h_flex;
 
-/// Render the right info panel with EXIF info + rating/label/flag controls.
-pub fn render_info_panel(view: &RootView, cx: &mut Context<RootView>) -> impl IntoElement {
+/// Render the right info panel: 顶部双 tab（信息/调整）+ 对应 tab 内容。
+pub fn render_info_panel(
+    view: &RootView,
+    window: &mut Window,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
     let focused = view.get_focused_capture();
     let vh = cx.entity().downgrade();
 
@@ -25,16 +32,30 @@ pub fn render_info_panel(view: &RootView, cx: &mut Context<RootView>) -> impl In
         .size_full()
         .p_3()
         .gap_2()
-        // ── 面板标题栏 ──
+        // ── 面板标题栏：信息/调整 tab + 关闭按钮 ──
         .child(
             h_flex()
                 .justify_between()
                 .items_center()
                 .child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme::colors().text)
-                        .child("信息"),
+                    TabBar::new("right-panel-tabs")
+                        .small()
+                        .selected_index(view.right_panel_tab)
+                        .on_click({
+                            let vh = vh.clone();
+                            move |ix, _window, cx| {
+                                if let Some(e) = vh.upgrade() {
+                                    let _ = cx.update_entity(&e, |view, cx| {
+                                        if view.right_panel_tab != *ix {
+                                            view.right_panel_tab = *ix;
+                                            cx.notify();
+                                        }
+                                    });
+                                }
+                            }
+                        })
+                        .child(Tab::from("信息"))
+                        .child(Tab::from("调整")),
                 )
                 .child(
                     Button::new("close-right-panel")
@@ -52,19 +73,246 @@ pub fn render_info_panel(view: &RootView, cx: &mut Context<RootView>) -> impl In
                 ),
         )
         .child(section_divider())
-        // ── Hero ──
-        .child(render_hero(focused))
-        .child(section_divider())
-        // ── 识别 ──
-        .child(render_recognition_section(view, cx))
-        .child(section_divider())
-        .child(render_exif_section(focused))
-        .child(section_divider())
-        .child(render_rating_section(focused, cx))
-        .child(section_divider())
-        .child(render_color_label_section(focused, cx))
-        .child(section_divider())
-        .child(render_flag_section(focused, cx))
+        // ── tab 内容 ──
+        .child(if view.right_panel_tab == 0 {
+            // 信息 tab：hero/识别/EXIF/评分/色标/旗标（原有内容原样保留）
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(render_hero(focused))
+                .child(section_divider())
+                .child(render_recognition_section(view, cx))
+                .child(section_divider())
+                .child(render_exif_section(focused))
+                .child(section_divider())
+                .child(render_rating_section(focused, cx))
+                .child(section_divider())
+                .child(render_color_label_section(focused, cx))
+                .child(section_divider())
+                .child(render_flag_section(focused, cx))
+                .into_any_element()
+        } else {
+            // 调整 tab：曝光/对比度/饱和度 slider + 重置/导出
+            render_adjust_panel(view, window, cx).into_any_element()
+        })
+}
+
+/// 调整 tab：曝光/对比度/饱和度 slider + 重置/导出（ADR 0007 参数化非破坏）。
+/// slider 状态实体常驻 RootView（不随渲染重建）；回调只更新参数 + set_adjustment（重算在 worker），
+/// 渲染路径不产生任何像素级工作。
+fn render_adjust_panel(
+    view: &RootView,
+    window: &mut Window,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let vh = cx.entity().downgrade();
+    let params = view.current_adjust;
+
+    // 无焦点图：仅提示
+    if view.get_focused_capture().is_none() {
+        return div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_color(colors.text_muted)
+                    .text_size(px(12.))
+                    .child("未选择图片"),
+            );
+    }
+
+    // slider 显示值跟随 current_adjust（切图/重置后值不一致才同步；set_value 不触发
+    // SliderEvent，不会回环触发 set_adjustment；set_adjustment 参数相等也会自动跳过）
+    let (exposure_slider, contrast_slider, saturation_slider) = &view.adjust_sliders;
+    if (exposure_slider.read(cx).value().start() - params.exposure).abs() > 1e-4 {
+        exposure_slider.update(cx, |s, cx| s.set_value(params.exposure, window, cx));
+    }
+    if (contrast_slider.read(cx).value().start() - params.contrast as f32).abs() > 1e-4 {
+        contrast_slider.update(cx, |s, cx| s.set_value(params.contrast as f32, window, cx));
+    }
+    if (saturation_slider.read(cx).value().start() - params.saturation as f32).abs() > 1e-4 {
+        saturation_slider.update(cx, |s, cx| s.set_value(params.saturation as f32, window, cx));
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        // 全中性参数提示
+        .when(params.is_neutral(), |this| {
+            this.child(
+                div()
+                    .text_color(colors.text_muted)
+                    .text_size(px(12.))
+                    .child("当前无调整"),
+            )
+        })
+        // 曝光（EV ±2.0，步进 0.05）
+        .child(adjust_slider_row(
+            "曝光",
+            format!("{:+.2} EV", params.exposure),
+            exposure_slider,
+        ))
+        // 对比度（±100）
+        .child(adjust_slider_row(
+            "对比度",
+            format!("{:+}", params.contrast),
+            contrast_slider,
+        ))
+        // 饱和度（±100）
+        .child(adjust_slider_row(
+            "饱和度",
+            format!("{:+}", params.saturation),
+            saturation_slider,
+        ))
+        // 裁切状态：已裁切时显示「清除裁切」按钮（只清 crop，保留色调参数）
+        .when(params.crop.is_some(), |this| {
+            this.child(
+                h_flex()
+                    .justify_between()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_color(colors.success)
+                            .text_size(px(12.))
+                            .child("已裁切"),
+                    )
+                    .child(
+                        Button::new("adjust-crop-clear")
+                            .ghost()
+                            .small()
+                            .label("清除裁切")
+                            .on_click({
+                                let vh = vh.clone();
+                                move |_, _window, cx| {
+                                    if let Some(e) = vh.upgrade() {
+                                        let _ = cx.update_entity(&e, |view, cx| {
+                                            let mut p = view.current_adjust;
+                                            p.crop = None;
+                                            view.set_adjustment(p, cx);
+                                        });
+                                    }
+                                }
+                            }),
+                    ),
+            )
+        })
+        // ── 操作按钮行：裁切 + 重置 + 导出 ──
+        .child(
+            h_flex()
+                .justify_between()
+                .gap_2()
+                .child(
+                    // 「裁切」：点击出与图片等大的全图框（BBox 全图），再拖手柄/移动微调；
+                    // 已裁切时点击重设为全图框（重新开始）
+                    Button::new("adjust-crop")
+                        .ghost()
+                        .small()
+                        .label(if params.crop.is_some() {
+                            "重设裁切"
+                        } else {
+                            "裁切"
+                        })
+                        .on_click({
+                            let vh = vh.clone();
+                            move |_, _window, cx| {
+                                if let Some(e) = vh.upgrade() {
+                                    let _ = cx.update_entity(&e, |view, cx| {
+                                        let mut p = view.current_adjust;
+                                        p.crop = Some(photo_domain::BBox::new(0.0, 0.0, 1.0, 1.0));
+                                        view.set_adjustment(p, cx);
+                                    });
+                                }
+                            }
+                        }),
+                )
+                .child(
+                    Button::new("adjust-reset")
+                        .ghost()
+                        .small()
+                        .label("重置")
+                        .on_click({
+                            let vh = vh.clone();
+                            move |_, _window, cx| {
+                                if let Some(e) = vh.upgrade() {
+                                    let _ = cx.update_entity(&e, |view, cx| {
+                                        view.set_adjustment(AdjustParams::default(), cx);
+                                    });
+                                }
+                            }
+                        }),
+                )
+                .child(
+                    Button::new("adjust-export")
+                        .primary()
+                        .small()
+                        .label(if view.adjust_exporting {
+                            "导出中…"
+                        } else {
+                            "导出…"
+                        })
+                        .disabled(view.adjust_exporting)
+                        .on_click({
+                            let vh = vh.clone();
+                            move |_, _window, cx| {
+                                if let Some(e) = vh.upgrade() {
+                                    let _ = cx.update_entity(&e, |view, cx| {
+                                        view.export_adjusted(cx);
+                                    });
+                                }
+                            }
+                        }),
+                ),
+        )
+        // 导出结果消息（成功/失败；取消目录选择时 msg 为 None 不显示）
+        .when_some(view.adjust_export_msg.as_deref(), |this, msg| {
+            let color = if msg.starts_with("已导出") {
+                colors.success
+            } else if msg.starts_with("导出失败") {
+                colors.error
+            } else {
+                colors.text_muted
+            };
+            this.child(
+                div()
+                    .text_color(color)
+                    .text_size(px(11.))
+                    .child(msg.to_string()),
+            )
+        })
+}
+
+/// 调整 slider 行：左侧标签 + 中部滑块 + 右侧数值（右对齐等宽位）
+fn adjust_slider_row(
+    label: &str,
+    value_text: String,
+    slider: &gpui::Entity<SliderState>,
+) -> impl IntoElement {
+    h_flex()
+        .gap_2()
+        .items_center()
+        .child(
+            div()
+                .w(px(40.))
+                .flex_shrink_0()
+                .text_color(theme::colors().text_muted)
+                .text_size(px(12.))
+                .child(label.to_string()),
+        )
+        .child(div().flex_1().child(Slider::new(slider).horizontal()))
+        .child(
+            div()
+                .w(px(56.))
+                .flex_shrink_0()
+                .text_right()
+                .text_color(theme::colors().text)
+                .text_size(px(12.))
+                .child(value_text),
+        )
 }
 
 /// 1px 分隔线

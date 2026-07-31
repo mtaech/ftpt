@@ -13,7 +13,10 @@ use parking_lot::Mutex;
 use thiserror::Error;
 use rusqlite_migration::{Migrations, M};
 
-use photo_domain::{BBox, BirdCandidate, ImageFormat, Recognition, RecognitionFailureStage, RecognitionStatus};
+use photo_domain::{
+    AdjustParams, BBox, BirdCandidate, ImageFormat, Recognition, RecognitionFailureStage,
+    RecognitionStatus,
+};
 use photo_domain::ExifMetadata;
 use photo_domain::XmpMetadata;
 
@@ -74,6 +77,15 @@ fn folder_migrations() -> Migrations<'static> {
         M::up(
             "ALTER TABLE recognition ADD COLUMN eye_sharpness REAL;
              ALTER TABLE recognition ADD COLUMN eye_bbox TEXT;",
+        ),
+        M::up(
+            "CREATE TABLE IF NOT EXISTS adjustments (
+                rel_path    TEXT PRIMARY KEY,
+                exposure    REAL NOT NULL DEFAULT 0,
+                contrast    INTEGER NOT NULL DEFAULT 0,
+                saturation  INTEGER NOT NULL DEFAULT 0,
+                crop        TEXT
+            );",
         ),
     ])
 }
@@ -359,6 +371,111 @@ impl FolderDb {
         }
         Ok(())
     }
+    // ── adjustments 真相表（参数化调整，ADR 0007：随文件走，不可当缓存清除）──
+
+    /// UPSERT 一条调整参数。全零参数仍写入（显式记录“已复位”），读取侧与无行同义。
+    pub fn put_adjustments(&self, rel_path: &str, params: &AdjustParams) -> Result<(), FolderDbError> {
+        let conn = self.conn.lock();
+        let normalized = rel_path.replace('\\', "/");
+        let crop_str = params.crop.as_ref().map(|b| b.to_db_string());
+        conn.execute(
+            "INSERT OR REPLACE INTO adjustments (rel_path, exposure, contrast, saturation, crop)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                normalized,
+                params.exposure as f64,
+                params.contrast as i64,
+                params.saturation as i64,
+                crop_str,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 查询单条调整参数（无行 = None = 无调整）。
+    pub fn get_adjustments(&self, rel_path: &str) -> Result<Option<AdjustParams>, FolderDbError> {
+        let conn = self.conn.lock();
+        let normalized = rel_path.replace('\\', "/");
+        let mut stmt = conn.prepare_cached(
+            "SELECT exposure, contrast, saturation, crop FROM adjustments WHERE rel_path = ?1",
+        )?;
+        match stmt.query_row(rusqlite::params![normalized], |row| {
+            let crop_str: Option<String> = row.get(3)?;
+            Ok(AdjustParams {
+                exposure: row.get::<_, f64>(0)? as f32,
+                contrast: row.get::<_, i64>(1)? as i32,
+                saturation: row.get::<_, i64>(2)? as i32,
+                crop: crop_str.and_then(|s| BBox::parse(&s)),
+            })
+        }) {
+            Ok(params) => Ok(Some(params)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// 批量删除调整行（文件删除后同步）。
+    pub fn delete_adjustments(&self, rel_paths: &[String]) -> Result<(), FolderDbError> {
+        let conn = self.conn.lock();
+        for rp in rel_paths {
+            let normalized = rp.replace('\\', "/");
+            conn.execute(
+                "DELETE FROM adjustments WHERE rel_path = ?1",
+                rusqlite::params![normalized],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// 重命名调整行的键（文件重命名后同步）。
+    pub fn rename_adjustment(&self, old_rel: &str, new_rel: &str) -> Result<(), FolderDbError> {
+        let conn = self.conn.lock();
+        let old_norm = old_rel.replace('\\', "/");
+        let new_norm = new_rel.replace('\\', "/");
+        conn.execute(
+            "UPDATE adjustments SET rel_path = ?1 WHERE rel_path = ?2",
+            rusqlite::params![new_norm, old_norm],
+        )?;
+        Ok(())
+    }
+
+    /// 将一批调整行复制到目标库（跨文件夹移动/复制用）。
+    /// entries: (源 rel_path, 目标 rel_path)
+    pub fn copy_adjustments_to(
+        &self,
+        target_db: &mut FolderDb,
+        entries: &[(String, String)],
+    ) -> Result<(), FolderDbError> {
+        // 与 copy_recognitions_to 同构：逐条按源键查询，成对收集避免索引错位
+        let mut pairs: Vec<(String, AdjustParams)> = Vec::new();
+        {
+            let conn = self.conn.lock();
+            let mut stmt = conn.prepare_cached(
+                "SELECT exposure, contrast, saturation, crop FROM adjustments WHERE rel_path = ?1",
+            )?;
+            for (src_rel, dst_rel) in entries {
+                let normalized = src_rel.replace('\\', "/");
+                match stmt.query_row(rusqlite::params![normalized], |row| {
+                    let crop_str: Option<String> = row.get(3)?;
+                    Ok(AdjustParams {
+                        exposure: row.get::<_, f64>(0)? as f32,
+                        contrast: row.get::<_, i64>(1)? as i32,
+                        saturation: row.get::<_, i64>(2)? as i32,
+                        crop: crop_str.and_then(|s| BBox::parse(&s)),
+                    })
+                }) {
+                    Ok(params) => pairs.push((dst_rel.clone(), params)),
+                    Err(rusqlite::Error::QueryReturnedNoRows) => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+        for (dst_rel, params) in pairs {
+            target_db.put_adjustments(&dst_rel, &params)?;
+        }
+        Ok(())
+    }
+
     // ── xmp_meta 真相表（评分/色标/旗标持久化，不可当缓存清除）──
 
     /// 批量删除评分/色标/旗标行。
@@ -425,6 +542,7 @@ pub struct SyncStats {
     pub cache_updated: usize,
     pub cache_failed: usize,
     pub recognition_deleted: usize,
+    pub adjustments_deleted: usize,
 }
 
 impl FolderDb {
@@ -480,6 +598,17 @@ impl FolderDb {
                 if !entry_rel_paths.contains(rp.as_str()) {
                     conn.execute("DELETE FROM recognition WHERE rel_path = ?1", rusqlite::params![rp])?;
                     stats.recognition_deleted += 1;
+                }
+            }
+        }
+        {
+            let mut stmt = conn.prepare_cached("SELECT rel_path FROM adjustments")?;
+            let db_rel_paths: Vec<String> = stmt.query_map([], |row| row.get(0))?
+                .filter_map(|r| r.ok()).collect();
+            for rp in &db_rel_paths {
+                if !entry_rel_paths.contains(rp.as_str()) {
+                    conn.execute("DELETE FROM adjustments WHERE rel_path = ?1", rusqlite::params![rp])?;
+                    stats.adjustments_deleted += 1;
                 }
             }
         }
@@ -715,6 +844,15 @@ mod tests {
                 longitude: Some((116.0, 23.0, 29.0)),
                 altitude: Some(50.5),
             },
+        }
+    }
+
+    fn make_adjustments() -> AdjustParams {
+        AdjustParams {
+            exposure: 1.25,
+            contrast: -30,
+            saturation: 45,
+            crop: Some(BBox::new(0.1, 0.2, 0.7, 0.8)),
         }
     }
 
@@ -1033,5 +1171,101 @@ mod tests {
         let stats2 = db.sync_with_scan(&entries2, &|_, _| {}).unwrap();
         assert_eq!(stats2.cache_updated, 1);
         assert_eq!(stats2.cache_failed, 1);
+    }
+
+    #[test]
+    fn test_adjustments_table_exists_and_rw() {
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        let params = make_adjustments();
+        db.put_adjustments("a.NEF", &params).unwrap();
+        let got = db.get_adjustments("a.NEF").unwrap().unwrap();
+        assert_eq!(got.exposure, params.exposure);
+        assert_eq!(got.contrast, params.contrast);
+        assert_eq!(got.saturation, params.saturation);
+        assert_eq!(got.crop, params.crop);
+    }
+
+    #[test]
+    fn test_adjustments_none_when_absent() {
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        assert!(db.get_adjustments("nope.jpg").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_adjustments_upsert_overwrite() {
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        let a = make_adjustments();
+        let b = AdjustParams {
+            exposure: -0.5,
+            ..a
+        };
+        db.put_adjustments("x.jpg", &a).unwrap();
+        db.put_adjustments("x.jpg", &b).unwrap();
+        let got = db.get_adjustments("x.jpg").unwrap().unwrap();
+        assert_eq!(got.exposure, -0.5);
+        assert_eq!(got.crop, a.crop);
+    }
+
+    #[test]
+    fn test_adjustments_crop_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        // 无裁切（None）与有裁切都往返
+        db.put_adjustments("a.jpg", &AdjustParams::default()).unwrap();
+        assert!(db.get_adjustments("a.jpg").unwrap().unwrap().crop.is_none());
+    }
+
+    #[test]
+    fn test_adjustments_rename_and_delete() {
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        let params = make_adjustments();
+        db.put_adjustments("old.jpg", &params).unwrap();
+        db.rename_adjustment("old.jpg", "new.jpg").unwrap();
+        assert!(db.get_adjustments("old.jpg").unwrap().is_none());
+        assert!(db.get_adjustments("new.jpg").unwrap().is_some());
+        db.delete_adjustments(&["new.jpg".into()]).unwrap();
+        assert!(db.get_adjustments("new.jpg").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_adjustments_copy_to_target_db() {
+        let tmp = TempDir::new().unwrap();
+        let src = FolderDb::open_in_dir(tmp.path()).unwrap();
+        let dst_dir = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst_dir).unwrap();
+        let mut dst = FolderDb::open_in_dir(&dst_dir).unwrap();
+        let params = make_adjustments();
+        src.put_adjustments("a.jpg", &params).unwrap();
+        src.copy_adjustments_to(&mut dst, &[("a.jpg".into(), "b.jpg".into())]).unwrap();
+        let got = dst.get_adjustments("b.jpg").unwrap().unwrap();
+        assert_eq!(got.exposure, params.exposure);
+        assert_eq!(got.crop, params.crop);
+        // 源库行保留（复制语义）
+        assert!(src.get_adjustments("a.jpg").unwrap().is_some());
+    }
+
+    #[test]
+    fn test_adjustments_sync_with_scan_cleanup() {
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        let params = make_adjustments();
+        db.put_adjustments("gone.jpg", &params).unwrap();
+        let keep = tmp.path().join("keep.jpg");
+        std::fs::write(&keep, b"fake").unwrap();
+        let (ksize, kmtime) = file_fingerprint(&keep).unwrap();
+        let entries = vec![FileEntry {
+            full_path: keep.clone(),
+            rel_path: "keep.jpg".into(),
+            file_size: ksize,
+            mtime_ns: kmtime as i64,
+            format: ImageFormat::Jpeg,
+        }];
+        let stats = db.sync_with_scan(&entries, &|_, _| {}).unwrap();
+        assert_eq!(stats.adjustments_deleted, 1);
+        assert!(db.get_adjustments("gone.jpg").unwrap().is_none());
     }
 }

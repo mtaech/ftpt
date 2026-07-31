@@ -170,6 +170,39 @@ pub fn sync_rename_recognition(db: &FolderDb, old_rel: &str, new_rel: &str) -> R
     db.rename_recognition(old_rel, new_rel)
 }
 
+// ── adjustments 同步（参数化调整，ADR 0007，键为相对路径）──
+
+/// 删除文件后同步删除对应调整行。
+pub fn sync_delete_adjustments(db: &FolderDb, rel_paths: &[String]) -> Result<(), FolderDbError> {
+    db.delete_adjustments(rel_paths)
+}
+
+/// 复制文件后同步复制对应调整行到目标库。
+/// entries: (源 rel_path, 目标 rel_path)
+pub fn sync_copy_adjustments(
+    src_db: &FolderDb,
+    dst_db: &mut FolderDb,
+    entries: &[(String, String)],
+) -> Result<(), FolderDbError> {
+    src_db.copy_adjustments_to(dst_db, entries)
+}
+
+/// 移动文件后同步迁移调整行到目标库（复制到目标 + 删除源）。
+pub fn sync_move_adjustments(
+    src_db: &FolderDb,
+    dst_db: &mut FolderDb,
+    entries: &[(String, String)],
+) -> Result<(), FolderDbError> {
+    src_db.copy_adjustments_to(dst_db, entries)?;
+    let src_paths: Vec<String> = entries.iter().map(|(s, _)| s.clone()).collect();
+    src_db.delete_adjustments(&src_paths)
+}
+
+/// 重命名文件后同步重命名对应调整行。
+pub fn sync_rename_adjustment(db: &FolderDb, old_rel: &str, new_rel: &str) -> Result<(), FolderDbError> {
+    db.rename_adjustment(old_rel, new_rel)
+}
+
 // ── xmp_meta 同步（评分/色标/旗标，键为完整路径）──
 
 /// 删除文件后同步删除对应评分/色标/旗标行。

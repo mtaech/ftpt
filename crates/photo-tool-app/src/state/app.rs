@@ -15,6 +15,7 @@ use photo_domain::{
 use crate::state::batch_ops::BatchDeletePreview;
 use gpui_component::combobox::ComboboxState;
 use gpui_component::select::SearchableVec;
+use gpui_component::slider::{SliderEvent, SliderState};
 use photo_engine::thumbnail::ThumbnailCache;
 use crate::ui::toolbar::SettingsOverlay;
 use photo_engine::folder_db::FolderDb;
@@ -155,6 +156,52 @@ pub struct RootView {
     pub show_recognize_all_confirm: bool,
     /// 焦点图片的完整识别记录
     pub focused_recognition: Option<photo_domain::Recognition>,
+    // ── 调整（ADR 0007：参数化非破坏）──
+    /// 右侧面板 tab：0=信息，1=调整
+    pub right_panel_tab: usize,
+    /// 焦点图调整参数（per-capture，焦点变化时从 folder_db 加载）
+    pub current_adjust: photo_domain::AdjustParams,
+    /// 调整参数所属 capture 索引（焦点未变时保留内存参数，不重载 DB 覆盖未持久化 slider 值）
+    pub adjust_params_capture: Option<usize>,
+    /// 调整后预览（1600px，焦点图；None = 无调整，走现有预览路径）
+    pub adjust_render: Option<Arc<RenderImage>>,
+    /// 调整显示源所属 capture 索引（切图/换目录后失效，需重建）
+    pub adjust_source_capture: Option<usize>,
+    /// RAW 调整显示源：1600px 16-bit 派生（母版解码一次、派生一次，参数变更只重算 tone）
+    pub adjust_display16: Option<Arc<photo_engine::adjustments::Rgb16Image>>,
+    /// JPEG 调整显示源：1600px 8-bit（磁盘缓存字节解码一次）
+    pub adjust_display8: Option<Arc<image::RgbImage>>,
+    /// 调整显示源构建中哨兵（防重复 spawn）
+    pub adjust_source_loading: bool,
+    /// 调整渲染重算中哨兵
+    pub adjust_render_loading: bool,
+    /// 调整渲染取消令牌（slider 快速拖动时取消旧重算）
+    pub adjust_render_cancel: Arc<AtomicBool>,
+    /// 调整渲染参数版本（只认最新，防旧任务覆盖新参数结果）
+    pub adjust_render_version: u64,
+    /// 导出进行中（状态栏提示）
+    pub adjust_exporting: bool,
+    /// 导出结果消息（状态栏显示）
+    pub adjust_export_msg: Option<String>,
+    // ── 调整面板 UI（ADR 0007）──
+    /// 三个调整 slider 的状态实体（范围/步进固定；值由调整 tab 渲染时与 current_adjust 同步，
+    /// 避免每次 render 新建 SliderState 丢失拖动状态）
+    pub adjust_sliders: (
+        gpui::Entity<SliderState>,
+        gpui::Entity<SliderState>,
+        gpui::Entity<SliderState>,
+    ),
+    /// slider 事件订阅（构造期绑定，随 RootView 生命周期自动清理；仅持有不读）
+    pub _adjust_slider_subs: Vec<gpui::Subscription>,
+    // ── 裁切交互（ADR 0007：调整视图内框选/移动/手柄调整；拖动中只更新 draft，mouse_up 才提交）──
+    /// 裁切框选中（Shift+拖拽，窗口坐标：(起始x, 起始y, 当前x, 当前y)）
+    pub crop_draw: Option<(f32, f32, f32, f32)>,
+    /// 裁切拖动中显示用框（归一化；crop_draft 优先于 current_adjust.crop 显示）
+    pub crop_draft: Option<photo_domain::BBox>,
+    /// 手柄调整中：(手柄索引 0-7, 原框)。手柄索引约定：0=左上 1=上中 2=右上 3=右中 4=右下 5=下中 6=左下 7=左中
+    pub crop_resize: Option<(usize, photo_domain::BBox)>,
+    /// 移动框中：(起始窗口x, 起始窗口y, 原框)
+    pub crop_move: Option<(f32, f32, photo_domain::BBox)>,
 }
 
 impl RootView {
@@ -177,6 +224,52 @@ impl RootView {
         }
         // 启动后自动扫描上次打开的目录
         let auto_dir = config.last_directory.clone();
+
+        // 调整 slider 状态实体：范围/步进固定（曝光 ±2.0 EV 步进 0.05；对比度/饱和度 ±100 步进 1），
+        // 值由调整 tab 渲染时同步 current_adjust（切图/重置后滑块跟随参数）
+        let (exposure_slider, contrast_slider, saturation_slider) = (
+            cx.new(|_| SliderState::new().min(-2.0).max(2.0).step(0.05).default_value(0.0)),
+            cx.new(|_| {
+                SliderState::new()
+                    .min(-100.0)
+                    .max(100.0)
+                    .step(1.0)
+                    .default_value(0.0)
+            }),
+            cx.new(|_| {
+                SliderState::new()
+                    .min(-100.0)
+                    .max(100.0)
+                    .step(1.0)
+                    .default_value(0.0)
+            }),
+        );
+        // 订阅 slider 拖动事件：Change 实时更新参数 → set_adjustment（worker 重算 tone）。
+        // set_value 不触发 SliderEvent，渲染时同步滑块值不会回环；set_adjustment 参数相等自动跳过。
+        let adjust_slider_subs = vec![
+            cx.subscribe(&exposure_slider, |view, _, event, cx| {
+                if let SliderEvent::Change(v) = event {
+                    let mut p = view.current_adjust;
+                    p.exposure = v.start();
+                    view.set_adjustment(p, cx);
+                }
+            }),
+            cx.subscribe(&contrast_slider, |view, _, event, cx| {
+                if let SliderEvent::Change(v) = event {
+                    let mut p = view.current_adjust;
+                    p.contrast = v.start() as i32;
+                    view.set_adjustment(p, cx);
+                }
+            }),
+            cx.subscribe(&saturation_slider, |view, _, event, cx| {
+                if let SliderEvent::Change(v) = event {
+                    let mut p = view.current_adjust;
+                    p.saturation = v.start() as i32;
+                    view.set_adjustment(p, cx);
+                }
+            }),
+        ];
+
         let mut this = Self {
             config,
             config_path,
@@ -241,6 +334,25 @@ impl RootView {
             show_recognize_all_confirm: false,
             focused_recognition: None,
             folder_menu_dir: None,
+            right_panel_tab: 0,
+            current_adjust: photo_domain::AdjustParams::default(),
+            adjust_params_capture: None,
+            adjust_render: None,
+            adjust_source_capture: None,
+            adjust_display16: None,
+            adjust_display8: None,
+            adjust_source_loading: false,
+            adjust_render_loading: false,
+            adjust_render_cancel: Arc::new(AtomicBool::new(false)),
+            adjust_render_version: 0,
+            adjust_exporting: false,
+            adjust_export_msg: None,
+            adjust_sliders: (exposure_slider, contrast_slider, saturation_slider),
+            _adjust_slider_subs: adjust_slider_subs,
+            crop_draw: None,
+            crop_draft: None,
+            crop_resize: None,
+            crop_move: None,
         };
 
         if let Some(last_dir) = &auto_dir {
@@ -310,9 +422,10 @@ impl RootView {
                     }
                     _ => unreachable!(),
                 }
-                // 焦点变化时刷新 focused_recognition
+                // 焦点变化时刷新 focused_recognition 与调整参数
                 if self.focus_index != old_idx {
                     self.refresh_focused_recognition();
+                    self.refresh_adjustments_sync();
                 }
                 self.preview_zoom = 1.0;
                 self.preview_pan = (0.0, 0.0);

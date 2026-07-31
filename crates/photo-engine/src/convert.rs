@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use image::GenericImageView;
 use thiserror::Error;
 
-use photo_domain::ImageFormat;
-use crate::thumbnail::decode_raw_preview;
+use photo_domain::{AdjustParams, ImageFormat, SourceFile};
+use crate::adjustments::{apply_crop16, apply_crop8, apply_tone16, apply_tone8, Rgb16Image};
+use crate::thumbnail::{decode_raw_preview, decode_raw16_with_options};
 
 #[derive(Error, Debug)]
 pub enum ConvertError {
@@ -136,6 +137,62 @@ pub fn resize_image(input_path: &Path, options: &ConvertOptions) -> Result<PathB
     Ok(out_path)
 }
 
+/// 导出调整结果（ADR 0007）：源图 → 烘焙（先裁切 → 再色调）→ JPEG（质量 95）。
+///
+/// - RAW：全尺寸 16-bit 解码（`DecodeOptions::quality()`：AHD + 16bit）——导出是唯一一次
+///   全尺寸高质量渲染，3-5s 可接受（低频异步任务）
+/// - 常规图：原文件解码（8-bit 语义，直出即 8-bit 无高位信息）
+/// - `output_path` 的命名/防覆盖由调用方保证（`{stem}_adjusted.jpg` + 序号）
+/// - 全同步，调用方负责 worker 线程
+pub fn export_adjusted(
+    source: &SourceFile,
+    params: &AdjustParams,
+    output_path: &Path,
+) -> Result<PathBuf, ConvertError> {
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let rgb8 = match &source.format {
+        ImageFormat::Raw(_) => {
+            let img16 = decode_raw16_with_options(
+                &source.path,
+                &rawlib::DecodeOptions::quality(),
+                None,
+            )
+            .map_err(|e| ConvertError::Raw(e.to_string()))?;
+            let tone: crate::adjustments::ToneParams = params.into();
+            let cropped = apply_crop16(&img16, params.crop);
+            let toned = apply_tone16(&cropped, &tone);
+            rgb16_to_rgb8(&toned)
+        }
+        _ => {
+            let img = image::open(&source.path)?;
+            let rgb8 = img.to_rgb8();
+            let tone: crate::adjustments::ToneParams = params.into();
+            let cropped = apply_crop8(&rgb8, params.crop);
+            apply_tone8(&cropped, &tone)
+        }
+    };
+    let mut buf = Cursor::new(Vec::new());
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 95);
+    encoder.encode(
+        rgb8.as_raw(),
+        rgb8.width(),
+        rgb8.height(),
+        image::ExtendedColorType::Rgb8,
+    )?;
+    std::fs::write(output_path, buf.into_inner())?;
+    Ok(output_path.to_path_buf())
+}
+
+/// 16-bit RGB 缓冲降为 8-bit（sRGB 编码值直接截高 8 位，语义一致）
+fn rgb16_to_rgb8(img: &Rgb16Image) -> image::RgbImage {
+    image::RgbImage::from_fn(img.width(), img.height(), |x, y| {
+        let p = img.get_pixel(x, y);
+        image::Rgb([(p[0] >> 8) as u8, (p[1] >> 8) as u8, (p[2] >> 8) as u8])
+    })
+}
+
 /// 统一转换入口：按 ImageFormat 分发
 pub fn convert_image(
     path: &Path,
@@ -151,6 +208,7 @@ pub fn convert_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use photo_domain::BBox;
     use tempfile::TempDir;
 
     fn create_test_jpeg(dir: &TempDir, name: &str, width: u32, height: u32) -> PathBuf {
@@ -270,5 +328,46 @@ mod tests {
         };
         let out = output_path(path, &options);
         assert_eq!(out.file_name().unwrap(), "test.png");
+    }
+
+    #[test]
+    fn test_export_adjusted_jpeg_tone_and_crop() {
+        let dir = TempDir::new().unwrap();
+        let input = create_test_jpeg(&dir, "shot.jpg", 400, 300);
+        let out_dir = TempDir::new().unwrap();
+        let out = out_dir.path().join("shot_adjusted.jpg");
+        let source = SourceFile {
+            path: input,
+            format: ImageFormat::Jpeg,
+            file_size: Some(0),
+        };
+        let params = photo_domain::AdjustParams {
+            exposure: 1.0,
+            contrast: 20,
+            saturation: -30,
+            crop: Some(BBox::new(0.25, 0.25, 0.75, 0.75)),
+        };
+        let result = export_adjusted(&source, &params, &out).unwrap();
+        assert_eq!(result, out);
+        assert!(out.exists());
+        let loaded = image::open(&out).unwrap();
+        // 裁切 400×300 的 (0.25..0.75) → 200×150
+        assert_eq!(loaded.dimensions(), (200, 150));
+    }
+
+    #[test]
+    fn test_export_adjusted_neutral_jpeg_full_size() {
+        let dir = TempDir::new().unwrap();
+        let input = create_test_jpeg(&dir, "shot.jpg", 400, 300);
+        let out_dir = TempDir::new().unwrap();
+        let out = out_dir.path().join("out.jpg");
+        let source = SourceFile {
+            path: input,
+            format: ImageFormat::Jpeg,
+            file_size: Some(0),
+        };
+        let result = export_adjusted(&source, &AdjustParams::default(), &out).unwrap();
+        let loaded = image::open(result).unwrap();
+        assert_eq!(loaded.dimensions(), (400, 300));
     }
 }
