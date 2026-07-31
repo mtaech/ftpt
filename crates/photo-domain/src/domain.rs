@@ -317,66 +317,46 @@ pub enum SortDirection {
     Descending,
 }
 
-/// 批量文件操作类型
+/// 批量文件操作类型（作用于当前筛选结果，ADR 0006）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatchOpType {
-    /// 复制同名文件到目标目录
-    CopySame,
-    /// 复制非同名文件到目标目录
-    CopyNotSame,
-    /// 删除同名文件
-    DeleteSame,
-    /// 删除非同名文件
-    DeleteNotSame,
-    /// 移动同名文件到目标目录
-    MoveSame,
-    /// 移动非同名文件到目标目录
-    MoveNotSame,
+    /// 复制到目标目录
+    Copy,
+    /// 删除（回收站）
+    Delete,
+    /// 移动到目标目录
+    Move,
 }
 
 impl BatchOpType {
-    /// 全部操作类型（UI 下拉用）
+    /// 全部操作类型（UI 按钮用）
     pub fn all() -> &'static [BatchOpType] {
-        &[
-            Self::CopySame,
-            Self::CopyNotSame,
-            Self::DeleteSame,
-            Self::DeleteNotSame,
-            Self::MoveSame,
-            Self::MoveNotSame,
-        ]
-    }
-
-    /// 是否为"同名"匹配
-    pub fn is_same_match(&self) -> bool {
-        matches!(self, Self::CopySame | Self::DeleteSame | Self::MoveSame)
+        &[Self::Move, Self::Copy, Self::Delete]
     }
 
     /// 是否需要目标目录（删除操作不需要）
     pub fn needs_target_dir(&self) -> bool {
-        matches!(self, Self::CopySame | Self::CopyNotSame | Self::MoveSame | Self::MoveNotSame)
+        !matches!(self, Self::Delete)
     }
 
     /// 执行的动作标签
     pub fn action_label(&self) -> &'static str {
         match self {
-            Self::CopySame | Self::CopyNotSame => "复制",
-            Self::DeleteSame | Self::DeleteNotSame => "删除",
-            Self::MoveSame | Self::MoveNotSame => "移动",
+            Self::Copy => "复制",
+            Self::Delete => "删除",
+            Self::Move => "移动",
         }
+    }
+
+    /// 是否为删除类操作（确认时红色警告）
+    pub fn is_delete(&self) -> bool {
+        matches!(self, Self::Delete)
     }
 }
 
 impl std::fmt::Display for BatchOpType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::CopySame => write!(f, "复制同名文件"),
-            Self::CopyNotSame => write!(f, "复制非同名文件"),
-            Self::DeleteSame => write!(f, "删除同名文件"),
-            Self::DeleteNotSame => write!(f, "删除非同名文件"),
-            Self::MoveSame => write!(f, "移动同名文件"),
-            Self::MoveNotSame => write!(f, "移动非同名文件"),
-        }
+        write!(f, "{}", self.action_label())
     }
 }
 

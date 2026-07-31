@@ -359,6 +359,103 @@ pub fn render_layout(
                     ),
             )
         })
+        // 批量删除确认对话框（ADR 0006：删除强制确认，含同名同步数量）
+        .when(view.batch_delete_confirm.is_some(), |parent| {
+            let vh = cx.entity().downgrade();
+            let preview = view.batch_delete_confirm.clone().expect("checked");
+            parent.child(
+                div()
+                    .absolute()
+                    .size_full()
+                    .bg(hsla(0., 0., 0., 0.4))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w(px(420.))
+                            .bg(theme::colors().surface_background)
+                            .rounded_lg()
+                            .shadow_lg()
+                            .child(
+                                v_flex()
+                                    .p_4()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .text_base()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(theme::colors().error)
+                                            .child("删除文件"),
+                                    )
+                                    .child(
+                                        div()
+                                            
+                                            .text_color(theme::colors().text_muted)
+                                            .child(if preview.synced > 0 {
+                                                format!("将删除 {} 个文件（其中 {} 个来自同名同步），移入回收站。",
+                                                    preview.total, preview.synced)
+                                            } else {
+                                                format!("将删除 {} 个文件，移入回收站。", preview.total)
+                                            }),
+                                    )
+                                    .child(
+                                        // 清单（前 20 条）
+                                        div()
+                                            .max_h(px(160.))
+                                            .overflow_y_scrollbar()
+                                            .rounded_sm()
+                                            .bg(theme::colors().element_background)
+                                            .children(preview.files.iter().map(|f| {
+                                                div()
+                                                    .py_0p5()
+                                                    .px_1()
+                                                    .text_size(px(11.))
+                                                    .text_color(theme::colors().text)
+                                                    .child(f.clone())
+                                                    .into_any_element()
+                                            })),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .justify_end()
+                                            .gap_2()
+                                            .pt_2()
+                                            .child(
+                                                Button::new("cancel-batch-delete")
+                                                    .label("取消")
+                                                    .ghost()
+                                                    .on_click({
+                                                        let vh = vh.clone();
+                                                        move |_, _window, cx| {
+                                                            if let Some(e) = vh.upgrade() {
+                                                                cx.update_entity(&e, |view, cx| {
+                                                                    view.cancel_batch_delete(cx);
+                                                                });
+                                                            }
+                                                        }
+                                                    }),
+                                            )
+                                            .child(
+                                                Button::new("confirm-batch-delete")
+                                                    .label("确认删除")
+                                                    .danger()
+                                                    .on_click({
+                                                        let vh = vh.clone();
+                                                        move |_, _window, cx| {
+                                                            if let Some(e) = vh.upgrade() {
+                                                                cx.update_entity(&e, |view, cx| {
+                                                                    view.confirm_batch_delete(cx);
+                                                                });
+                                                            }
+                                                        }
+                                                    }),
+                                            ),
+                                    ),
+                            ),
+                    ),
+            )
+        })
         .when(view.batch_show_progress_popup, |parent| {
             let vh = cx.entity().downgrade();
             let (done, total) = view.batch_progress.unwrap_or((0, 1));

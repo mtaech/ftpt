@@ -1,73 +1,48 @@
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
-use photo_domain::{BatchOpType, Capture, ImageFormat};
+use photo_domain::{BatchOpType, Capture};
 
 use crate::ops;
-use crate::scanner::{self, ScanError};
 
-/// 批量操作错误
-#[derive(Debug, thiserror::Error)]
-pub enum BatchOpError {
-    #[error("扫描错误: {0}")]
-    Scan(#[from] ScanError),
-    #[error("目标目录未指定")]
-    MissingTargetDir,
-    #[error("对比目录不存在: {0}")]
-    CompareDirNotFound(PathBuf),
-}
-
-/// 在对比目录中查找匹配/非匹配的 capture 索引
+/// 按 stem 扩展操作集（画面粒度，ADR 0006）：
+/// 把每个索引对应 capture 的同名兄弟文件（格式 ∈ `sync_formats`）并入操作集。
 ///
-/// `source_captures` — 当前已扫描的 capture 列表（操作目录）
-/// `compare_dir` — 对比目录路径
-/// `source_format` — 可选：仅统计含此格式的 capture（如 Some("RW2")）
-/// `compare_format` — 可选：仅统计含此格式的对比 capture（如 Some("JPG")）
-///
-/// 返回 (matched_indices, unmatched_indices)：
-/// - matched: 对比目录中存在同名 capture 的索引
-/// - unmatched: 对比目录中不存在同名 capture 的索引
-pub fn find_matching(
-    source_captures: &[Capture],
-    compare_dir: &Path,
-    source_format: Option<&str>,
-    compare_format: Option<&str>,
-) -> Result<(Vec<usize>, Vec<usize>), BatchOpError> {
-    if !compare_dir.exists() {
-        return Err(BatchOpError::CompareDirNotFound(compare_dir.to_path_buf()));
+/// `sync_formats` 为空 → 不扩展（只操作给定索引）。
+/// 返回扩展后的索引列表：去重，顺序按原索引优先、兄弟随后。
+pub fn expand_with_siblings(
+    captures: &[Capture],
+    indices: &[usize],
+    sync_formats: &HashSet<String>,
+) -> Vec<usize> {
+    if sync_formats.is_empty() {
+        return indices.to_vec();
     }
-
-    // 扫描对比目录（batch 匹配只认文件名）
-    let compare_captures =
-        scanner::scan_directory(compare_dir, &Default::default(), None)?;
-
-    // 构建对比目录的 base_name 集合（按需过滤格式）
-    let compare_names: HashSet<String> = compare_captures
-        .iter()
-        .filter(|c| {
-            compare_format.map_or(true, |fmt| capture_has_format(c, fmt))
-        })
-        .map(|c| c.base_name.clone())
-        .collect();
-
-    let mut matched = Vec::new();
-    let mut unmatched = Vec::new();
-
-    for (idx, capture) in source_captures.iter().enumerate() {
-        // 源目录按格式过滤
-        if let Some(fmt) = source_format {
-            if !capture_has_format(capture, fmt) {
-                continue;
+    // stem → 命中格式的 capture 索引（一次遍历建索引）
+    let mut by_stem: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, c) in captures.iter().enumerate() {
+        if capture_format_matches(c, sync_formats) {
+            by_stem.entry(c.base_name.as_str()).or_default().push(i);
+        }
+    }
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for &idx in indices {
+        // 触发点先入（自身格式可能不在 sync_formats，不能只走兄弟分支）
+        if !seen.insert(idx) {
+            continue;
+        }
+        out.push(idx);
+        let Some(c) = captures.get(idx) else { continue };
+        if let Some(sibs) = by_stem.get(c.base_name.as_str()) {
+            for &s in sibs {
+                if seen.insert(s) {
+                    out.push(s);
+                }
             }
         }
-        if compare_names.contains(&capture.base_name) {
-            matched.push(idx);
-        } else {
-            unmatched.push(idx);
-        }
     }
-
-    Ok((matched, unmatched))
+    out
 }
 
 /// 执行批量操作，返回每个文件的可读结果
@@ -76,13 +51,13 @@ pub fn find_matching(
 /// `on_progress` — 处理完每个文件后回调 (completed, total)
 pub fn execute(
     source_captures: &[Capture],
-    matched_indices: &[usize],
+    indices: &[usize],
     op_type: BatchOpType,
     target_dir: Option<&Path>,
     on_progress: impl Fn(u32, u32),
 ) -> Vec<String> {
     let mut results = Vec::new();
-    let total = matched_indices.len() as u32;
+    let total = indices.len() as u32;
 
     let target_dir = if op_type.needs_target_dir() {
         match target_dir {
@@ -93,24 +68,18 @@ pub fn execute(
         None
     };
 
-    for (i, &idx) in matched_indices.iter().enumerate() {
+    for (i, &idx) in indices.iter().enumerate() {
         let Some(capture) = source_captures.get(idx) else { continue };
         let name = &capture.base_name;
         let verb = op_type.action_label();
 
         let result = match op_type {
-            BatchOpType::CopySame | BatchOpType::CopyNotSame => {
-                ops::copy_capture(capture, target_dir.unwrap(), false)
-                    .map(|_| format!("{verb}: {}", name))
-            }
-            BatchOpType::DeleteSame | BatchOpType::DeleteNotSame => {
-                ops::delete_capture(capture)
-                    .map(|_| format!("{verb}: {}", name))
-            }
-            BatchOpType::MoveSame | BatchOpType::MoveNotSame => {
-                ops::move_capture(capture, target_dir.unwrap())
-                    .map(|_| format!("{verb}: {}", name))
-            }
+            BatchOpType::Copy => ops::copy_capture(capture, target_dir.unwrap(), false)
+                .map(|_| format!("{verb}: {}", name)),
+            BatchOpType::Delete => ops::delete_capture(capture)
+                .map(|_| format!("{verb}: {}", name)),
+            BatchOpType::Move => ops::move_capture(capture, target_dir.unwrap())
+                .map(|_| format!("{verb}: {}", name)),
         };
 
         match result {
@@ -124,15 +93,35 @@ pub fn execute(
     results
 }
 
-/// 判断 capture 是否包含指定格式（大小写不敏感，接受 "jpg"/"jpeg"/"JPG" 等）
-fn capture_has_format(capture: &Capture, format: &str) -> bool {
-    let Some(target) = ImageFormat::from_extension(format) else { return false };
-    capture.source_files.iter().any(|f| f.format == target)
+/// capture 的任一源文件格式是否命中 `formats`（大小写不敏感，如 "NEF"/"nef"）
+fn capture_format_matches(capture: &Capture, formats: &HashSet<String>) -> bool {
+    if formats.is_empty() {
+        return false;
+    }
+    capture.source_files.iter().any(|f| {
+        let ext = f.format.to_string().to_uppercase();
+        formats.iter().any(|fmt| fmt.to_uppercase() == ext)
+    })
+}
+
+/// 目录中实际出现的格式集合（去重，UI 同步格式多选栏用）
+pub fn available_formats(captures: &[Capture]) -> Vec<String> {
+    let mut set: HashSet<String> = HashSet::new();
+    for c in captures {
+        for f in &c.source_files {
+            set.insert(f.format.to_string().to_uppercase());
+        }
+    }
+    let mut v: Vec<String> = set.into_iter().collect();
+    v.sort();
+    v
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scanner;
+    use photo_domain::ImageFormat;
     use tempfile::TempDir;
 
     fn create_files(dir: &TempDir, names: &[(&str, &str)]) {
@@ -141,57 +130,93 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_find_matching_same_base_name() {
-        let src_dir = TempDir::new().unwrap();
-        let cmp_dir = TempDir::new().unwrap();
-
-        // 源目录: IMG_001.RW2, IMG_002.RW2, IMG_003.RW2
-        create_files(&src_dir, &[("IMG_001", "RW2"), ("IMG_002", "RW2"), ("IMG_003", "RW2")]);
-        // 对比目录: IMG_001.jpg, IMG_002.jpg (IMG_003 不在)
-        create_files(&cmp_dir, &[("IMG_001", "jpg"), ("IMG_002", "jpg")]);
-
-        let source = scanner::scan_directory(src_dir.path(), &Default::default(), None).unwrap();
-
-        let (matched, unmatched) = find_matching(&source, cmp_dir.path(), None, None).unwrap();
-
-        assert_eq!(matched.len(), 2, "IMG_001, IMG_002 matched");
-        assert_eq!(unmatched.len(), 1, "IMG_003 unmatched");
+    fn scan(dir: &TempDir) -> Vec<Capture> {
+        scanner::scan_directory(dir.path(), &Default::default(), None).unwrap()
     }
 
     #[test]
-    fn test_find_matching_with_format_filter() {
-        let src_dir = TempDir::new().unwrap();
-        let cmp_dir = TempDir::new().unwrap();
+    fn test_expand_with_siblings_same_stem() {
+        let dir = TempDir::new().unwrap();
+        create_files(&dir, &[("IMG_001", "JPG"), ("IMG_001", "NEF"), ("IMG_002", "JPG")]);
+        let caps = scan(&dir);
 
-        create_files(&src_dir, &[("A", "RW2"), ("B", "RW2"), ("C", "jpg")]);
-        create_files(&cmp_dir, &[("A", "jpg"), ("B", "jpg"), ("C", "jpg")]);
+        // 操作 IMG_001.JPG（按 base_name 定位，不依赖扫描排序），同步格式 {NEF} → 应并入 NEF
+        let idx_jpg = caps
+            .iter()
+            .position(|c| c.base_name == "IMG_001" && c.source_files[0].format == ImageFormat::Jpeg)
+            .expect("IMG_001.JPG");
+        let sync: HashSet<String> = ["NEF".into()].into();
+        let expanded = expand_with_siblings(&caps, &[idx_jpg], &sync);
+        assert_eq!(expanded.len(), 2, "JPG + NEF 兄弟应并入");
 
-        let source = scanner::scan_directory(src_dir.path(), &Default::default(), None).unwrap();
-
-        // 仅找源目录中的 RW2，对比目录中的 JPG
-        let (matched, _unmatched) =
-            find_matching(&source, cmp_dir.path(), Some("RW2"), Some("JPG")).unwrap();
-
-        // A(RW2) 和 B(RW2) 在对比目录中有同名 jpg → matched
-        assert_eq!(matched.len(), 2);
+        // IMG_002.JPG 无 NEF 兄弟，不扩展
+        let idx2 = caps.iter().position(|c| c.base_name == "IMG_002").unwrap();
+        let expanded2 = expand_with_siblings(&caps, &[idx2], &sync);
+        assert_eq!(expanded2, vec![idx2], "无兄弟时保持原集");
     }
 
     #[test]
-    fn test_find_matching_compare_dir_not_found() {
-        let source: Vec<Capture> = vec![];
-        let result = find_matching(&source, Path::new("/nonexistent"), None, None);
-        assert!(matches!(result, Err(BatchOpError::CompareDirNotFound(_))));
+    fn test_expand_with_siblings_empty_formats_no_expand() {
+        let dir = TempDir::new().unwrap();
+        create_files(&dir, &[("A", "JPG"), ("A", "NEF")]);
+        let caps = scan(&dir);
+
+        let empty: HashSet<String> = HashSet::new();
+        let expanded = expand_with_siblings(&caps, &[0], &empty);
+        assert_eq!(expanded, vec![0], "同步格式为空 = 不扩展");
+    }
+
+    #[test]
+    fn test_expand_with_siblings_format_filter() {
+        let dir = TempDir::new().unwrap();
+        create_files(&dir, &[("A", "JPG"), ("A", "NEF"), ("A", "PNG")]);
+        let caps = scan(&dir);
+
+        // 只勾 NEF：PNG 不应被并入
+        let idx_jpg = caps
+            .iter()
+            .position(|c| c.base_name == "A" && c.source_files[0].format == ImageFormat::Jpeg)
+            .expect("A.JPG");
+        let sync: HashSet<String> = ["NEF".into()].into();
+        let expanded = expand_with_siblings(&caps, &[idx_jpg], &sync);
+        let stems: Vec<String> = expanded
+            .iter()
+            .filter_map(|&i| caps.get(i))
+            .map(|c| c.source_files[0].format.to_string())
+            .collect();
+        assert_eq!(stems.len(), 2, "JPG + NEF，不含 PNG");
+        assert!(!stems.iter().any(|f| f == "PNG"), "PNG 不应被并入");
+    }
+
+    #[test]
+    fn test_available_formats_unique_sorted() {
+        let dir = TempDir::new().unwrap();
+        create_files(&dir, &[("A", "JPG"), ("B", "NEF"), ("C", "PNG")]);
+        let caps = scan(&dir);
+        let fmts = available_formats(&caps);
+        assert!(fmts.contains(&"JPEG".to_string()), "JPG → Display 为 JPEG");
+        assert!(fmts.contains(&"NEF".to_string()));
+        assert!(fmts.contains(&"PNG".to_string()));
     }
 
     #[test]
     fn test_execute_delete_requires_no_target() {
         let dir = TempDir::new().unwrap();
         create_files(&dir, &[("del_me", "RW2")]);
-        let source = scanner::scan_directory(dir.path(), &Default::default(), None).unwrap();
+        let source = scan(&dir);
 
-        let results = execute(&source, &[0], BatchOpType::DeleteSame, None, |_, _| {});
+        let results = execute(&source, &[0], BatchOpType::Delete, None, |_, _| {});
         assert!(results.iter().any(|r| r.contains("删除")));
         assert!(results.iter().all(|r| !r.contains("失败")));
+    }
+
+    #[test]
+    fn test_execute_copy_requires_target() {
+        let dir = TempDir::new().unwrap();
+        create_files(&dir, &[("keep", "JPG")]);
+        let source = scan(&dir);
+
+        let results = execute(&source, &[0], BatchOpType::Copy, None, |_, _| {});
+        assert!(results.iter().any(|r| r.contains("目标目录未指定")));
     }
 }

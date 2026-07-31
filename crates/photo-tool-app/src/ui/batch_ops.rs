@@ -1,187 +1,207 @@
+use std::collections::HashSet;
+
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::v_flex;
+use gpui_component::h_flex;
+
 use photo_domain::BatchOpType;
 
 use crate::state::app::RootView;
 use crate::ui::theme;
 
-const FORMAT_OPTIONS: &[(&str, &str)] = &[
-    ("全部类型", ""),
-    ("JPG", "JPG"),
-    ("PNG", "PNG"),
-    ("TIFF", "TIFF"),
-    ("HEIF", "HEIF"),
-    ("WebP", "WebP"),
-    ("BMP", "BMP"),
-    ("GIF", "GIF"),
-    ("RW2", "RW2"),
-    ("CR2", "CR2"),
-    ("CR3", "CR3"),
-    ("NEF", "NEF"),
-    ("ARW", "ARW"),
-    ("ORF", "ORF"),
-    ("DNG", "DNG"),
-];
-
+/// 左侧边栏「文件操作」tab（ADR 0006：筛选驱动 + 画面粒度）
+///
+/// 操作对象 = 当前筛选结果；[移动到…] [复制到…] 一步式选目录即执行；
+/// [删除] 独立红色，弹确认（含同名同步数量）；「同步同名文件」开关 + 格式多选。
 pub fn render_batch_ops_section(
     view: &RootView,
-    cx: &mut Context<RootView>,
+    _cx: &mut Context<RootView>,
 ) -> impl IntoElement {
-    let vh = cx.entity().downgrade();
+    let vh = _cx.entity().downgrade();
 
-    let compare_dir: SharedString = if view.batch_compare_dir.is_empty() {
-        "选择对比目录...".into()
-    } else {
-        view.batch_compare_dir.clone().into()
-    };
-    let source_fmt = view.batch_source_format.clone();
-    let compare_fmt = view.batch_compare_format.clone();
-    let op_type = view.batch_op_type;
+    let count = view.display_order.len();
+    let empty = count == 0;
+    let sync_enabled = view.batch_sync_enabled;
+    let sync_extra = view.batch_sync_extra;
+    let in_progress = view.batch_in_progress;
     let has_results = !view.batch_results.is_empty();
     let results = view.batch_results.clone();
-    let in_progress = view.batch_in_progress;
 
     v_flex()
         .gap_2()
-        // ── 对比目录 ──
+        // ── 操作对象说明（数量随筛选实时联动）──
         .child({
-            let vh = vh.clone();
-            v_flex()
-                .gap_1()
-                .child(label("对比目录"))
-                .child(
-                    Button::new("batch-compare-dir")
-                        .ghost()
-                        .tooltip(if view.batch_compare_dir.is_empty() {
-                            SharedString::default()
-                        } else {
-                            SharedString::from(view.batch_compare_dir.clone())
-                        })
-                        .label(if compare_dir.is_empty() {
-                            SharedString::from("选择对比目录...")
-                        } else {
-                            compare_dir.clone()
-                        })
-                        .on_click(move |_, _window, cx| {
-                            if let Some(e) = vh.upgrade() {
-                                cx.update_entity(&e, |view, cx| {
-                                    view.pick_batch_compare_dir(cx);
-                                });
-                            }
-                        }),
-                )
+            let rule = if sync_enabled {
+                format!("操作对象：当前筛选结果（{count} 张），同步 +{sync_extra}")
+            } else {
+                format!("操作对象：当前筛选结果（{count} 张）")
+            };
+            div()
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .bg(theme::colors().surface_background)
+                .text_size(px(11.))
+                .text_color(theme::colors().text_muted)
+                .child(rule)
         })
-        // ── 源格式 ──
-        .child(format_dropdown("源格式", &source_fmt, "batch-source-fmt",
-            view.batch_source_fmt_open, &vh))
-        // ── 对比格式 ──
-        .child(format_dropdown("对比格式", &compare_fmt, "batch-compare-fmt",
-            view.batch_compare_fmt_open, &vh))
-        // ── 操作类型 ──
-        .child({
-            let vh_click = vh.clone();
-            let vh_options = vh.clone();
-            v_flex()
-                .gap_1()
-                .child(label("操作类型"))
-                .child(
-                    div()
-                        .id("batch-op-selected")
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .bg(theme::colors().element_background)
-                        
-                        .cursor_pointer()
-                        .on_click(move |_, _window, cx| {
-                            if let Some(e) = vh_click.upgrade() {
-                                cx.update_entity(&e, |view, cx| {
-                                    view.batch_op_dropdown_open = !view.batch_op_dropdown_open;
-                                    view.batch_source_fmt_open = false;
-                                    view.batch_compare_fmt_open = false;
-                                    cx.notify();
-                                });
-                            }
-                        })
-                        .child(SharedString::from(op_type.to_string()))
-                        .child(arrow()),
-                )
-                .when(view.batch_op_dropdown_open, move |parent| {
-                    let items: Vec<gpui::AnyElement> = BatchOpType::all()
-                        .iter()
-                        .map(|op| {
-                            let vh = vh_options.clone();
-                            let is_active = op_type == *op;
-                            let label: SharedString = op.to_string().into();
-                            div()
-                                .id(label.clone())
-                                .px_2()
-                                .py_1()
-                                
-                                .cursor_pointer()
-                                .text_color(if is_active {
-                                    theme::colors().text_accent
-                                } else {
-                                    theme::colors().text
-                                })
-                                .bg(if is_active {
-                                    theme::accent_dim()
-                                } else {
-                                    hsla(0., 0., 0., 0.)
-                                })
-                                .hover(|style| style.bg(theme::colors().element_hover))
-                                .on_click(move |_, _window, cx| {
-                                    if let Some(e) = vh.upgrade() {
-                                        cx.update_entity(&e, |view, cx| {
-                                            view.batch_op_type = *op;
-                                            view.batch_op_dropdown_open = false;
-                                            cx.notify();
-                                        });
-                                    }
-                                })
-                                .child(label)
-                                .into_any_element()
-                        })
-                        .collect();
-                    parent.child(option_list(items))
-                })
-        })
-        // ── 开始执行按钮 ──
+        // ── 同步开关 ──
         .child({
             let vh = vh.clone();
             div()
-                .mt_2()
+                .id("batch-sync-toggle")
+                .flex()
+                .items_center()
+                .gap_1()
+                .cursor_pointer()
+                .on_click(move |_, _window, cx| {
+                    if let Some(e) = vh.upgrade() {
+                        cx.update_entity(&e, |view, cx| {
+                            view.set_batch_sync_enabled(!view.batch_sync_enabled, cx);
+                        });
+                    }
+                })
                 .child(
                     div()
-                        .id("batch-execute")
+                        .w(px(14.))
+                        .h(px(14.))
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(if sync_enabled {
+                            theme::colors().text_accent
+                        } else {
+                            theme::colors().border_variant
+                        })
+                        .bg(if sync_enabled {
+                            theme::colors().text_accent
+                        } else {
+                            hsla(0., 0., 0., 0.)
+                        })
                         .flex()
                         .items_center()
                         .justify_center()
-                        .py_2()
-                        .rounded_md()
-                        
-                        .font_weight(FontWeight::MEDIUM)
+                        .child(if sync_enabled {
+                            div()
+                                .text_size(px(10.))
+                                .text_color(theme::colors().background)
+                                .child("✓")
+                                .into_any_element()
+                        } else {
+                            div().into_any_element()
+                        }),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme::colors().text)
+                        .child("同步同名文件"),
+                )
+        })
+        // ── 同步格式多选（勾选开关后出现，默认全选）──
+        .when(sync_enabled, |parent| {
+            // 目录实际出现的格式（ImageFormat Display 大写，与 engine 匹配键一致）
+            let mut all_formats: HashSet<String> = HashSet::new();
+            for m in &view.captures {
+                all_formats.insert(m.primary_format.to_string().to_uppercase());
+            }
+            let mut options: Vec<String> = all_formats.into_iter().collect();
+            options.sort();
+            let mut chips: Vec<AnyElement> = options
+                .iter()
+                .map(|fmt| {
+                    let vh = vh.clone();
+                    let fmt = fmt.clone();
+                    let active = view.batch_sync_formats.contains(&fmt);
+                    div()
+                        .id(SharedString::from(format!("sync-fmt-{fmt}")))
+                        .px_2()
+                        .py_0p5()
+                        .rounded_full()
+                        .text_size(px(11.))
                         .cursor_pointer()
-                        .bg(theme::colors().text_accent)
-                        .text_color(theme::colors().background)
-                        .hover(|style| style.bg(theme::accent_hover()))
-                        .when(in_progress, |style| {
-                            style.opacity(0.5).cursor_default()
+                        .text_color(if active {
+                            theme::colors().background
+                        } else {
+                            theme::colors().text_muted
                         })
-                        .on_click(move |_, _window, cx| {
-                            if let Some(e) = vh.upgrade() {
-                                cx.update_entity(&e, |view, cx| {
-                                    view.execute_batch_ops(cx);
-                                });
+                        .bg(if active {
+                            theme::colors().text_accent
+                        } else {
+                            theme::colors().element_background
+                        })
+                        .hover(|style| style.bg(if active { theme::accent_hover() } else { theme::colors().element_hover }))
+                        .on_click({
+                            let fmt_click = fmt.clone();
+                            move |_, _window, cx| {
+                                if let Some(e) = vh.upgrade() {
+                                    cx.update_entity(&e, |view, cx| {
+                                        view.toggle_batch_sync_format(&fmt_click, cx);
+                                    });
+                                }
                             }
                         })
-                        .child(if in_progress { "执行中..." } else { "开始执行" }),
-                )
+                        .child(fmt.clone())
+                        .into_any_element()
+                })
+                .collect();
+            if chips.is_empty() {
+                chips.push(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(theme::colors().text_muted)
+                        .child("目录中没有其他格式的同名文件")
+                        .into_any_element(),
+                );
+            }
+            parent.child(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(theme::colors().text_muted)
+                            .child("同步格式"),
+                    )
+                    .child(div().flex().flex_wrap().gap_1().children(chips)),
+            )
+        })
+        // ── 主操作横排：移动到… / 复制到… ──
+        .child({
+            let vh = vh.clone();
+            h_flex()
+                .gap_2()
+                .child(render_action_button(
+                    "batch-move",
+                    "移动到…",
+                    BatchOpType::Move,
+                    empty,
+                    vh.clone(),
+                ))
+                .child(render_action_button(
+                    "batch-copy",
+                    "复制到…",
+                    BatchOpType::Copy,
+                    empty,
+                    vh,
+                ))
+        })
+        // ── 删除（独立红色，与主操作隔离）──
+        .child({
+            let vh = vh.clone();
+            div()
+                .mt_1()
+                .child(render_delete_button("batch-delete", empty, vh))
+        })
+        // ── 执行中提示 ──
+        .when(in_progress, |parent| {
+            parent.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(theme::colors().text_muted)
+                    .child("执行中…"),
+            )
         })
         // ── 结果列表 ──
         .when(has_results, |parent| {
@@ -202,14 +222,93 @@ pub fn render_batch_ops_section(
                         .into_any_element()
                 })
                 .collect();
+            let ok = results.iter().filter(|m| !m.contains("失败")).count();
+            let fail = results.len() - ok;
             parent.child(
                 v_flex()
                     .mt_2()
                     .gap_1()
                     .child(label("执行结果"))
-                    .child(div().flex_1().children(items)),
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(if fail > 0 {
+                                theme::colors().warning
+                            } else {
+                                theme::colors().text_muted
+                            })
+                            .child(format!("成功 {ok} / 失败 {fail}")),
+                    )
+                    .child(div().max_h(px(240.)).overflow_y_scrollbar().children(items)),
             )
         })
+}
+
+/// 主操作按钮（移动/复制）：accent 底，空筛选时禁用
+fn render_action_button(
+    id: &'static str,
+    label: &'static str,
+    op: BatchOpType,
+    disabled: bool,
+    vh: WeakEntity<RootView>,
+) -> impl IntoElement {
+    div()
+        .id(ElementId::Name(id.into()))
+        .flex_1()
+        .flex()
+        .items_center()
+        .justify_center()
+        .py_2()
+        .rounded_md()
+        
+        .font_weight(FontWeight::MEDIUM)
+        .text_size(px(12.))
+        .cursor_pointer()
+        .bg(theme::colors().text_accent)
+        .text_color(theme::colors().background)
+        .hover(|style| style.bg(theme::accent_hover()))
+        .when(disabled, |style| style.opacity(0.4).cursor_default())
+        .on_click(move |_, _window, cx| {
+            if disabled {
+                return;
+            }
+            if let Some(e) = vh.upgrade() {
+                cx.update_entity(&e, |view, cx| {
+                    view.batch_move_or_copy(op, cx);
+                });
+            }
+        })
+        .child(label)
+}
+
+/// 删除按钮：独立红色，空筛选时禁用
+fn render_delete_button(id: &'static str, disabled: bool, vh: WeakEntity<RootView>) -> impl IntoElement {
+    div()
+        .id(ElementId::Name(id.into()))
+        .flex()
+        .items_center()
+        .justify_center()
+        .py_2()
+        .rounded_md()
+        
+        .font_weight(FontWeight::MEDIUM)
+        .text_size(px(12.))
+        .cursor_pointer()
+        .bg(theme::colors().error)
+        .text_color(theme::colors().background)
+        .hover(|style| style.bg(theme::accent_hover()))
+        .when(disabled, |style| style.opacity(0.4).cursor_default())
+        .on_click(move |_, _window, cx| {
+            if disabled {
+                return;
+            }
+            if let Some(e) = vh.upgrade() {
+                cx.update_entity(&e, |view, cx| {
+                    view.batch_delete(cx);
+                });
+            }
+        })
+        .child("删除")
 }
 
 fn label(text: &'static str) -> impl IntoElement {
@@ -218,127 +317,4 @@ fn label(text: &'static str) -> impl IntoElement {
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme::colors().text_muted)
         .child(text)
-}
-
-fn arrow() -> impl IntoElement {
-    div().text_color(theme::colors().text_muted).child("▼")
-}
-
-fn option_list(items: Vec<gpui::AnyElement>) -> impl IntoElement {
-    div()
-        .mt_1()
-        .rounded_sm()
-        .bg(theme::colors().surface_background)
-        .border_1()
-        .border_color(theme::colors().border_variant)
-        .py_1()
-        .children(items)
-}
-
-fn format_dropdown(
-    label_text: &'static str,
-    current: &str,
-    id_suffix: &'static str,
-    is_open: bool,
-    vh: &WeakEntity<RootView>,
-) -> impl IntoElement {
-    let vh_click = vh.clone();
-    let vh_options = vh.clone();
-    let display: SharedString = if current.is_empty() {
-        "全部".into()
-    } else {
-        current.to_string().into()
-    };
-
-    v_flex()
-        .gap_1()
-        .child(label(label_text))
-        .child(
-            div()
-                .id(SharedString::from(format!("fmt-sel-{}", id_suffix)))
-                .flex()
-                .items_center()
-                .justify_between()
-                .px_2()
-                .py_1()
-                .rounded_sm()
-                .bg(theme::colors().element_background)
-                
-                .cursor_pointer()
-                .on_click(move |_, _window, cx| {
-                    if let Some(e) = vh_click.upgrade() {
-                        cx.update_entity(&e, |view, cx| {
-                            toggle_fmt_dropdown(id_suffix, view);
-                            cx.notify();
-                        });
-                    }
-                })
-                .child(display)
-                .child(arrow()),
-        )
-        .when(is_open, move |parent| {
-            let items: Vec<gpui::AnyElement> = FORMAT_OPTIONS
-                .iter()
-                .map(|&(display_name, value)| {
-                    let vh = vh_options.clone();
-                    let is_active =
-                        (current.is_empty() && value.is_empty()) || current == value;
-                    div()
-                        .id(SharedString::from(display_name))
-                        .px_2()
-                        .py_1()
-                        
-                        .cursor_pointer()
-                        .text_color(if is_active {
-                            theme::colors().text_accent
-                        } else {
-                            theme::colors().text
-                        })
-                        .bg(if is_active {
-                            theme::accent_dim()
-                        } else {
-                            hsla(0., 0., 0., 0.)
-                        })
-                        .hover(|style| style.bg(theme::colors().element_hover))
-                        .on_click(move |_, _window, cx| {
-                            if let Some(e) = vh.upgrade() {
-                                cx.update_entity(&e, |view, cx| {
-                                    let field = id_suffix;
-                                    match field {
-                                        "batch-source-fmt" => {
-                                            view.batch_source_format = value.to_string();
-                                            view.batch_source_fmt_open = false;
-                                        }
-                                        "batch-compare-fmt" => {
-                                            view.batch_compare_format = value.to_string();
-                                            view.batch_compare_fmt_open = false;
-                                        }
-                                        _ => {}
-                                    }
-                                    cx.notify();
-                                });
-                            }
-                        })
-                        .child(display_name)
-                        .into_any_element()
-                })
-                .collect();
-            parent.child(option_list(items))
-        })
-}
-
-fn toggle_fmt_dropdown(id: &str, view: &mut RootView) {
-    match id {
-        "batch-source-fmt" => {
-            view.batch_source_fmt_open = !view.batch_source_fmt_open;
-            view.batch_compare_fmt_open = false;
-            view.batch_op_dropdown_open = false;
-        }
-        "batch-compare-fmt" => {
-            view.batch_compare_fmt_open = !view.batch_compare_fmt_open;
-            view.batch_source_fmt_open = false;
-            view.batch_op_dropdown_open = false;
-        }
-        _ => {}
-    }
 }

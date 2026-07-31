@@ -9,9 +9,10 @@ use gpui::*;
 use std::sync::LazyLock;
 use photo_config::AppConfig;
 use photo_domain::{
-    BatchOpType, BBox, CaptureMeta, ColorLabel, FilterCriteria, Flag, Rating,
+    BBox, CaptureMeta, ColorLabel, FilterCriteria, Flag, Rating,
     SortBy, SortDirection,
 };
+use crate::state::batch_ops::BatchDeletePreview;
 use gpui_component::combobox::ComboboxState;
 use gpui_component::select::SearchableVec;
 use photo_engine::thumbnail::ThumbnailCache;
@@ -113,14 +114,15 @@ pub struct RootView {
     pub box_draw: Option<(f32, f32, f32, f32)>,
     /// 已提交、等待识别结果的手动框（归一化坐标，渲染「识别中」overlay）
     pub pending_region: Option<BBox>,
-    // ── 批量文件操作 ──
-    pub batch_compare_dir: String,
-    pub batch_source_format: String,
-    pub batch_compare_format: String,
-    pub batch_op_type: BatchOpType,
-    pub batch_op_dropdown_open: bool,
-    pub batch_source_fmt_open: bool,
-    pub batch_compare_fmt_open: bool,
+    // ── 批量文件操作（ADR 0006：筛选驱动 + 画面粒度）──
+    /// 「同步同名文件」开关（默认关）：开启后按 stem 将兄弟文件纳入操作集
+    pub batch_sync_enabled: bool,
+    /// 同步的格式集合（UI 多选栏，默认全选目录实际格式）
+    pub batch_sync_formats: HashSet<String>,
+    /// 同步预估额外文件数（UI 显示「+M」，开关/格式/筛选变化时重算）
+    pub batch_sync_extra: usize,
+    /// 删除确认弹窗数据（None = 未打开）
+    pub batch_delete_confirm: Option<BatchDeletePreview>,
     pub batch_results: Vec<String>,
     pub batch_in_progress: bool,
     pub batch_progress: Option<(u32, u32)>,
@@ -216,13 +218,10 @@ impl RootView {
             grid_scroll_handle: UniformListScrollHandle::new(),
             preview_area_bounds: Rc::new(RefCell::new((0., 0., 0., 0.))),
             filmstrip_scroll: ScrollHandle::default(),
-            batch_compare_dir: String::new(),
-            batch_source_format: String::new(),
-            batch_compare_format: String::new(),
-            batch_op_type: BatchOpType::CopySame,
-            batch_op_dropdown_open: false,
-            batch_source_fmt_open: false,
-            batch_compare_fmt_open: false,
+            batch_sync_enabled: false,
+            batch_sync_formats: HashSet::new(),
+            batch_sync_extra: 0,
+            batch_delete_confirm: None,
             batch_results: Vec::new(),
             batch_in_progress: false,
             batch_progress: None,

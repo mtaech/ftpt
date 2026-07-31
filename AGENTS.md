@@ -262,12 +262,14 @@ gpui-component 项目位于 `E:\Dev\Code\gpui-component`，含完整源码和本
 - **EXIF 后台化**：扫描闭包只查 `exif_cache`，未命中交给 `spawn_enrich_tasks` 并发提取并写回缓存（不再串行 LibRaw open）；全部完成后重排一次（日期排序正确）
 - **convert**：RAW→JPEG 转换从内嵌小图改为完整解码（输出清晰；`max_dimension=0` 映射 `u32::MAX`）
 - **缓存按文件夹隔离**：缩略图缓存目录改为照片目录 `.pt/thumbs`（扫描时重建，与 `.pt/data.db` 同级），删除文件夹即清空缓存；移除全局 `max_cache_size_mb` 配置与 `prune` 调用（config 字段、设置面板 UI 一并删除）
+- **批量文件操作两阶段**：点「开始执行」→ 干跑预览（扫描+匹配，只展示文件名不动文件）→ 按钮变「确认执行（N 个）」→ 真执行；删除类操作按钮红色警告（批量删除本就走回收站 `ops::delete_capture` → `trash::delete`，非永久删除）；`BatchOpType` 新增 `description()`（下拉副标题）与 `is_delete()`；切换目录/格式/操作类型自动使预览失效；结果区新增「成功 N / 失败 M」汇总，列表可滚动
+- **批量操作重构（ADR 0006）**：对比目录匹配引擎（`find_matching` 与 6 种 Same/NotSame 操作）整体移除——操作对象改为**当前筛选结果**（纯筛选驱动，`display_order`）；动作收敛为移动/复制/删除三种；目标目录执行时用户选择（一步式，拒绝目标=源目录）；「同步同名文件」开关（默认关）+ 格式多选（默认全选）按 stem 将兄弟文件纳入操作集（新增 `batch_ops::expand_with_siblings`，触发点自身格式不在同步集合时也会保留）；删除走**弹窗确认**（含「其中 M 个来自同名同步」警告 + 清单）；移动/删除完成后**全量重扫**刷新网格（复制不动源列表）；完成 toast 摘要 + 侧栏失败详情
 
 ---
 
 ## 测试与 QA
 
-- 全部 **137 个 `#[test]`**（+ 1 个 doctest、1 个 `#[ignore]` 真机冒烟）分布在 4 个 crate 的源文件末尾内联 `#[cfg(test)] mod tests
+- 全部 **166 个 `#[test]`**（+ 1 个 `#[ignore]` 真机冒烟）分布在 5 个 crate 的源文件末尾内联 `#[cfg(test)] mod tests
 - 无外部 `tests/` 目录、无异步测试、无第三方测试框架（唯一 dev-dep：`tempfile`）
 - 真机识别冒烟：`cargo test -p photo-recognize -- --ignored`（需 worktree/发布根有 `models/` 与 `data/pica_ref.db`）；单文件手动识别工具：`cargo run -p photo-recognize --example recognize_file -- <图片路径>`（全管线）/ `recognize_region -- <图片> <x1> <y1> <x2> <y2>`（跳过检测，手动框选区域直接分类）
 

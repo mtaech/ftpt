@@ -191,6 +191,8 @@ impl RootView {
         });
 
         self.display_order = indices;
+        // 筛选集变化 → 同步预估失效重算（UI 显示「+M」）
+        self.refresh_batch_sync_extra();
     }
 
     /// 创建鸟种多选下拉实体并订阅 Change 事件（选中变化即写回 filter.bird_names）
