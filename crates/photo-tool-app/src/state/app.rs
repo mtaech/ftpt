@@ -15,7 +15,6 @@ use photo_domain::{
 use crate::state::batch_ops::BatchDeletePreview;
 use gpui_component::combobox::ComboboxState;
 use gpui_component::select::SearchableVec;
-use gpui_component::slider::{SliderEvent, SliderState};
 use photo_engine::thumbnail::ThumbnailCache;
 use crate::ui::toolbar::SettingsOverlay;
 use photo_engine::folder_db::FolderDb;
@@ -182,15 +181,12 @@ pub struct RootView {
     /// 导出结果消息（状态栏显示）
     pub adjust_export_msg: Option<String>,
     // ── 调整面板 UI（ADR 0007）──
-    /// 三个调整 slider 的状态实体（范围/步进固定；值由调整 tab 渲染时与 current_adjust 同步，
-    /// 避免每次 render 新建 SliderState 丢失拖动状态）
-    pub adjust_sliders: (
-        gpui::Entity<SliderState>,
-        gpui::Entity<SliderState>,
-        gpui::Entity<SliderState>,
-    ),
-    /// slider 事件订阅（构造期绑定，随 RootView 生命周期自动清理；仅持有不读）
-    pub _adjust_slider_subs: Vec<gpui::Subscription>,
+    /// 正在拖动的调整 slider 索引（0=曝光 1=对比度 2=饱和度；None=无拖动）
+    /// 自绘 slider 用 on_mouse_down/move/up 驱动（不依赖 gpui-component Slider 的 on_drag——
+    /// 项目锁定的 gpui 4ebc154 下该组件拖动实测无效）
+    pub adjust_drag: Option<usize>,
+    /// 三个 slider 的窗口边界 (left, top, width)，on_prepaint 写入，拖动算值用
+    pub adjust_slider_bounds: [(f32, f32, f32); 3],
     // ── 裁切交互（ADR 0007：调整视图内框选/移动/手柄调整；拖动中只更新 draft，mouse_up 才提交）──
     /// 裁切框选中（Shift+拖拽，窗口坐标：(起始x, 起始y, 当前x, 当前y)）
     pub crop_draw: Option<(f32, f32, f32, f32)>,
@@ -222,56 +218,6 @@ impl RootView {
         }
         // 启动后自动扫描上次打开的目录
         let auto_dir = config.last_directory.clone();
-
-        // 调整 slider 状态实体：范围/步进固定（曝光 ±2.0 EV 步进 0.05；对比度/饱和度 ±100 步进 1），
-        // 值由调整 tab 渲染时同步 current_adjust（切图/重置后滑块跟随参数）
-        let (exposure_slider, contrast_slider, saturation_slider) = (
-            cx.new(|_| SliderState::new().min(-2.0).max(2.0).step(0.05).default_value(0.0)),
-            cx.new(|_| {
-                SliderState::new()
-                    .min(-100.0)
-                    .max(100.0)
-                    .step(1.0)
-                    .default_value(0.0)
-            }),
-            cx.new(|_| {
-                SliderState::new()
-                    .min(-100.0)
-                    .max(100.0)
-                    .step(1.0)
-                    .default_value(0.0)
-            }),
-        );
-        // 订阅 slider 拖动事件：Change 实时更新参数 → set_adjustment（worker 重算 tone）。
-        // set_value 不触发 SliderEvent，渲染时同步滑块值不会回环；set_adjustment 参数相等自动跳过。
-        let adjust_slider_subs = vec![
-            cx.subscribe(&exposure_slider, |view, _, event, cx| match event {
-                // Change 实时更新参数并重算；Release 强制重算一次（拖动结束的最终值
-                // 可能因上一个重算任务未完成被跳过，确保落定渲染）
-                SliderEvent::Change(v) => {
-                    let mut p = view.current_adjust;
-                    p.exposure = v.start();
-                    view.set_adjustment(p, cx);
-                }
-                SliderEvent::Release(_) => view.recompute_adjust_render(cx),
-            }),
-            cx.subscribe(&contrast_slider, |view, _, event, cx| match event {
-                SliderEvent::Change(v) => {
-                    let mut p = view.current_adjust;
-                    p.contrast = v.start() as i32;
-                    view.set_adjustment(p, cx);
-                }
-                SliderEvent::Release(_) => view.recompute_adjust_render(cx),
-            }),
-            cx.subscribe(&saturation_slider, |view, _, event, cx| match event {
-                SliderEvent::Change(v) => {
-                    let mut p = view.current_adjust;
-                    p.saturation = v.start() as i32;
-                    view.set_adjustment(p, cx);
-                }
-                SliderEvent::Release(_) => view.recompute_adjust_render(cx),
-            }),
-        ];
 
         let mut this = Self {
             config,
@@ -349,8 +295,8 @@ impl RootView {
             adjust_render_version: 0,
             adjust_exporting: false,
             adjust_export_msg: None,
-            adjust_sliders: (exposure_slider, contrast_slider, saturation_slider),
-            _adjust_slider_subs: adjust_slider_subs,
+            adjust_drag: None,
+            adjust_slider_bounds: [(0.0, 0.0, 1.0); 3],
             crop_draw: None,
             crop_draft: None,
             crop_resize: None,

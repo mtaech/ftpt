@@ -8,8 +8,8 @@ use crate::state::app::RootView;
 use gpui_component::rating::Rating;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::Disableable;
-use gpui_component::slider::{Slider, SliderState};
 use gpui_component::tab::{Tab, TabBar};
+use gpui_component::ElementExt;
 use gpui_component::{Sizable, IconName};
 
 use crate::ui::controls::{clear_link, section_header, segmented_button};
@@ -20,7 +20,7 @@ use gpui_component::h_flex;
 /// Render the right info panel: 顶部双 tab（信息/调整）+ 对应 tab 内容。
 pub fn render_info_panel(
     view: &RootView,
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let focused = view.get_focused_capture();
@@ -94,18 +94,14 @@ pub fn render_info_panel(
                 .into_any_element()
         } else {
             // 调整 tab：曝光/对比度/饱和度 slider + 重置/导出
-            render_adjust_panel(view, window, cx).into_any_element()
+            render_adjust_panel(view, cx).into_any_element()
         })
 }
 
 /// 调整 tab：曝光/对比度/饱和度 slider + 重置/导出（ADR 0007 参数化非破坏）。
 /// slider 状态实体常驻 RootView（不随渲染重建）；回调只更新参数 + set_adjustment（重算在 worker），
 /// 渲染路径不产生任何像素级工作。
-fn render_adjust_panel(
-    view: &RootView,
-    window: &mut Window,
-    cx: &mut Context<RootView>,
-) -> impl IntoElement {
+fn render_adjust_panel(view: &RootView, cx: &mut Context<RootView>) -> impl IntoElement {
     let colors = theme::colors();
     let vh = cx.entity().downgrade();
     let params = view.current_adjust;
@@ -124,19 +120,6 @@ fn render_adjust_panel(
             );
     }
 
-    // slider 显示值跟随 current_adjust（切图/重置后值不一致才同步；set_value 不触发
-    // SliderEvent，不会回环触发 set_adjustment；set_adjustment 参数相等也会自动跳过）
-    let (exposure_slider, contrast_slider, saturation_slider) = &view.adjust_sliders;
-    if (exposure_slider.read(cx).value().start() - params.exposure).abs() > 1e-4 {
-        exposure_slider.update(cx, |s, cx| s.set_value(params.exposure, window, cx));
-    }
-    if (contrast_slider.read(cx).value().start() - params.contrast as f32).abs() > 1e-4 {
-        contrast_slider.update(cx, |s, cx| s.set_value(params.contrast as f32, window, cx));
-    }
-    if (saturation_slider.read(cx).value().start() - params.saturation as f32).abs() > 1e-4 {
-        saturation_slider.update(cx, |s, cx| s.set_value(params.saturation as f32, window, cx));
-    }
-
     div()
         .flex()
         .flex_col()
@@ -150,11 +133,11 @@ fn render_adjust_panel(
                     .child("当前无调整"),
             )
         })
-        // 曝光（EV ±2.0，步进 0.05）；每项独立重置（非中性时显示）
+        // 曝光（EV ±2.0，步进 0.05）；自绘 slider（on_mouse_* 驱动，见 simple_slider）；每项独立重置
         .child(adjust_slider_row(
             "曝光",
             format!("{:+.2} EV", params.exposure),
-            exposure_slider,
+            simple_slider(0, SliderTarget::Exposure, params.exposure, -2.0, 2.0, 0.05, &vh),
             reset_adjust_button("reset-exposure", params.exposure != 0.0, &vh, |view, cx| {
                 let mut p = view.current_adjust;
                 p.exposure = 0.0;
@@ -165,7 +148,7 @@ fn render_adjust_panel(
         .child(adjust_slider_row(
             "对比度",
             format!("{:+}", params.contrast),
-            contrast_slider,
+            simple_slider(1, SliderTarget::Contrast, params.contrast as f32, -100.0, 100.0, 1.0, &vh),
             reset_adjust_button("reset-contrast", params.contrast != 0, &vh, |view, cx| {
                 let mut p = view.current_adjust;
                 p.contrast = 0;
@@ -176,7 +159,7 @@ fn render_adjust_panel(
         .child(adjust_slider_row(
             "饱和度",
             format!("{:+}", params.saturation),
-            saturation_slider,
+            simple_slider(2, SliderTarget::Saturation, params.saturation as f32, -100.0, 100.0, 1.0, &vh),
             reset_adjust_button("reset-saturation", params.saturation != 0, &vh, |view, cx| {
                 let mut p = view.current_adjust;
                 p.saturation = 0;
@@ -285,11 +268,11 @@ fn render_adjust_panel(
         })
 }
 
-/// 调整 slider 行：左侧标签 + 中部滑块 + 右侧数值 + 独立重置按钮（可选）
+/// 调整 slider 行：左侧标签 + 中部自绘滑块 + 右侧数值 + 独立重置按钮（可选）
 fn adjust_slider_row(
     label: &str,
     value_text: String,
-    slider: &gpui::Entity<SliderState>,
+    slider: impl IntoElement,
     reset: Option<AnyElement>,
 ) -> impl IntoElement {
     h_flex()
@@ -303,7 +286,7 @@ fn adjust_slider_row(
                 .text_size(px(12.))
                 .child(label.to_string()),
         )
-        .child(div().flex_1().child(Slider::new(slider).horizontal()))
+        .child(div().flex_1().child(slider))
         .child(
             div()
                 .w(px(52.))
@@ -314,6 +297,144 @@ fn adjust_slider_row(
                 .child(value_text),
         )
         .when_some(reset, |this, el| this.child(el))
+}
+
+/// 自绘 slider 目标字段
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SliderTarget {
+    Exposure,
+    Contrast,
+    Saturation,
+}
+
+/// 将拖动目标值写入调整参数并触发重算（set_adjustment 无条件 notify，拖动实时刷新）
+fn apply_slider_value(view: &mut RootView, target: SliderTarget, value: f32, cx: &mut Context<RootView>) {
+    let mut p = view.current_adjust;
+    match target {
+        SliderTarget::Exposure => p.exposure = value,
+        SliderTarget::Contrast => p.contrast = value as i32,
+        SliderTarget::Saturation => p.saturation = value as i32,
+    }
+    view.set_adjustment(p, cx);
+}
+
+/// 鼠标窗口 x → slider 值（按元素边界归一化，step 取整，夹紧范围）
+fn slider_value_from_pos(x: f32, bounds: (f32, f32, f32), min: f32, max: f32, step: f32) -> f32 {
+    let (left, _, width) = bounds;
+    if width <= 0.0 {
+        return min;
+    }
+    let pct = ((x - left) / width).clamp(0.0, 1.0);
+    let v = min + (max - min) * pct;
+    ((v / step).round() * step).clamp(min, max)
+}
+
+/// 自绘 slider：轨道 + 填充 + thumb，on_mouse_down/move/up 驱动（项目验证路径，
+/// 不依赖 gpui-component Slider 的 on_drag——锁定 gpui 4ebc154 下拖动实测无效）。
+/// 拖动中每帧 set_adjustment（取消式重算 <8ms，实时）；on_prepaint 记录边界供算值。
+fn simple_slider(
+    idx: usize,
+    target: SliderTarget,
+    value: f32,
+    min: f32,
+    max: f32,
+    step: f32,
+    vh: &gpui::WeakEntity<RootView>,
+) -> impl IntoElement {
+    let colors = theme::colors();
+    let pct = ((value - min) / (max - min)).clamp(0.0, 1.0);
+    let vh_down = vh.clone();
+    let vh_move = vh.clone();
+    let vh_up = vh.clone();
+    let vh_prepaint = vh.clone();
+    div()
+        .id(ElementId::Name(format!("adjust-slider-{idx}").into()))
+        .relative()
+        .h(px(18.))
+        .w_full()
+        .cursor(CursorStyle::PointingHand)
+        // 轨道
+        .child(
+            div()
+                .absolute()
+                .left(px(0.))
+                .right(px(0.))
+                .top(px(8.))
+                .h(px(2.))
+                .rounded_full()
+                .bg(colors.border_variant),
+        )
+        // 填充
+        .child(
+            div()
+                .absolute()
+                .left(px(0.))
+                .top(px(8.))
+                .h(px(2.))
+                .w(relative(pct * 100.0))
+                .rounded_full()
+                .bg(colors.text_accent),
+        )
+        // thumb
+        .child(
+            div()
+                .absolute()
+                .left(relative(pct * 100.0))
+                .ml(-px(5.))
+                .top(px(5.))
+                .size(px(8.))
+                .rounded_full()
+                .bg(colors.text),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            move |e: &MouseDownEvent, _window, cx| {
+                if let Some(v) = vh_down.upgrade() {
+                    let x: f32 = e.position.x.into();
+                    let _ = cx.update_entity(&v, |view, cx| {
+                        view.adjust_drag = Some(idx);
+                        let bounds = view.adjust_slider_bounds[idx];
+                        apply_slider_value(view, target, slider_value_from_pos(x, bounds, min, max, step), cx);
+                    });
+                }
+            },
+        )
+        .on_mouse_move(move |e: &MouseMoveEvent, _window, cx| {
+            if e.pressed_button != Some(MouseButton::Left) {
+                return;
+            }
+            if let Some(v) = vh_move.upgrade() {
+                let x: f32 = e.position.x.into();
+                let _ = cx.update_entity(&v, |view, cx| {
+                    if view.adjust_drag == Some(idx) {
+                        let bounds = view.adjust_slider_bounds[idx];
+                        apply_slider_value(view, target, slider_value_from_pos(x, bounds, min, max, step), cx);
+                    }
+                });
+            }
+        })
+        .on_mouse_up(
+            MouseButton::Left,
+            move |_e: &MouseUpEvent, _window, cx| {
+                if let Some(v) = vh_up.upgrade() {
+                    let _ = cx.update_entity(&v, |view, _cx| {
+                        if view.adjust_drag == Some(idx) {
+                            view.adjust_drag = None;
+                        }
+                    });
+                }
+            },
+        )
+        .on_prepaint(move |bounds, _window, cx| {
+            if let Some(v) = vh_prepaint.upgrade() {
+                let x: f32 = bounds.origin.x.into();
+                let y: f32 = bounds.origin.y.into();
+                let w: f32 = bounds.size.width.into();
+                let _ = cx.update_entity(&v, |view, _cx| {
+                    view.adjust_slider_bounds[idx] = (x, y, w);
+                });
+            }
+        })
 }
 
 /// 单调整项独立重置按钮：非中性时显示，点击将该参数归零（ADR 0007）
@@ -1046,5 +1167,47 @@ fn render_recognition_actions(
                     }
                 }),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    // 不用 super::*：gpui 根导出的 test 属性宏会遮蔽内建 #[test] 导致宏展开递归
+    use super::slider_value_from_pos;
+
+    /// 鼠标 x → slider 值：边界端点、越界夹紧
+    #[test]
+    fn test_slider_value_from_pos_endpoints_and_clamp() {
+        let b = (100.0, 0.0, 200.0); // left=100, width=200
+        assert_eq!(slider_value_from_pos(100.0, b, -2.0, 2.0, 0.05), -2.0);
+        assert_eq!(slider_value_from_pos(300.0, b, -2.0, 2.0, 0.05), 2.0);
+        assert_eq!(slider_value_from_pos(50.0, b, -2.0, 2.0, 0.05), -2.0);
+        assert_eq!(slider_value_from_pos(500.0, b, -2.0, 2.0, 0.05), 2.0);
+    }
+
+    /// 中点 → 0；四分之一 → ±1.0；step 取整（曝光 0.05 网格）
+    #[test]
+    fn test_slider_value_from_pos_midpoint_and_step() {
+        let b = (100.0, 0.0, 200.0);
+        assert_eq!(slider_value_from_pos(200.0, b, -2.0, 2.0, 0.05), 0.0);
+        assert_eq!(slider_value_from_pos(150.0, b, -2.0, 2.0, 0.05), -1.0);
+        assert_eq!(slider_value_from_pos(250.0, b, -2.0, 2.0, 0.05), 1.0);
+        let v = slider_value_from_pos(201.25, b, -2.0, 2.0, 0.05);
+        assert!((v * 20.0).fract().abs() < 1e-6, "值应在 0.05 网格上: {v}");
+    }
+
+    /// 对比度/饱和度步进 1，范围 ±100
+    #[test]
+    fn test_slider_value_from_pos_percent_range() {
+        let b = (100.0, 0.0, 200.0);
+        assert_eq!(slider_value_from_pos(150.0, b, -100.0, 100.0, 1.0), -50.0);
+        assert_eq!(slider_value_from_pos(250.0, b, -100.0, 100.0, 1.0), 50.0);
+        assert_eq!(slider_value_from_pos(200.0, b, -100.0, 100.0, 1.0), 0.0);
+    }
+
+    /// 宽度为 0（未布局）时返回 min，不除零
+    #[test]
+    fn test_slider_value_from_pos_zero_width_safe() {
+        assert_eq!(slider_value_from_pos(0.0, (0.0, 0.0, 0.0), -2.0, 2.0, 0.05), -2.0);
+    }
 }
 
