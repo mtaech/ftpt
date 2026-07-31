@@ -48,7 +48,7 @@ impl ThumbnailCache {
     ) -> Result<Vec<u8>, ThumbnailError> {
         // RAW：母版缓存 + 派生
         if matches!(source.format, ImageFormat::Raw(_)) {
-            let master_key = self.cache_key(source, u32::MAX);
+            let master_key = self.cache_key(source, u32::MAX, "std");
             let master_path = self.cache_dir.join(&master_key);
             let master: Vec<u8> = if master_path.exists() {
                 std::fs::read(&master_path)?
@@ -64,7 +64,7 @@ impl ThumbnailCache {
         }
 
         // 常规图：按 size 独立缓存（JPEG DCT 缩放本就快，源文件小）
-        let cache_key = self.cache_key(source, size);
+        let cache_key = self.cache_key(source, size, "std");
         let cache_path = self.cache_dir.join(&cache_key);
 
         if cache_path.exists() {
@@ -76,12 +76,32 @@ impl ThumbnailCache {
         Ok(thumb_bytes)
     }
 
-    fn cache_key(&self, source: &SourceFile, size: u32) -> String {
+    /// RAW 全尺寸母版（1:1 像素级查看）：AHD 全尺寸解码，独立于 half_size 母版缓存。
+    /// 惰性生成（仅在 1:1 查看过才落盘），键带 `full` 变体与 half_size 母版分离。
+    pub fn get_or_generate_full(
+        &self,
+        source: &SourceFile,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Vec<u8>, ThumbnailError> {
+        let cache_key = self.cache_key(source, u32::MAX, "full");
+        let cache_path = self.cache_dir.join(&cache_key);
+
+        if cache_path.exists() {
+            return Ok(std::fs::read(&cache_path)?);
+        }
+        let bytes = decode_raw_full(&source.path, cancel)?;
+        std::fs::write(&cache_path, &bytes)?;
+        Ok(bytes)
+    }
+
+    fn cache_key(&self, source: &SourceFile, size: u32, variant: &str) -> String {
         use std::hash::{Hash, Hasher};
         // 缓存格式版本：解码逻辑修复（如行宽错位）时递增，旧缓存自动失效
-        const CACHE_VERSION: u8 = 3;
+        const CACHE_VERSION: u8 = 4;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         CACHE_VERSION.hash(&mut hasher);
+        // 变体：std（half_size 母版/常规图）与 full（全尺寸母版）分开，键互不冲突
+        variant.hash(&mut hasher);
         source.path.to_string_lossy().hash(&mut hasher);
         size.hash(&mut hasher);
         // 文件大小参与键：同名文件被覆盖（重拍导回）时旧缓存自动失效
@@ -102,10 +122,10 @@ impl ThumbnailCache {
     fn generate_image_thumbnail(&self, path: &Path, size: u32, cancel: Option<&AtomicBool>) -> Result<Vec<u8>, ThumbnailError> {
         let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase());
 
-        if matches!(ext.as_deref(), Some("jpg" | "jpeg")) {
-            if let Ok(bytes) = self.decode_jpeg_scaled(path, size) {
-                return Ok(bytes);
-            }
+        if matches!(ext.as_deref(), Some("jpg" | "jpeg"))
+            && let Ok(bytes) = self.decode_jpeg_scaled(path, size)
+        {
+            return Ok(bytes);
         }
 
         if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
@@ -118,18 +138,10 @@ impl ThumbnailCache {
         Ok(buf.into_inner())
     }
 
-    /// JPEG DCT 降采样解码：zune-jpeg SIMD 加速 + max_width/max_height 自动 DCT 缩放
+    /// JPEG DCT 降采样解码：jpeg-decoder 1/2 因子（只解需要的 block）
     fn decode_jpeg_scaled(&self, path: &Path, size: u32) -> Result<Vec<u8>, ThumbnailError> {
-        use zune_core::colorspace::ColorSpace;
-        use zune_core::options::DecoderOptions;
-
-        let options = DecoderOptions::new_fast()
-            .jpeg_set_out_colorspace(ColorSpace::RGB)
-            .set_max_width(size as usize)
-            .set_max_height(size as usize);
-
         let file = std::fs::File::open(path)?;
-        decode_jpeg_scaled_reader(std::io::BufReader::new(file), options, size)
+        decode_jpeg_scaled_reader(std::io::BufReader::new(file), size)
     }
 
     /// 获取缓存总大小（字节）
@@ -249,6 +261,29 @@ fn decode_raw_impl(path: &Path, size: u32, cancel: Option<&AtomicBool>) -> Resul
     encode_bitmap_to_jpeg(&img, size)
 }
 
+/// RAW 全尺寸解码（1:1 像素级查看）：AHD 去马赛克 + 8bit + 自动亮度，不缩放。
+/// 相对 half_size 预览慢 4-8x（24MP 约 3-5s），配合磁盘缓存与取消令牌。
+/// 在 worker 线程中调用。
+fn decode_raw_full(path: &Path, cancel: Option<&AtomicBool>) -> Result<Vec<u8>, ThumbnailError> {
+    // 完整 RAW 解码（慢操作）前检查取消
+    if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+        return Err(ThumbnailError::Cancelled);
+    }
+    let path_str = path.to_string_lossy();
+    let img = rawlib::extract_image_with_options(path_str.as_ref(), &rawlib::DecodeOptions::full())
+        .map_err(|e| {
+            tracing::error!("全尺寸解码失败: {} — {e}", path.display());
+            ThumbnailError::Raw(e.to_string())
+        })?;
+    tracing::info!(
+        "全尺寸解码成功: {} ({}×{})",
+        path.display(),
+        img.width,
+        img.height
+    );
+    encode_bitmap_to_jpeg(&img, u32::MAX)
+}
+
 /// 只解析 JPEG 头部取尺寸（不解码像素）。
 fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     let mut decoder = zune_jpeg::JpegDecoder::new(Cursor::new(bytes));
@@ -258,21 +293,18 @@ fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 }
 
 /// 将 JPEG 字节缩放到目标尺寸（长边 ≤ size）。
-/// 快路径：zune DCT 降采样；失败回退全解码 + Lanczos3。小于目标时原样返回不重编码。
+/// 快路径：jpeg-decoder DCT 降采样（1/8、1/4、1/2 因子，只解需要的 block）；
+/// 失败回退全解码 + Lanczos3。小于目标时原样返回不重编码。
 fn resize_jpeg(jpeg_bytes: &[u8], size: u32) -> Result<Vec<u8>, ThumbnailError> {
     if let Some((w, h)) = jpeg_dimensions(jpeg_bytes) {
         if w.max(h) <= size {
             return Ok(jpeg_bytes.to_vec());
         }
-        let options = zune_core::options::DecoderOptions::new_fast()
-            .jpeg_set_out_colorspace(zune_core::colorspace::ColorSpace::RGB)
-            .set_max_width(size as usize)
-            .set_max_height(size as usize);
-        if let Ok(bytes) = decode_jpeg_scaled_reader(Cursor::new(jpeg_bytes), options, size) {
+        if let Ok(bytes) = decode_jpeg_scaled_reader(Cursor::new(jpeg_bytes), size) {
             return Ok(bytes);
         }
     }
-    // 回退：全解码 + Lanczos3（非 JPEG 或 zune 失败时）
+    // 回退：全解码 + Lanczos3（非 JPEG 或 jpeg-decoder 失败时）
     let img = image::load_from_memory(jpeg_bytes)?;
     if img.width().max(img.height()) <= size {
         return Ok(jpeg_bytes.to_vec());
@@ -287,28 +319,41 @@ fn resize_jpeg(jpeg_bytes: &[u8], size: u32) -> Result<Vec<u8>, ThumbnailError> 
     Ok(cursor.into_inner())
 }
 
-/// zune-jpeg DCT 降采样解码核心：从任意 reader 解码并缩放到 size 内，输出 JPEG 字节。
+/// jpeg-decoder DCT 降采样解码：从任意 reader 解码并缩放到长边 ≤ size，输出 JPEG 字节。
+/// 请求尺寸直接传给 scale：choose_idct_size 取输出 ≥ 请求的最小因子（1/8~1/1）——
+/// 小目标走降采样（快），大目标走 1/1 全量（保精度）；输出仍超 size 时 Lanczos 收尾。
 fn decode_jpeg_scaled_reader<R: std::io::BufRead + std::io::Seek>(
     reader: R,
-    options: zune_core::options::DecoderOptions,
     size: u32,
 ) -> Result<Vec<u8>, ThumbnailError> {
-    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(reader, options);
-    let pixels = decoder.decode().map_err(|e| {
+    use jpeg_decoder::Decoder;
+
+    let mut decoder = Decoder::new(reader);
+    decoder
+        .read_info()
+        .map_err(|e| ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
+            std::io::ErrorKind::InvalidData, e.to_string(),
+        ))))?;
+    let _info = decoder.info().ok_or_else(|| {
         ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            e.to_string(),
+            std::io::ErrorKind::InvalidData, "missing JPEG info after read_info",
         )))
     })?;
 
-    let info = decoder.info().ok_or_else(|| {
-        ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "missing JPEG info after decode",
-        )))
-    })?;
-    let (out_w, out_h) = (info.width as u32, info.height as u32);
-    let expected = (out_w * out_h * 3) as usize;
+    // 请求 = 目标尺寸：DCT 因子自动权衡（≤ size 原样返回由调用方 resize_jpeg 保证）
+    let req = size.min(u16::MAX as u32) as u16;
+    let (out_w, out_h) = decoder
+        .scale(req, req)
+        .map_err(|e| ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
+            std::io::ErrorKind::InvalidData, e.to_string(),
+        ))))?;
+
+    let pixels = decoder
+        .decode()
+        .map_err(|e| ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
+            std::io::ErrorKind::InvalidData, e.to_string(),
+        ))))?;
+    let expected = (out_w as u32 * out_h as u32 * 3) as usize;
     if pixels.len() != expected {
         return Err(ThumbnailError::Image(image::ImageError::IoError(
             std::io::Error::new(
@@ -318,15 +363,24 @@ fn decode_jpeg_scaled_reader<R: std::io::BufRead + std::io::Seek>(
         )));
     }
 
-    let img = image::RgbImage::from_raw(out_w, out_h, pixels).ok_or_else(|| {
+    let img = image::RgbImage::from_raw(out_w as u32, out_h as u32, pixels).ok_or_else(|| {
         ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "JPEG decode produced invalid buffer",
         )))
     })?;
-
     let dynamic = image::DynamicImage::ImageRgb8(img);
-    let resized = dynamic.thumbnail(size, size);
+    // 1/2 因子输出仍超 size（如 4000→2000 但目标 1600）→ Lanczos 收尾
+    let resized = if dynamic.width().max(dynamic.height()) <= size {
+        dynamic
+    } else {
+        let ratio = size as f64 / dynamic.width().max(dynamic.height()) as f64;
+        let nw = (dynamic.width() as f64 * ratio) as u32;
+        let nh = (dynamic.height() as f64 * ratio) as u32;
+        image::DynamicImage::ImageRgba8(image::imageops::resize(
+            &dynamic, nw, nh, image::imageops::FilterType::Lanczos3,
+        ))
+    };
     let mut buf = Cursor::new(Vec::new());
     resized.write_to(&mut buf, image::ImageFormat::Jpeg)?;
     Ok(buf.into_inner())
@@ -418,8 +472,12 @@ mod tests {
     fn test_different_sizes_produce_different_cache_keys() {
         let cache_dir = TempDir::new().unwrap();
         let img_dir = TempDir::new().unwrap();
+        // 大图：两个目标尺寸都需缩放（32×32 会走「原样返回」早退，字节相同）
         let img_path = img_dir.path().join("test.jpg");
-        create_test_jpeg(&img_path).unwrap();
+        let img = image::RgbImage::from_fn(320, 240, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+        });
+        img.save(&img_path).unwrap();
 
         let cache = ThumbnailCache::new(cache_dir.path().to_path_buf());
         let source = SourceFile {
@@ -542,10 +600,10 @@ mod tests {
             format: ImageFormat::Raw("NEF".into()),
             file_size,
         };
-        let k1 = cache.cache_key(&mk(Some(100)), 1600);
-        let k2 = cache.cache_key(&mk(Some(200)), 1600);
-        let k3 = cache.cache_key(&mk(Some(100)), 1600);
-        let k4 = cache.cache_key(&mk(None), 1600);
+        let k1 = cache.cache_key(&mk(Some(100)), 1600, "std");
+        let k2 = cache.cache_key(&mk(Some(200)), 1600, "std");
+        let k3 = cache.cache_key(&mk(Some(100)), 1600, "std");
+        let k4 = cache.cache_key(&mk(None), 1600, "std");
         assert_ne!(k1, k2, "文件大小不同应产生不同键");
         assert_eq!(k1, k3, "相同输入应产生相同键");
         assert_ne!(k1, k4, "有无文件大小应产生不同键");

@@ -144,6 +144,22 @@ impl DecodeOptions {
             use_camera_wb: true,
         }
     }
+
+    /// 全尺寸像素级预设：half_size=false + AHD + 8bit + 自动亮度 + 相机白平衡
+    ///
+    /// 1:1（zoom==0）查看用：全分辨率 + 高质量去马赛克 + 正确曝光，
+    /// 相对 preview 预期慢 4-8x（24MP 约 3-5s），配合磁盘缓存与取消令牌。
+    pub fn full() -> Self {
+        DecodeOptions {
+            half_size: false,
+            demosaic_quality: 3,
+            output_bps: 8,
+            no_auto_bright: false,
+            output_color: 1,
+            linear_gamma: false,
+            use_camera_wb: true,
+        }
+    }
 }
 
 impl Default for DecodeOptions {

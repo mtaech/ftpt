@@ -20,6 +20,7 @@ thiserror.workspace = true
 trash.workspace = true
 tracing.workspace = true
 walkdir.workspace = true
+jpeg-decoder.workspace = true
 zune-core.workspace = true
 zune-jpeg.workspace = true
 

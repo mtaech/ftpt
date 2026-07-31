@@ -24,6 +24,7 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff", "webp", "bmp", "gif"] }
 kamadak-exif = "0.6"
+jpeg-decoder = "0.3"
 oneshot = "0.1"
 ort = { version = "=2.0.0-rc.12", features = ["directml"] }
 parking_lot = "0.12"

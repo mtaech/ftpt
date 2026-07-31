@@ -34,6 +34,73 @@ pub(crate) fn decode_render_image(bytes: &[u8], is_jpeg: bool) -> Option<RenderI
     Some(RenderImage::new(vec![image::Frame::new(rgba)]))
 }
 
+/// 按最大尺寸解码为 RGBA 缓冲（worker 线程执行）：
+/// JPEG 一律走 jpeg-decoder（默认 rayon 多线程）：
+/// 目标尺寸决定 DCT 因子（choose_idct_size 取输出 ≥ 目标的最小因子，1/8~1/1）——
+/// 小目标走 1/2 等降采样（快），大目标走 1/1 全量（保精度）。非 JPEG 全解码后缩小。
+fn decode_scaled_rgba(bytes: &[u8], is_jpeg: bool, max_size: u32) -> Option<image::RgbaImage> {
+    if is_jpeg {
+        let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
+        decoder.read_info().ok()?;
+        let info = decoder.info()?;
+        let (ow, oh) = (info.width as u32, info.height as u32);
+        // 全量（u32::MAX）或原图已满足目标 → 不调用 scale，多线程全量解码
+        let out_size = if max_size == u32::MAX || ow.max(oh) <= max_size {
+            (ow as u16, oh as u16)
+        } else {
+            let req = max_size.min(u16::MAX as u32) as u16;
+            decoder.scale(req, req).ok()?
+        };
+        let (out_w, out_h) = out_size;
+        let pixels = decoder.decode().ok()?;
+        let expected = out_w as usize * out_h as usize * 3;
+        if pixels.len() != expected {
+            return None;
+        }
+        let rgb = image::RgbImage::from_raw(out_w as u32, out_h as u32, pixels)?;
+        let mut rgba = image::DynamicImage::ImageRgb8(rgb).into_rgba8();
+        // DCT 因子输出仍超 max_size → Lanczos 收尾
+        if rgba.width().max(rgba.height()) > max_size {
+            let (w, h) = (rgba.width(), rgba.height());
+            let ratio = max_size as f32 / w.max(h) as f32;
+            rgba = image::imageops::resize(
+                &image::DynamicImage::ImageRgba8(rgba),
+                (w as f32 * ratio) as u32,
+                (h as f32 * ratio) as u32,
+                image::imageops::FilterType::Lanczos3,
+            );
+        }
+        Some(rgba)
+    } else {
+        let img = image::load_from_memory(bytes).ok()?.into_rgba8();
+        let (w, h) = (img.width(), img.height());
+        if max_size == u32::MAX || w.max(h) <= max_size {
+            Some(img)
+        } else {
+            let ratio = max_size as f32 / w.max(h) as f32;
+            Some(image::imageops::resize(
+                &image::DynamicImage::ImageRgba8(img),
+                (w as f32 * ratio) as u32,
+                (h as f32 * ratio) as u32,
+                image::imageops::FilterType::Lanczos3,
+            ))
+        }
+    }
+}
+
+/// 按最大尺寸解码为 RenderImage（放大场景用，不浪费全量解码）。
+pub(crate) fn decode_render_image_scaled(
+    bytes: &[u8],
+    is_jpeg: bool,
+    max_size: u32,
+) -> Option<RenderImage> {
+    let mut rgba = decode_scaled_rgba(bytes, is_jpeg, max_size)?;
+    for px in rgba.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    Some(RenderImage::new(vec![image::Frame::new(rgba)]))
+}
+
 impl RootView {
     /// 预览图缓存上限（张）
     const PREVIEW_CACHE_LIMIT: usize = 20;
@@ -162,8 +229,25 @@ impl RootView {
         }
     }
 
+    /// 全分辨率加载目标尺寸：1:1（zoom==0）→ 全量真实像素；
+    /// 放大 → 显示尺寸量化到阶梯（2048/2560/3000/3200/4096/5120/6144），
+    /// 保证放大 2-3x 也有足够分辨率（DCT 因子自动权衡：目标 ≤ 原图一半走 1/2 快路径，
+    /// 更大目标走 1/1 全量保精度）；量化避免随 zoom 微调抖动导致缓存反复重解。
+    fn fullres_target(&self) -> u32 {
+        if self.preview_zoom == 0.0 {
+            return u32::MAX;
+        }
+        const STEPS: [u32; 7] = [2048, 2560, 3000, 3200, 4096, 5120, 6144];
+        let want = self
+            .preview_disp_size()
+            .map(|(w, h)| w.max(h) as u32)
+            .unwrap_or(0);
+        STEPS.iter().copied().find(|&s| s >= want).unwrap_or(6144)
+    }
+
     /// 确保焦点图的全分辨率版本在加载（needs_fullres 为真时由缩放/渲染路径触发）。
-    /// RAW 提取内嵌全尺寸 JPEG（走磁盘缓存），常规图直接读原文件字节（重编码只会损质量）。
+    /// 放大场景按显示尺寸量化解码（DCT 自动权衡快慢/精度）；1:1（zoom==0）全量真实像素。
+    /// RAW 走母版缓存（half_size 完整解码），常规图直接读原文件字节。
     pub fn ensure_fullres_loaded(&mut self, cx: &mut Context<Self>) {
         use photo_domain::{ImageFormat as DomainFormat, SourceFile};
 
@@ -173,6 +257,8 @@ impl RootView {
         if !self.fullres_loading.insert(capture_idx) { return; } // 已在加载
         let Some(meta) = self.captures.get(capture_idx) else { return };
         let generation = self.scan_generation;
+
+        let target = self.fullres_target();
 
         let path = PathBuf::from(&meta.primary_path);
         let ext = path
@@ -191,19 +277,30 @@ impl RootView {
             cx,
             move || {
                 if is_raw {
-                    // u32::MAX = 不缩放：完整解码（half_size）母版入磁盘缓存，下次秒开
                     let cache = cache?;
-                    cache.get_or_generate(&source, u32::MAX, None)
-                        .map_err(|e| tracing::warn!("全分辨率 RAW 预览生成失败: {e}"))
-                        .ok()
-                        .and_then(|b| decode_render_image(&b, true))
-                        .map(Arc::new)
+                    if target == u32::MAX {
+                        // 1:1：全尺寸解码（AHD 全量，惰性生成 + 磁盘缓存，3-5s 首次）
+                        cache
+                            .get_or_generate_full(&source, None)
+                            .map_err(|e| tracing::warn!("全尺寸 RAW 解码失败: {e}"))
+                            .ok()
+                            .and_then(|b| decode_render_image_scaled(&b, true, u32::MAX))
+                            .map(Arc::new)
+                    } else {
+                        // 放大：half_size 母版（已缓存则秒读）按显示目标 DCT 派生
+                        cache
+                            .get_or_generate(&source, u32::MAX, None)
+                            .map_err(|e| tracing::warn!("全分辨率 RAW 预览生成失败: {e}"))
+                            .ok()
+                            .and_then(|b| decode_render_image_scaled(&b, true, target))
+                            .map(Arc::new)
+                    }
                 } else {
                     let is_jpeg = matches!(ext.as_str(), "jpg" | "jpeg");
                     std::fs::read(&path)
                         .map_err(|e| tracing::warn!("全分辨率图读取失败: {e}"))
                         .ok()
-                        .and_then(|b| decode_render_image(&b, is_jpeg))
+                        .and_then(|b| decode_render_image_scaled(&b, is_jpeg, target))
                         .map(Arc::new)
                 }
             },
@@ -460,4 +557,43 @@ impl RootView {
             });
         }
 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_scaled_rgba;
+    use std::io::Cursor;
+
+    fn make_jpeg(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(w, h, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+        });
+        let mut buf = Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Jpeg).unwrap();
+        buf.into_inner()
+    }
+
+    #[test]
+    fn test_decode_scaled_rgba_respects_max_size() {
+        // 4000×3000 JPEG → 1600 上限（长边 ≤ 1600）
+        let bytes = make_jpeg(4000, 3000);
+        let out = decode_scaled_rgba(&bytes, true, 1600).expect("decode");
+        assert!(out.width().max(out.height()) <= 1600, "实际 {}×{}", out.width(), out.height());
+    }
+
+    #[test]
+    fn test_decode_scaled_rgba_full_size_for_max() {
+        // u32::MAX → 全量真实像素
+        let bytes = make_jpeg(2000, 1000);
+        let out = decode_scaled_rgba(&bytes, true, u32::MAX).expect("decode");
+        assert_eq!((out.width(), out.height()), (2000, 1000));
+    }
+
+    #[test]
+    fn test_decode_scaled_rgba_smaller_than_max_no_resize() {
+        // 小图不超过上限 → 原尺寸返回
+        let bytes = make_jpeg(800, 600);
+        let out = decode_scaled_rgba(&bytes, true, 1600).expect("decode");
+        assert_eq!((out.width(), out.height()), (800, 600));
+    }
 }

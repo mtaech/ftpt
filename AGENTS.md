@@ -226,6 +226,7 @@ gpui-component 项目位于 `E:\Dev\Code\gpui-component`，含完整源码和本
 | `rayon` | 线程池，core 同步调用异步化 |
 | `image 0.25` | JPEG/PNG/TIFF/WEBP/BMP/GIF 编解码与缩放（default-features=false + 6 features） |
 | `kamadak-exif 0.6` | 常规图 EXIF 解析 |
+| `jpeg-decoder 0.3` | JPEG **DCT 降采样**解码（1/8、1/4、1/2 因子，只解需要的 block）——缩放/全分辨率路径；`zune-jpeg` 仅用于全量解码 |
 | `rawlib 0.7.1`（workspace 内嵌 `crates/rawlib`） | RAW 解码/EXIF/内嵌缩略图；`build.rs` 自动链接 `libraw/` 预编译库（Windows msvc 静态库；Linux 优先系统库，缺失回退 bundled gnu），并编译 `half_size.c`。源码内嵌便于修改解码逻辑（勿回退 crates.io 版本） |
 | `trash 4` | 移到回收站（跨平台） |
 | `walkdir 2` | 单层目录扫描 |
@@ -264,6 +265,9 @@ gpui-component 项目位于 `E:\Dev\Code\gpui-component`，含完整源码和本
 - **缓存按文件夹隔离**：缩略图缓存目录改为照片目录 `.pt/thumbs`（扫描时重建，与 `.pt/data.db` 同级），删除文件夹即清空缓存；移除全局 `max_cache_size_mb` 配置与 `prune` 调用（config 字段、设置面板 UI 一并删除）
 - **批量文件操作两阶段**：点「开始执行」→ 干跑预览（扫描+匹配，只展示文件名不动文件）→ 按钮变「确认执行（N 个）」→ 真执行；删除类操作按钮红色警告（批量删除本就走回收站 `ops::delete_capture` → `trash::delete`，非永久删除）；`BatchOpType` 新增 `description()`（下拉副标题）与 `is_delete()`；切换目录/格式/操作类型自动使预览失效；结果区新增「成功 N / 失败 M」汇总，列表可滚动
 - **批量操作重构（ADR 0006）**：对比目录匹配引擎（`find_matching` 与 6 种 Same/NotSame 操作）整体移除——操作对象改为**当前筛选结果**（纯筛选驱动，`display_order`）；动作收敛为移动/复制/删除三种；目标目录执行时用户选择（一步式，拒绝目标=源目录）；「同步同名文件」开关（默认关）+ 格式多选（默认全选）按 stem 将兄弟文件纳入操作集（新增 `batch_ops::expand_with_siblings`，触发点自身格式不在同步集合时也会保留）；删除走**弹窗确认**（含「其中 M 个来自同名同步」警告 + 清单）；移动/删除完成后**全量重扫**刷新网格（复制不动源列表）；完成 toast 摘要 + 侧栏失败详情
+- **全分辨率 DCT 降采样（jpeg-decoder）**：放大场景（非 1:1）按显示上限解码——`FULLRES_LOAD_SIZE=3200`，`decode_scaled_rgba`/`decode_jpeg_scaled_reader` 换 jpeg-decoder `scale`（1/2 因子快 4x，输出仍超目标时 Lanczos 收尾）；1:1 保持全量真实像素。**修复**：原 zune `set_max_width` 是输入硬限制而非降采样，engine 的「DCT 快路径」此前从未生效（一直在 fallback 全解码），换 jpeg-decoder 后真快路径生效，缩略图/预览/全分辨率派生全部受益
+- **全分辨率二轮优化**：JPEG 全量路径（u32::MAX/1:1）也换 jpeg-decoder（默认 rayon 多线程 IDCT，替代 zune 单线程）；去掉人为 1/2 因子上限——目标尺寸直接交 `choose_idct_size` 自动权衡（小目标 1/2 快路径，大目标 1/1 全量保精度）；`fullres_target()` 按显示尺寸量化阶梯（2048~6144，避免 zoom 微调抖动重解），放大 2-3x 也能拿到足够分辨率
+- **RAW 真 1:1**：rawlib 新增 `DecodeOptions::full()`（half_size=false + AHD + 8bit + 自动亮度，24MP 约 3-5s）；`ThumbnailCache::get_or_generate_full` 独立全尺寸母版缓存（键带 `full` 变体，与 half_size 母版分离，惰性生成——仅 1:1 查看过才落盘，24MP JPEG 8-15MB/文件）；`ensure_fullres_loaded` 1:1（zoom==0）时 RAW 走全尺寸解码，放大仍走 half_size 母版派生（秒级）
 
 ---
 
