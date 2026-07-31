@@ -106,9 +106,6 @@ pub struct RootView {
     pub(crate) fullres_loading: HashSet<usize>,
     /// 正在后台加载中的网格缩略图 capture 索引（防重复 spawn）
     pub(crate) grid_loading: HashSet<usize>,
-    /// 缩略图加载取消令牌：离开可见区（±缓冲）的任务被标记取消，
-    /// 执行前检查快速放弃——快速拖动滚动条时旧区域任务不堵队列
-    pub(crate) grid_cancel: HashMap<usize, Arc<AtomicBool>>,
     /// 预览缩放倍率（1.0 = 适配窗口）
     pub preview_zoom: f32,
     /// 预览平移偏移（像素），缩放后拖拽移动图片
@@ -202,7 +199,6 @@ impl RootView {
             preview_cancel: HashMap::new(),
             fullres_loading: HashSet::new(),
             grid_loading: HashSet::new(),
-            grid_cancel: HashMap::new(),
             preview_zoom: 1.0,
             preview_pan: (0.0, 0.0),
             preview_drag: None,

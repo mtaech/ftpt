@@ -112,6 +112,28 @@ fn render_thumbnail(
             .object_fit(ObjectFit::Cover)
             .size_full()
             .into_any_element()
+    } else if is_other_format(capture) {
+        // 视频：无缩略图，居中显示格式徽标（MP4/MOV…）
+        div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size_full()
+            .bg(theme::colors().element_background)
+            .child(
+                div()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .bg(theme::colors().surface_background)
+                    .border_1()
+                    .border_color(theme::colors().border_variant)
+                    .text_color(theme::colors().text_accent)
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_size(px(12.))
+                    .child(capture.primary_format.to_uppercase()),
+            )
+            .into_any_element()
     } else {
         div()
             .flex()
@@ -126,6 +148,11 @@ fn render_thumbnail(
             )
             .into_any_element()
     }
+}
+
+/// 判断 Capture 是否为非图片格式（视频等）（统一 OTHER 徽标）
+fn is_other_format(capture: &CaptureMeta) -> bool {
+    capture.primary_format.to_uppercase() == "OTHER"
 }
 
 /// 缩略图左上角格式徽标：RAW / JPG / RAW+JPG

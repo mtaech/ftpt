@@ -42,7 +42,6 @@ pub fn render_filmstrip(view: &RootView, cx: &mut Context<RootView>) -> impl Int
             cx.defer(move |cx| {
                 if let Some(view) = vh.upgrade() {
                     cx.update_entity(&view, |root_view, cx| {
-                        root_view.cancel_thumbnails_outside(&keep);
                         for ci in missing {
                             root_view.ensure_thumbnail_loaded(ci, cx);
                         }
@@ -67,6 +66,31 @@ pub fn render_filmstrip(view: &RootView, cx: &mut Context<RootView>) -> impl Int
                     .w(px(64.))
                     .h(px(48.))
                     .object_fit(ObjectFit::Cover)
+                    .into_any_element()
+            } else if view
+                .captures
+                .get(capture_idx)
+                .is_some_and(|m| m.primary_format.to_uppercase() == "OTHER")
+            {
+                // 非图片格式（视频等）：无缩略图，统一显示 OTHER 徽标
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(theme::colors().element_background)
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(theme::colors().text_accent)
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(
+                                view.captures
+                                    .get(capture_idx)
+                                    .map(|m| m.primary_format.to_uppercase())
+                                    .unwrap_or_default(),
+                            ),
+                    )
                     .into_any_element()
             } else {
                 // 缩略图未就绪：灰占位，worker 回调 notify 后自动替换

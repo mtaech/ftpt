@@ -34,7 +34,6 @@ impl RootView {
         let generation = self.scan_generation;
         self.scan_in_progress = true;
         self.grid_loading.clear();
-        self.grid_cancel.clear();
         self.preview_loading.clear();
         self.preview_cancel.clear();
         self.fullres_loading.clear();
@@ -301,6 +300,10 @@ impl RootView {
         use std::sync::atomic::Ordering;
         let generation = self.scan_generation;
         let folder_db = self.folder_db.clone();
+        // 顺带预生成内嵌缩略图缓存（同一 worker 任务，一次 spawn 两产物）：
+        // 拖动经过未浏览区域时命中（~140µs）而非冷提取（~300ms/张 open_file 物理成本）
+        let thumb_cache = self.thumbnail_cache.clone();
+        let thumbnail_size = self.config.thumbnail_size;
         // 收集所有需要提取 EXIF 的 capture 路径（扫描闭包只查缓存，未命中的字段为空）
         let paths: Vec<(usize, PathBuf)> = self
             .captures
@@ -322,6 +325,7 @@ impl RootView {
             let path_for_worker = path.clone();
             let db = folder_db.clone();
             let done_work = done.clone();
+            let cache = thumb_cache.clone();
             self.worker.spawn(
                 cx,
                 move || {
@@ -336,11 +340,31 @@ impl RootView {
                         None => return None,
                     };
                     // 经 SQLite 缓存提取并写回：下次扫描命中缓存，不再重复 LibRaw open
-                    if let Some(db) = &db {
+                    let exif = if let Some(db) = &db {
                         db.get_or_extract_exif(&path_for_worker, &format).ok()
                     } else {
                         photo_engine::exif::extract_exif(&path_for_worker, &format).ok()
+                    };
+                    // 顺带：预生成缩略图缓存（RAW 内嵌提取 / JPG DCT 缩放；视频无缩略图跳过，
+                    // file_size 用真实 stat 与浏览时 ensure 键一致）
+                    if let Some(cache) = &cache
+                        && !format.is_other()
+                    {
+                        let source = photo_domain::SourceFile {
+                            path: path_for_worker.clone(),
+                            format: format.clone(),
+                            file_size: std::fs::metadata(&path_for_worker)
+                                .ok()
+                                .map(|m| m.len()),
+                        };
+                        if matches!(format, photo_domain::ImageFormat::Raw(_)) {
+                            let _ =
+                                cache.get_or_generate_embedded(&source, thumbnail_size * 2, None);
+                        } else {
+                            let _ = cache.get_or_generate(&source, thumbnail_size * 2, None);
+                        }
                     }
+                    exif
                 },
                 move |this, exif, cx| {
                     // 过期目录/列表：丢弃，防按新索引错绑 EXIF

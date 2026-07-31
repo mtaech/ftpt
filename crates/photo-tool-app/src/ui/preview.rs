@@ -13,6 +13,8 @@ pub fn render_preview(
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
     let focused = view.get_focused_capture();
+    // 视频等非图片格式不进预览：聚焦时预览区视为未选择（导航/网格仍可选中，识别按钮已禁用）
+    let focused = focused.filter(|m| m.primary_format.to_uppercase() != "OTHER");
 
     // 放大超过预览分辨率 / 100% 时优先全分辨率；否则 1600px 预览；未加载完成回退缩略图。
     // 预览/全分辨率已在 worker 线程预解码为 RenderImage，源切换无空白帧。

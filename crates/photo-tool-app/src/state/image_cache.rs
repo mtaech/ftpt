@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use gpui::*;
@@ -137,6 +137,13 @@ impl RootView {
     /// 预取焦点前后各 PREVIEW_PREFETCH_RADIUS 张；离开邻域的未完成慢解码（RAW）被取消。
     pub fn ensure_preview_loaded(&mut self, cx: &mut Context<Self>) {
         let Some(focus_idx) = self.focus_index else { return };
+        // 非图片格式（视频等）：无预览数据，直接返回避免反复 spawn 失败任务
+        if let Some(&capture_idx) = self.display_order.get(focus_idx)
+            && let Some(meta) = self.captures.get(capture_idx)
+            && meta.primary_format.to_uppercase() == "OTHER"
+        {
+            return;
+        }
         // 取消离开预取邻域的未完成加载，释放 worker 线程给当前邻域
         let keep_start = focus_idx.saturating_sub(Self::PREVIEW_PREFETCH_RADIUS);
         let keep_end = (focus_idx + Self::PREVIEW_PREFETCH_RADIUS).min(self.display_order.len().saturating_sub(1));
@@ -440,7 +447,9 @@ impl RootView {
     }
 
     /// 为单个 capture 生成网格缩略图（懒加载：滚动时按需触发）。
-    /// 任务带取消令牌：离开可见区的任务被标记，执行前检查快速放弃（不堵队列）。
+    /// RAW 走「内嵌小图占位 → 母版升级」两阶段：随机跳转 0.1s 出图（内嵌缩略图，
+    /// 略糊），后台解码母版后替换清晰版（不占交互池）。
+    /// 交互路径只有快任务（JPG 20ms / 内嵌 50ms），无需取消机制。
     pub fn ensure_thumbnail_loaded(&mut self, capture_idx: usize, cx: &mut Context<Self>) {
         if self.thumbnail_data.contains_key(&capture_idx) { return; }
         if !self.grid_loading.insert(capture_idx) { return; } // 已在加载
@@ -456,6 +465,17 @@ impl RootView {
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
+        let is_raw = matches!(
+            photo_domain::ImageFormat::from_extension(&ext),
+            Some(photo_domain::ImageFormat::Raw(_))
+        );
+        // 视频：无缩略图，网格显示格式徽标（不需要加载）
+        if photo_domain::ImageFormat::from_extension(&ext)
+            .is_some_and(|f| f.is_other())
+        {
+            self.grid_loading.remove(&capture_idx);
+            return;
+        }
         let format = photo_domain::ImageFormat::from_extension(&ext)
             .unwrap_or(photo_domain::ImageFormat::Jpeg);
 
@@ -465,133 +485,78 @@ impl RootView {
 
             file_size: meta.file_size,
         };
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.grid_cancel.insert(capture_idx, cancel.clone());
-        let cancel_work = cancel.clone();
 
-        self.worker.spawn_fast(
-            cx,
-            move || {
-                cache
-                    .get_or_generate(&source, thumbnail_size * 2, Some(cancel_work.as_ref()))
-                    .map_err(|e| {
-                        tracing::warn!("懒加载缩略图失败 {}: {e}", source.path.display());
-                    })
-                    .ok()
-            },
-            move |this, result, cx| {
-                if generation != this.scan_generation {
-                    return;
-                }
-                this.grid_loading.remove(&capture_idx);
-                this.grid_cancel.remove(&capture_idx);
-                // 已取消（滚动离开保留区）→ 丢弃结果，滚动回来重新加载
-                if cancel.load(Ordering::Relaxed) {
-                    return;
-                }
-                if let Some(bytes) = result {
-                    // 预解码为 RenderImage：到达即可绘制，避免 GPUI 异步解码排队
-                    if let Some(render) = decode_render_image_scaled(&bytes, true, u32::MAX) {
-                        this.thumbnail_data.insert(capture_idx, Arc::new(render));
+        if is_raw {
+            // RAW 缩略图 = 内嵌 JPEG（~50ms 提取 + 落盘，足够缩略图使用）
+            // 解码在 worker 完成（RenderImage 到达即绘制，UI 线程零解码）
+            let source_work = source.clone();
+            self.worker.spawn_fast(
+                cx,
+                move || {
+                    cache
+                        .get_or_generate_embedded(&source_work, thumbnail_size * 2, None)
+                        .ok()
+                        .and_then(|b| decode_render_image_scaled(&b, true, u32::MAX))
+                        .map(Arc::new)
+                },
+                move |this, result, cx| {
+                    if generation != this.scan_generation {
+                        return;
+                    }
+                    this.grid_loading.remove(&capture_idx);
+                    if let Some(render) = result {
+                        this.thumbnail_data.insert(capture_idx, render);
+                        tracing::info!("缩略图 on_done 插入: idx={capture_idx}");
                         cx.notify();
                     }
-                }
-            },
-        );
-    }
-
-    /// 取消保留区（可见 ± 缓冲）之外的缩略图加载：标记令牌，执行前快速放弃，
-    /// 队列积压快速排空——快速拖动滚动条时新位置任务立即轮到。
-    pub(crate) fn cancel_thumbnails_outside(&mut self, keep: &HashSet<usize>) {
-        use std::sync::atomic::Ordering as AtOrdering;
-        self.grid_cancel.retain(|&ci, token| {
-            if keep.contains(&ci) {
-                true
-            } else {
-                token.store(true, AtOrdering::Relaxed);
-                false
-            }
-        });
-    }
-
-    /// Spawn background tasks to preload thumbnails for the first N visible items.
-    pub fn preload_thumbnails(&mut self, cx: &mut Context<Self>) {
-        use photo_domain::{ImageFormat, SourceFile};
-
-        let thumbnail_size = self.config.thumbnail_size;
-        let cache = match &self.thumbnail_cache {
-            Some(c) => c.clone(),
-            None => {
-                tracing::warn!("缩略图缓存未初始化，跳过预加载");
-                return;
-            }
-        };
-
-        // 限制预加载数量：只加载可见区域 + 缓冲行（50 个），
-        // 避免为整个目录（可能上千）同时生成缩略图导致线程池饱和。
-        const PRELOAD_LIMIT: usize = 50;
-        let generation = self.scan_generation;
-        let count = self.display_order.len().min(PRELOAD_LIMIT);
-
-        for di in 0..count {
-            let capture_idx = match self.display_order.get(di) {
-                Some(&ci) => ci,
-                None => continue,
-            };
-            // 防重：与网格懒加载共享哨兵（preload 在普通池、懒加载在 fast 池，
-            // 无哨兵时同一文件可能被两个池重复生成）
-            if self.thumbnail_data.contains_key(&capture_idx) { continue; }
-            if !self.grid_loading.insert(capture_idx) { continue; }
-
-            let primary_path = std::path::PathBuf::from(&self.captures[capture_idx].primary_path);
-            let ext = primary_path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_string();
-            let format = ImageFormat::from_extension(&ext)
-                .unwrap_or(ImageFormat::Jpeg);
-
-            let source = SourceFile {
-                path: primary_path,
-                format,
-                file_size: self.captures[capture_idx].file_size,
-            };
-
-            let cache_clone = cache.clone();
-            let ci = capture_idx;
+                },
+            );
+        } else {
+            // JPG 等常规格式：直接最终生成（DCT 快，无需占位）；解码同样在 worker
             let path_display = source.path.clone();
-            let cancel = Arc::new(AtomicBool::new(false));
-            self.grid_cancel.insert(ci, cancel.clone());
-            let cancel_work = cancel.clone();
-            self.worker.spawn(cx, move || {
-                // 2x 生成：高 DPI 下 1x 缩略图拉伸会模糊
-                cache_clone
-                    .get_or_generate(&source, thumbnail_size * 2, Some(cancel_work.as_ref()))
-                    .map_err(|e| {
-                        tracing::warn!("缩略图生成失败 {}: {e}", path_display.display());
-                    })
-                    .ok()
-            }, move |this, result, _cx| {
-                if generation != this.scan_generation {
-                    return;
-                }
-                this.grid_loading.remove(&ci);
-                this.grid_cancel.remove(&ci);
-                // 已取消（滚动离开保留区）→ 丢弃，避免旧区域任务占显示
-                if cancel.load(Ordering::Relaxed) {
-                    return;
-                }
-                if let Some(bytes) = result {
-                    // 预解码为 RenderImage（与网格懒加载一致）
-                    if let Some(render) = decode_render_image_scaled(&bytes, true, u32::MAX) {
-                        this.thumbnail_data.insert(ci, Arc::new(render));
-                        _cx.notify();
+            self.worker.spawn_fast(
+                cx,
+                move || {
+                    let start = std::time::Instant::now();
+                    let result = cache
+                        .get_or_generate(&source, thumbnail_size * 2, None)
+                        .ok()
+                        .and_then(|b| decode_render_image_scaled(&b, true, u32::MAX))
+                        .map(Arc::new);
+                    tracing::info!(
+                        "JPG 缩略图: {} ({} {:?})",
+                        path_display.display(),
+                        if result.is_some() { "就绪" } else { "失败" },
+                        start.elapsed()
+                    );
+                    result
+                },
+                move |this, result, cx| {
+                    if generation != this.scan_generation {
+                        return;
                     }
-                }
-            });
+                    this.grid_loading.remove(&capture_idx);
+                    if let Some(render) = result {
+                        this.thumbnail_data.insert(capture_idx, render);
+                        tracing::info!("缩略图 on_done 插入: idx={capture_idx}");
+                        cx.notify();
+                    }
+                },
+            );
         }
-}
+    }
+
+    /// 预加载前 N 张缩略图（扫描后）：统一走 ensure_thumbnail_loaded——
+    /// JPG 直接生成、RAW 内嵌提取（都 ~50ms 内，不触发母版解码）。
+    pub fn preload_thumbnails(&mut self, cx: &mut Context<Self>) {
+        const PRELOAD_LIMIT: usize = 50;
+        let count = self.display_order.len().min(PRELOAD_LIMIT);
+        for di in 0..count {
+            if let Some(&ci) = self.display_order.get(di) {
+                self.ensure_thumbnail_loaded(ci, cx);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

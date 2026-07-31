@@ -39,6 +39,7 @@ pub fn render_grid(
             let Some(view) = view_handle.upgrade() else {
                 return Vec::new();
             };
+            tracing::info!("渲染闭包: rows={}..{} thumbnails={}", range.start, range.end, view.read(app).thumbnail_data.len());
             // range 被下方 map 消费，先保存边界供预取区使用
             let (range_start, range_end) = (range.start, range.end);
             // 闭包在 prepaint 阶段执行（render 借用已释放，下方 update_entity 可证），
@@ -163,10 +164,9 @@ pub fn render_grid(
                 }
             }
 
-            // 取消保留区外的在途缩略图任务 + 触发保留区内缺失的加载
+            // 触发懒加载：保留区（可见 ± 2 行）内缺少缩略图的 capture
             if !keep.is_empty() {
                 let _ = app.update_entity(&view, |root_view, cx| {
-                    root_view.cancel_thumbnails_outside(&keep);
                     for ci in missing {
                         root_view.ensure_thumbnail_loaded(ci, cx);
                     }

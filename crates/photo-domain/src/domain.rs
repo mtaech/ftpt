@@ -12,6 +12,7 @@ pub enum ImageFormat {
     Bmp,
     Gif,
     Raw(String), // RAW 扩展名（如 "NEF"、"CR2"）
+    Other,       // 除图片外的其他可查看格式（视频等）——网格统一显示徽标，不生成缩略图
 }
 
 impl std::fmt::Display for ImageFormat {
@@ -25,6 +26,7 @@ impl std::fmt::Display for ImageFormat {
             Self::Bmp => write!(f, "BMP"),
             Self::Gif => write!(f, "GIF"),
             Self::Raw(r) => write!(f, "{}", r),
+            Self::Other => write!(f, "OTHER"),
         }
     }
 }
@@ -40,12 +42,18 @@ impl ImageFormat {
             "webp" => Some(Self::WebP),
             "bmp" => Some(Self::Bmp),
             "gif" => Some(Self::Gif),
+            "mp4" | "mov" | "m4v" | "avi" => Some(Self::Other),
             raw if Self::is_raw_extension(raw) => Some(Self::Raw(raw.to_uppercase())),
             _ => None,
         }
     }
 
-    /// 判断是否是可查看图片格式（包括 RAW）
+    /// 是否为非图片格式（视频等，网格统一徽标、不生成缩略图）
+    pub fn is_other(&self) -> bool {
+        matches!(self, Self::Other)
+    }
+
+    /// 判断是否是可查看文件格式（图片 + RAW + 视频）
     pub fn is_viewable(ext: &str) -> bool {
         Self::from_extension(ext).is_some()
     }
@@ -753,14 +761,22 @@ mod tests {
     #[test]
     fn test_invalid_extension() {
         assert_eq!(ImageFormat::from_extension("txt"), None);
-        assert_eq!(ImageFormat::from_extension("mp4"), None);
+        assert_eq!(ImageFormat::from_extension("exe"), None);
+    }
+
+    #[test]
+    fn test_video_extension() {
+        assert_eq!(ImageFormat::from_extension("mp4"), Some(ImageFormat::Other));
+        assert_eq!(ImageFormat::from_extension("MOV"), Some(ImageFormat::Other));
+        assert!(ImageFormat::Other.is_other());
+        assert!(!ImageFormat::Jpeg.is_other());
     }
 
     #[test]
     fn test_is_viewable() {
         assert!(ImageFormat::is_viewable("jpg"));
         assert!(ImageFormat::is_viewable("nef"));
-        assert!(!ImageFormat::is_viewable("mp4"));
+        assert!(ImageFormat::is_viewable("mp4"), "视频也应可查看（显示徽标）");
         assert!(!ImageFormat::is_viewable("txt"));
     }
 

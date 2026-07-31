@@ -207,12 +207,18 @@ mod tests {
     }
 
     #[test]
-    fn test_ignore_video() {
+    fn test_video_capture() {
         let dir = TempDir::new().unwrap();
-        create_test_files(&dir, &["img.jpg", "img.mp4"]);
+        create_test_files(&dir, &["img.jpg", "img.mp4", "clip.mov"]);
 
         let captures = scan_directory(dir.path(), &FilterCriteria::default(), None).unwrap();
-        assert_eq!(captures.len(), 1);
+        assert_eq!(captures.len(), 3, "视频也应生成 Capture（网格显示徽标）");
+        assert!(
+            captures
+                .iter()
+                .any(|c| matches!(c.source_files[0].format, ImageFormat::Other)),
+            "应包含视频格式 Capture"
+        );
     }
 
     #[test]

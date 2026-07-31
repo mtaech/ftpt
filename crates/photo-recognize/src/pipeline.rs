@@ -99,6 +99,10 @@ pub(crate) fn resolve_source(
                 }
             }
         }
+        // 视频：无画面解码能力（无视频抽帧），拒绝识别
+        photo_domain::ImageFormat::Other => {
+            Err((RecognitionFailureStage::Assets, "视频不支持识别"))
+        }
     }
 }
 

@@ -46,8 +46,13 @@ impl ThumbnailCache {
         size: u32,
         cancel: Option<&AtomicBool>,
     ) -> Result<Vec<u8>, ThumbnailError> {
-        // RAW：母版缓存 + 派生
+        // RAW：母版缓存 + 派生（派生结果也落盘：缩略图小文件热命中，
+        // 避免每次从 6MB 母版重新 DCT——拖动网格时吞吐差异明显）
         if matches!(source.format, ImageFormat::Raw(_)) {
+            // 读母版前检查取消（跳过 6MB IO）
+            if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                return Err(ThumbnailError::Cancelled);
+            }
             let master_key = self.cache_key(source, u32::MAX, "std");
             let master_path = self.cache_dir.join(&master_key);
             let master: Vec<u8> = if master_path.exists() {
@@ -60,10 +65,26 @@ impl ThumbnailCache {
             if size == u32::MAX {
                 return Ok(master);
             }
-            return resize_jpeg(&master, size);
+            // 派生前检查取消（跳过 DCT）
+            if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                return Err(ThumbnailError::Cancelled);
+            }
+            // 派生缩略图落盘（440px JPEG ~40KB）：命中即读小文件，无需重新派生
+            let thumb_key = self.cache_key(source, size, "std");
+            let thumb_path = self.cache_dir.join(&thumb_key);
+            if thumb_path.exists() {
+                return Ok(std::fs::read(&thumb_path)?);
+            }
+            let bytes = resize_jpeg(&master, size)?;
+            std::fs::write(&thumb_path, &bytes)?;
+            return Ok(bytes);
         }
 
         // 常规图：按 size 独立缓存（JPEG DCT 缩放本就快，源文件小）
+        // 读缓存前检查取消（跳过 IO）
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            return Err(ThumbnailError::Cancelled);
+        }
         let cache_key = self.cache_key(source, size, "std");
         let cache_path = self.cache_dir.join(&cache_key);
 
@@ -74,6 +95,31 @@ impl ThumbnailCache {
         let thumb_bytes = self.generate_thumbnail(source, size, cancel)?;
         std::fs::write(&cache_path, &thumb_bytes)?;
         Ok(thumb_bytes)
+    }
+
+    /// RAW 缩略图 = 内嵌 JPEG（相机写入，~50ms 提取，足够缩略图使用）。
+    /// 落盘到 std 缓存键：旧版本升级生成的清晰版缩略图优先命中，未命中提取内嵌。
+    pub fn get_or_generate_embedded(
+        &self,
+        source: &SourceFile,
+        size: u32,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Vec<u8>, ThumbnailError> {
+        let start = std::time::Instant::now();
+        let cache_key = self.cache_key(source, size, "std");
+        let cache_path = self.cache_dir.join(&cache_key);
+        if cache_path.exists() {
+            let bytes = std::fs::read(&cache_path)?;
+            tracing::info!("RAW 缩略图缓存命中: {} ({:?})", source.path.display(), start.elapsed());
+            return Ok(bytes);
+        }
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            return Err(ThumbnailError::Cancelled);
+        }
+        let bytes = decode_raw_embedded_thumb(&source.path, size)?;
+        std::fs::write(&cache_path, &bytes)?;
+        tracing::info!("RAW 缩略图生成(内嵌提取): {} ({:?})", source.path.display(), start.elapsed());
+        Ok(bytes)
     }
 
     /// RAW 全尺寸母版（1:1 像素级查看）：AHD 全尺寸解码，独立于 half_size 母版缓存。
@@ -120,6 +166,11 @@ impl ThumbnailCache {
 
     /// 常规图片格式：JPEG 走 DCT 降采样快路径，其余全解码
     fn generate_image_thumbnail(&self, path: &Path, size: u32, cancel: Option<&AtomicBool>) -> Result<Vec<u8>, ThumbnailError> {
+        // 进入解码前检查取消：排队/被标记的任务立即放弃，不占线程
+        //（DCT 解码不可中断，只能在此检查点省时间）
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            return Err(ThumbnailError::Cancelled);
+        }
         let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase());
 
         if matches!(ext.as_deref(), Some("jpg" | "jpeg"))
@@ -259,6 +310,20 @@ fn decode_raw_impl(path: &Path, size: u32, cancel: Option<&AtomicBool>) -> Resul
     })?;
     tracing::info!("完整解码成功: {} ({}×{})", path.display(), img.width, img.height);
     encode_bitmap_to_jpeg(&img, size)
+}
+
+/// 从 RAW 提取内嵌缩略图（相机写入的 JPEG，160-640px，约 50ms）。
+/// 用作缩略图即时占位（放大略糊），清晰版由母版解码升级后替换。
+/// 在 worker 线程中调用。
+pub fn decode_raw_embedded_thumb(path: &Path, size: u32) -> Result<Vec<u8>, ThumbnailError> {
+    let path_str = path.to_string_lossy();
+    let thumb = rawlib::extract_thumbnail_with_info(path_str.as_ref())
+        .map_err(|e| ThumbnailError::Raw(e.to_string()))?;
+    if thumb.format != rawlib::ImageFormat::Jpeg {
+        return Err(ThumbnailError::Raw("内嵌缩略图非 JPEG".into()));
+    }
+    // 内嵌小图通常小于目标尺寸：resize_jpeg 小图原样返回（不放大，保持原尺寸占位）
+    resize_jpeg(&thumb.data, size)
 }
 
 /// RAW 全尺寸解码（1:1 像素级查看）：AHD 去马赛克 + 8bit + 自动亮度，不缩放。

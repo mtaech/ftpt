@@ -511,6 +511,11 @@ fn render_recognition_section(
     let is_busy = focused_cap_index.is_some()
         && view.recognizing_single == focused_cap_index;
 
+    // 非图片格式（视频等）：识别按钮禁用
+    let is_other = view
+        .get_focused_capture()
+        .is_some_and(|m| m.primary_format.to_uppercase() == "OTHER");
+
     div()
         .flex()
         .flex_col()
@@ -549,20 +554,30 @@ fn render_recognition_section(
                             .child("尚未识别"),
                     )
                     .child(
-                        Button::new("recognize-photo")
-                            .primary()
-                            .small()
-                            .label("识别此照片 (b)")
-                            .on_click({
-                                let vh = vh.clone();
-                                move |_, _window, cx| {
-                                    if let Some(e) = vh.upgrade() {
-                                        cx.update_entity(&e, |view, cx| {
-                                            view.dispatch_action(Action::Recognize, cx);
-                                        });
+                        if is_other {
+                            div()
+                                
+                                .text_color(colors.text_muted)
+                                .text_size(px(11.))
+                                .child("非图片格式，不支持识别")
+                                .into_any_element()
+                        } else {
+                            Button::new("recognize-photo")
+                                .primary()
+                                .small()
+                                .label("识别此照片 (b)")
+                                .on_click({
+                                    let vh = vh.clone();
+                                    move |_, _window, cx| {
+                                        if let Some(e) = vh.upgrade() {
+                                            cx.update_entity(&e, |view, cx| {
+                                                view.dispatch_action(Action::Recognize, cx);
+                                            });
+                                        }
                                     }
-                                }
-                            }),
+                                })
+                                .into_any_element()
+                        },
                     )
                     .into_any_element()
             }
