@@ -5,8 +5,4 @@ edition.workspace = true
 
 [dependencies]
 serde.workspace = true
-thiserror.workspace = true
 chrono.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

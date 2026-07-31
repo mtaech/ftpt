@@ -1,1 +1,8 @@
 pub mod app;
+pub mod batch_ops;
+pub mod filter;
+pub mod image_cache;
+pub mod metadata;
+pub mod preview_math;
+pub mod recognition;
+pub mod scan;

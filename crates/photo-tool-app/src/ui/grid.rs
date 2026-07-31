@@ -92,7 +92,6 @@ pub fn render_grid(
                                                         .iter()
                                                         .position(|&c| c == ci)
                                                     {
-                                                        tracing::info!("double_click: ci={}, di={}, focus_index={}", ci, di, di);
                                                         root_view.focus_index = Some(di);
                                                         root_view.anchor = Some(di);
                                                         root_view.selected.clear();

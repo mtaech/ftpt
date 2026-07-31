@@ -157,7 +157,10 @@ impl Recognizer {
         }
         let (detection_session, backend) = load_model(&yolo_path)?;
         let (classification_session, _) = load_model(&bird_path)?;
-        let (eye_session, _) = load_model(&eye_path)?;
+        // eye.onnx 强制 CPU：DirectML（Radeon 780M 实测）会把姿态头输出腐蚀成
+        // 顶部窄条区域的假框（关键点全部場缩到 y≈21/640），眼框完全错位。
+        // 检测/分类模型在同后端下输出正常，仅姿态模型不兼容。
+        let (eye_session, _) = load_model_cpu(&eye_path)?;
         let catalog = CatalogDb::open(catalog_db)?;
 
         tracing::info!("识别器初始化完成，推理后端: {}", backend);
@@ -290,6 +293,15 @@ fn load_model(path: &Path) -> Result<(Session, Backend), RecognizeError> {
         RecognizeError::ModelLoad(format!("CPU session 创建失败 ({}): {e}", path.display()))
     })?;
     tracing::info!("模型加载成功 (CPU): {}", path.display());
+    Ok((session, Backend::Cpu))
+}
+
+/// 仅 CPU 加载（用于与 DirectML 不兼容的模型，如 eye.onnx 姿态头）。
+fn load_model_cpu(path: &Path) -> Result<(Session, Backend), RecognizeError> {
+    let session = Session::builder()?.commit_from_file(path).map_err(|e| {
+        RecognizeError::ModelLoad(format!("CPU session 创建失败 ({}): {e}", path.display()))
+    })?;
+    tracing::info!("模型加载成功 (CPU，跳过 DirectML): {}", path.display());
     Ok((session, Backend::Cpu))
 }
 

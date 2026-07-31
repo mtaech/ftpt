@@ -6,6 +6,7 @@ members = [
     "crates/photo-config",
     "crates/photo-recognize",
     "crates/photo-tool-app",
+    "crates/rawlib",
 ]
 
 [workspace.package]
@@ -27,7 +28,7 @@ oneshot = "0.1"
 ort = { version = "=2.0.0-rc.12", features = ["directml"] }
 parking_lot = "0.12"
 quick-xml = { version = "0.37", features = ["serialize"] }
-rawlib = "0.7"
+rawlib = { path = "crates/rawlib" }
 rayon = "1"
 regex-lite = "0.1"
 rfd = "0.14"

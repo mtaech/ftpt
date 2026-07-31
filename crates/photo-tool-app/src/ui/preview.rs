@@ -88,8 +88,8 @@ pub fn render_preview(
     };
 
     // 手动计算居中偏移（替代 flex items_center/justify_center），缩放时从中心展开
-    let img_x = crate::state::app::preview_center_offset(disp_w, container_w) + view.preview_pan.0;
-    let img_y = crate::state::app::preview_center_offset(disp_h, container_h) + view.preview_pan.1;
+    let img_x = crate::state::preview_math::preview_center_offset(disp_w, container_w) + view.preview_pan.0;
+    let img_y = crate::state::preview_math::preview_center_offset(disp_h, container_h) + view.preview_pan.1;
 
 
     let view_handle = cx.entity().downgrade();
@@ -561,8 +561,12 @@ fn eye_corner_marks(eye: photo_domain::BBox, disp_w: f32, disp_h: f32, color: Hs
             .bg(color)
     };
 
+    // 绝对定位必须显式 left/top：缺省时 taffy 会把它放到「静态位置」
+    // （即假想的文档流位置 = 前一个 img 兄弟之后 → 整组角标渲染到图片下方）
     div()
         .absolute()
+        .left(px(0.))
+        .top(px(0.))
         .size_full()
         .child(h_arm(l, t))
         .child(v_arm(l, t))

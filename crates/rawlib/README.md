@@ -1,0 +1,612 @@
+# RawLib - RAW 图像处理工具
+
+一个快速、高效的 RAW 图像处理工具，支持从相机 RAW 文件中提取内嵌缩略图、读取 EXIF 元数据，以及完整解码 RAW 图像。提供命令行工具和可集成的 Rust 库。
+
+基于 [LibRaw](https://www.libraw.org/) 0.22.2（OpenMP + AVX2），使用 Rust 开发，具有出色的性能和内存安全性。
+
+## ✨ 特性
+
+- 🚀 **缩略图提取** - 快速提取内嵌缩略图，无需完整解码 RAW 文件
+- 🖼 **完整解码** - 全分辨率 RAW 解码（去马赛克、白平衡、色彩校正），输出 RGB 位图
+- ⚡ **速度预设** - `DecodeOptions::preview()` 快速预览模式，实测单文件提速约 2.5 倍
+- 📁 **批量处理** - 一次处理整个目录的 RAW 文件
+- 🔄 **递归扫描** - 自动扫描子目录中的所有 RAW 文件
+- 🧵 **多线程并行** - 文件级并行 + LibRaw 内部 OpenMP，自动协调避免线程超售
+- 📊 **进度显示** - 实时显示批量处理进度
+- 🎯 **智能命名** - 自动处理文件名冲突（跳过/覆盖/重命名）
+- 🌏 **中文支持** - 完美支持中文路径和文件名（Windows）
+- 📦 **单文件分发** - 无需安装依赖，直接运行
+
+## 📷 支持的 RAW 格式
+
+支持几乎所有主流相机的 RAW 格式，包括：
+
+| 品牌 | 格式 |
+|------|------|
+| Canon 佳能 | CR2, CR3 |
+| Nikon 尼康 | NEF, NRW |
+| Sony 索尼 | ARW, SRF, SR2 |
+| Fujifilm 富士 | RAF |
+| Olympus 奥林巴斯 | ORF |
+| Panasonic 松下 | RW2 |
+| Adobe | DNG |
+| 更多... | 100+ 种格式 |
+
+## 🚀 快速开始
+
+### 安装
+
+#### 方式 1: 下载预编译版本（推荐）
+
+从 [Releases](https://github.com/yourusername/rawlib/releases) 页面下载最新版本的 `rawlib.exe`，解压后即可使用。
+
+#### 方式 2: 从源码编译
+
+需要安装 [Rust](https://www.rust-lang.org/)：
+
+```bash
+git clone https://github.com/yourusername/rawlib.git
+cd rawlib
+cargo build --release
+```
+
+编译完成后，可执行文件位于 `target/release/rawlib.exe`
+
+### 基本用法
+
+```bash
+# 提取单个文件的缩略图
+rawlib photo.NEF
+
+# 指定输出文件名
+rawlib photo.NEF -o thumbnail.jpg
+
+# 批量处理整个目录
+rawlib ./photos/ -o ./thumbnails/
+
+# 递归处理所有子目录
+rawlib ./photos/ -r --progress
+
+# 查看 EXIF 元数据
+rawlib photo.NEF --exif
+
+# 显示详细信息
+rawlib photo.NEF -v
+```
+
+## 📖 使用指南
+
+### 命令行选项
+
+```
+用法: rawlib [选项] <输入文件或目录>...
+
+参数:
+  <INPUT>...                输入的 RAW 文件或目录
+
+选项:
+  -o, --output <路径>       输出文件或目录（默认：与输入同名但扩展名为 .jpg）
+      --overwrite <策略>    文件覆盖策略 [可选值: skip, overwrite, rename]
+  -r, --recursive           递归扫描子目录
+  -v, --verbose             显示详细信息
+  -q, --quiet               静默模式，仅显示错误
+      --progress            显示进度条
+  -f, --format <格式>       输出格式 [可选值: auto, jpg, jpeg, bmp]
+      --extensions <扩展名>  指定 RAW 文件扩展名（逗号分隔）
+  -j, --jobs <N>            并行工作线程数（默认：CPU 核心数）
+      --exif                显示 EXIF 元数据（不提取缩略图）
+      --json                以 JSON 格式输出 EXIF 信息
+  -h, --help                显示帮助信息
+  -V, --version             显示版本信息
+```
+
+### 使用示例
+
+#### 1. 提取单个文件
+
+```bash
+# 提取到同目录，自动命名为 photo.jpg
+rawlib photo.NEF
+
+# 指定输出文件名
+rawlib photo.NEF -o thumb.jpg
+
+# 显示缩略图详细信息
+rawlib photo.NEF -v
+```
+
+**输出示例**：
+```
+[INFO] 开始处理: photo.NEF
+缩略图格式: JPEG
+尺寸: 1920x1280
+大小: 456789 字节
+✓ 已保存: photo.jpg
+```
+
+#### 2. 批量处理目录
+
+```bash
+# 处理当前目录所有 RAW 文件，输出到 thumbnails 文件夹
+rawlib ./ -o ./thumbnails/
+
+# 递归处理所有子目录，显示进度
+rawlib ./photos/ -r --progress -o ./thumbs/
+
+# 处理指定格式的文件
+rawlib ./photos/ --extensions nef,cr2
+
+# 使用多线程并行处理（提升大批量处理速度）
+rawlib ./photos/ -r --progress -j 8
+
+# 限制为单线程（用于调试或资源受限环境）
+rawlib ./photos/ -j 1
+```
+
+#### 3. 查看 EXIF 元数据
+
+```bash
+# 显示单个文件的 EXIF 信息
+rawlib photo.NEF --exif
+
+# 批量显示目录中所有 RAW 文件的 EXIF
+rawlib ./photos/ --exif
+
+# 以 JSON 格式输出（便于程序处理）
+rawlib photo.NEF --exif --json
+
+# 递归导出所有文件的 EXIF 为 JSON
+rawlib ./photos/ -r --exif --json > exif_data.json
+```
+
+**EXIF 输出示例**：
+```
+photo.NEF:
+  相机厂商: NIKON CORPORATION
+  相机型号: NIKON D850
+  镜头型号: 70-200mm f/2.8
+  拍摄时间: 2024:03:15 14:30:25
+  快门速度: 1/500
+  光圈: f/2.8
+  ISO: 400
+  焦距: 135.0 mm
+  图像尺寸: 8256x5504
+```
+
+#### 4. 文件冲突处理
+
+```bash
+# 跳过已存在的文件（默认）
+rawlib ./photos/ --overwrite skip
+
+# 覆盖已存在的文件
+rawlib ./photos/ --overwrite overwrite
+
+# 自动重命名（photo.jpg → photo_1.jpg → photo_2.jpg）
+rawlib ./photos/ --overwrite rename
+```
+
+#### 5. 中文路径支持
+
+```bash
+# 完美支持中文路径和文件名
+rawlib "C:\Users\张三\图片\2024\旅行照片" -o "C:\Users\张三\桌面\缩略图"
+```
+
+**批量处理输出示例**：
+```
+提取缩略图: [████████████████████] 158/158 (100%)
+✓ 成功: 158 个文件
+⊘ 跳过: 0 个文件
+✗ 失败: 0 个文件
+```
+
+#### 6. 调试模式
+
+```bash
+# 显示详细日志信息
+set RUST_LOG=debug
+rawlib photo.NEF -v
+
+# 或使用一行命令（PowerShell）
+$env:RUST_LOG="debug"; rawlib photo.NEF -v
+```
+
+## 🎯 典型工作流程
+
+### 摄影师批量预览工作流
+
+```bash
+# 1. 从相机导入 RAW 文件到目录
+# 例如: D:\Photos\2024-12-09-活动\
+
+# 2. 快速提取所有缩略图用于预览
+rawlib "D:\Photos\2024-12-09-活动\" -r --progress -o "D:\Thumbnails\2024-12-09"
+
+# 3. 在文件管理器中快速浏览缩略图
+# 4. 根据缩略图选择需要精修的照片
+```
+
+### 照片库管理工作流
+
+```bash
+# 为整个照片库生成缩略图索引
+rawlib "E:\PhotoLibrary\" -r --progress --overwrite skip
+
+# 定期更新（仅处理新增照片）
+rawlib "E:\PhotoLibrary\" -r --overwrite skip
+```
+
+## 🔧 高级功能
+
+### 自定义输出格式
+
+```bash
+# 输出为 BMP 格式（如果 RAW 文件中包含 BMP 缩略图）
+rawlib photo.NEF -f bmp -o thumb.bmp
+
+# 自动检测格式（默认）
+rawlib photo.NEF -f auto
+```
+
+### 批量处理脚本示例
+
+**Windows 批处理脚本** (`extract_all.bat`):
+```batch
+@echo off
+echo 正在提取 RAW 文件缩略图...
+rawlib "D:\Photos\2024\" -r --progress -o "D:\Thumbnails\" --overwrite skip
+echo 完成！
+pause
+```
+
+**PowerShell 脚本** (`extract_all.ps1`):
+```powershell
+Write-Host "开始提取缩略图..." -ForegroundColor Green
+& rawlib "D:\Photos\2024\" -r --progress -o "D:\Thumbnails\" --overwrite skip
+Write-Host "提取完成！" -ForegroundColor Green
+```
+
+## 📊 性能参考
+
+在 16 核 CPU + NVMe SSD 上的实测结果：
+
+### 缩略图提取（CLI / 库均适用）
+
+| 任务 | 文件数 | 总大小 | 耗时 | 速度 |
+|------|--------|--------|------|------|
+| 单文件提取 | 1 | 25 MB | 0.1 秒 | - |
+| 批量提取（串行） | 100 | 2.5 GB | 8 秒 | 12.5 文件/秒 |
+| 批量提取（并行） | 100 | 2.5 GB | 2 秒 | 50 文件/秒 |
+
+### 完整 RAW 解码（库 API，4400 万像素 RW2，62 MB/张）
+
+| 模式 | 单文件串行 | 批量并行（16 核） |
+|------|-----------|------------------|
+| `DecodeOptions::quality()`（AHD + 16 bit） | 约 2.9 秒/张 | 约 1.1 文件/秒 |
+| `DecodeOptions::preview()`（half + bilinear + 8 bit） | 约 1.2 秒/张 | 约 5.3 文件/秒 |
+
+**说明**：
+
+- 完整解码的瓶颈在 RAW 解压（约 0.6 秒/张的固定成本）和去马赛克，preview 模式通过半分辨率 + 双线性去马赛克提速约 2.5 倍
+- 批量并行时 `process_images` 会自动将 LibRaw 内部 OpenMP 限制为单线程，避免线程超售（实测吞吐差 15-20%）；对吞吐敏感的场景也可在进程启动时外部设置 `OMP_NUM_THREADS=1`
+- 实际性能取决于硬盘速度、CPU 核心数、文件大小和 RAW 格式
+
+## ❓ 常见问题
+
+### Q: 提取的缩略图质量如何？
+
+A: RawLib 提取的是相机内嵌的原始缩略图（通常为 JPEG 格式），质量与相机生成的缩略图相同。大多数相机会嵌入高质量的缩略图（1920x1280 或更高分辨率）。
+
+### Q: 为什么比 Lightroom/Capture One 快这么多？
+
+A: RawLib 的缩略图模式只提取内嵌缩略图，不进行 RAW 解码、色彩管理或渲染。这使得速度提升了 10-100 倍，但功能仅限于快速预览。如需完整解码，可使用库 API 的 `extract_image_with_options`。
+
+### Q: 支持编辑 RAW 文件吗？
+
+A: 不支持。RawLib 是只读工具，专注于快速提取缩略图。如需编辑，请使用 Lightroom、Capture One、Darktable 等专业软件。
+
+### Q: 所有 RAW 文件都包含缩略图吗？
+
+A: 绝大多数相机会在 RAW 文件中嵌入缩略图。极少数情况下，如果文件损坏或格式特殊，可能无法提取。
+
+### Q: 可以提取全尺寸 JPEG 预览吗？
+
+A: 部分相机（如 Nikon）会嵌入全尺寸 JPEG 预览。RawLib 提取的是文件中最大的可用缩略图，通常就是全尺寸预览。
+
+### Q: 为什么显示"错误 -100009"？
+
+A: 这通常是文件路径或文件损坏导致的。请确保：
+- 文件路径正确且文件存在
+- 文件未损坏（可以用相机软件打开）
+- 具有读取权限
+
+### Q: Windows 上中文路径无法识别怎么办？
+
+A: 版本 0.2.0+ 已完全支持中文路径。如果遇到问题，请更新到最新版本。
+
+## 🛠 故障排除
+
+### 问题：无法找到文件
+
+```bash
+# 检查路径是否正确
+rawlib "完整路径\photo.NEF" -v
+
+# 使用引号包裹含空格的路径
+rawlib "D:\My Photos\photo.NEF"
+```
+
+### 问题：批量处理时部分文件失败
+
+```bash
+# 使用详细模式查看具体错误
+rawlib ./photos/ -v
+
+# 启用调试日志
+set RUST_LOG=debug
+rawlib ./photos/ -v
+```
+
+### 问题：缺少 DLL 文件
+
+RawLib 使用静态链接，理论上不需要额外 DLL。如果遇到问题：
+
+1. 确保使用的是 Release 版本
+2. 下载 [Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe)（Windows，OpenMP 运行时需要）
+3. 重新下载最新版本的 RawLib
+
+## 📝 开发者文档
+
+### 作为 Rust 库使用
+
+RawLib 也可以作为 Rust 库集成到其他项目中：
+
+```toml
+[dependencies]
+rawlib = "0.5"
+```
+
+**简单提取缩略图**：
+```rust
+use rawlib::extract_thumbnail;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let thumb_bytes = extract_thumbnail("photo.NEF")?;
+    std::fs::write("thumbnail.jpg", &thumb_bytes)?;
+    Ok(())
+}
+```
+
+**带元数据提取缩略图**：
+```rust
+use rawlib::extract_thumbnail_with_info;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let thumb = extract_thumbnail_with_info("photo.NEF")?;
+    println!("格式: {:?}", thumb.format);
+    println!("尺寸: {}x{}", thumb.width, thumb.height);
+    std::fs::write("thumbnail.jpg", &thumb.data)?;
+    Ok(())
+}
+```
+
+**完整解码 RAW 图像**（输出 RGB 位图，可调节画质/速度）：
+```rust
+use rawlib::{extract_image_with_options, DecodeOptions};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 快速预览：half_size + 双线性去马赛克 + 8 bit，实测比默认快约 2.5 倍
+    let img = extract_image_with_options("photo.RW2", &DecodeOptions::preview())?;
+    println!("尺寸: {}x{}, {} bit", img.width, img.height, img.bits);
+    // img.data 为 RGB 像素数据
+
+    // 画质优先：等同 LibRaw 默认（AHD + 16 bit + 自动亮度）
+    let img = extract_image_with_options("photo.RW2", &DecodeOptions::quality())?;
+
+    // 自定义参数
+    let opts = DecodeOptions {
+        half_size: false,        // 半分辨率输出
+        demosaic_quality: 0,     // 0=双线性(最快) 1=VNG 2=PPG 3=AHD(默认)
+        output_bps: 16,          // 8 或 16
+        no_auto_bright: true,    // 跳过自动亮度
+        output_color: 1,         // 1=sRGB，0=RAW 色彩空间（自建色彩管线用）
+        linear_gamma: false,     // 线性输出（跳过 gamma 曲线）
+        use_camera_wb: true,     // 相机白平衡，关闭（LibRaw 原生默认）会偏色
+    };
+    let img = extract_image_with_options("photo.RW2", &opts)?;
+    Ok(())
+}
+```
+
+**批量完整解码**（文件级并行，自动复用处理器实例）：
+```rust
+use rawlib::{DecodeOptions, ParallelConfig, ParallelProcessor};
+use std::path::PathBuf;
+
+fn main() {
+    let files = vec![
+        PathBuf::from("photo1.RW2"),
+        PathBuf::from("photo2.RW2"),
+    ];
+
+    // 并行完整解码，16 核实测约 5 文件/秒（preview 模式）
+    let results = ParallelProcessor::process_images(
+        &files,
+        &ParallelConfig::default(),
+        &DecodeOptions::preview(),
+    );
+
+    for result in &results {
+        match &result.thumbnail {
+            Ok(img) => println!("✓ {}: {}x{}", result.path.display(), img.width, img.height),
+            Err(e) => println!("✗ {}: {}", result.path.display(), e),
+        }
+    }
+}
+```
+
+**并行提取缩略图**：
+```rust
+use rawlib::parallel::{ParallelProcessor, ParallelConfig};
+use std::path::PathBuf;
+
+fn main() {
+    let files = vec![
+        PathBuf::from("photo1.NEF"),
+        PathBuf::from("photo2.CR2"),
+        PathBuf::from("photo3.ARW"),
+    ];
+
+    // 使用默认配置（自动使用所有 CPU 核心）
+    let results = ParallelProcessor::process_files(&files, &ParallelConfig::default());
+
+    // 处理结果
+    for result in &results {
+        match &result.thumbnail {
+            Ok(thumb) => println!("✓ {}: {} bytes", result.path.display(), thumb.data.len()),
+            Err(e) => println!("✗ {}: {}", result.path.display(), e),
+        }
+    }
+
+    // 或者获取详细统计信息
+    let (results, stats) = ParallelProcessor::process_with_stats(&files, &ParallelConfig::default());
+    println!("处理速度: {:.1} 文件/秒", stats.files_per_second());
+    println!("总耗时: {:?}", stats.total_elapsed);
+}
+```
+
+**EXIF 元数据提取**：
+```rust
+use rawlib::exif::{extract_exif, extract_exif_parallel};
+use std::path::PathBuf;
+
+fn main() {
+    // 提取单个文件的 EXIF
+    let exif = extract_exif("photo.NEF").unwrap();
+    println!("相机: {:?}", exif.model);
+    println!("ISO: {:?}", exif.iso);
+    println!("拍摄时间: {:?}", exif.date_time_original);
+
+    // 批量并行提取 EXIF
+    let files = vec![
+        PathBuf::from("photo1.NEF"),
+        PathBuf::from("photo2.CR2"),
+    ];
+
+    let results = extract_exif_parallel(&files, None);
+
+    for (path, result) in &results {
+        match result {
+            Ok(exif) => println!("{}: {:?}", path.display(), exif.summary()),
+            Err(e) => println!("{}: error - {}", path.display(), e),
+        }
+    }
+}
+```
+
+更多可运行的示例见 [examples](./examples) 目录：
+
+- `usage.rs` - 库 API 基本用法（缩略图 / EXIF / 完整解码）
+- `parallel_processing.rs` - 并行处理示例
+- `bench_decode.rs` - 完整解码性能基准工具（需真实 RAW 文件目录）
+
+详细 API 文档请参考 [docs.rs/rawlib](https://docs.rs/rawlib)
+
+### 从源码编译
+
+**前置要求**：
+- Rust 1.70+（`rustup` 安装）
+- LibRaw 库（项目已包含 0.22.2 预编译静态库：MSVC 启用 OpenMP + AVX2；Linux 为 x86_64 全静态构建）
+
+**编译步骤**：
+```bash
+# 克隆仓库
+git clone https://github.com/yourusername/rawlib.git
+cd rawlib
+
+# 开发编译
+cargo build
+
+# 发布编译（优化版本）
+cargo build --release
+
+# 构建并运行示例
+cargo run --release --example usage
+cargo run --release --example bench_decode -- <RAW 文件目录>
+
+# 运行测试
+cargo test
+
+# 生成文档
+cargo doc --open
+```
+
+**Linux 说明**：构建脚本优先使用 `pkg-config` 检测系统 libraw；未安装时回退到项目内置的静态库（全静态构建，自动链接 jpeg/lcms2/z/gomp 依赖）。
+
+## 📄 许可证
+
+本项目采用双许可证：
+
+- MIT License
+- Apache License 2.0
+
+您可以选择其中任何一个许可证使用本软件。
+
+LibRaw 库采用 LGPL-2.1 或 CDDL-1.0 许可证。
+
+## 🙏 致谢
+
+- [LibRaw](https://www.libraw.org/) - 强大的 RAW 图像处理库
+- [Clap](https://github.com/clap-rs/clap) - Rust 命令行解析库
+- [Indicatif](https://github.com/console-rs/indicatif) - 终端进度条库
+- [Rayon](https://github.com/rayon-rs/rayon) - Rust 数据并行库
+
+## 📮 反馈与支持
+
+- **问题反馈**: [GitHub Issues](https://github.com/yourusername/rawlib/issues)
+- **功能建议**: [GitHub Discussions](https://github.com/yourusername/rawlib/discussions)
+- **邮件联系**: your.email@example.com
+
+## 🗺 路线图
+
+- [x] 多线程并行处理
+- [x] 支持从 RAW 文件提取元数据（EXIF）
+- [x] 完整 RAW 解码（可调画质/速度预设，并行批处理）
+- [ ] 支持批量调整缩略图尺寸
+- [ ] 支持输出 WebP 格式
+- [ ] 添加 GUI 图形界面
+- [x] Linux 支持（内置 0.22.2 静态库）
+- [ ] macOS 支持
+
+## 📊 项目结构
+
+```
+rawlib/
+├── src/
+│   ├── main.rs          # CLI 入口点
+│   ├── lib.rs           # 库入口（公共 API）
+│   ├── cli.rs           # 命令行配置和文件收集
+│   ├── processor.rs     # CLI 批处理逻辑
+│   ├── raw_processor.rs # LibRaw 安全封装（RawProcessor / DecodeOptions）
+│   ├── parallel.rs      # 并行处理（缩略图 + 完整解码）
+│   ├── exif.rs          # EXIF 元数据提取
+│   ├── error.rs         # 错误类型定义
+│   ├── utils.rs         # 工具函数
+│   ├── ffi.rs           # C FFI 绑定
+│   └── half_size.c      # LibRaw 参数设置 shim
+├── examples/            # 使用示例与性能基准
+├── libraw/              # LibRaw 库文件
+│   ├── msvc/            # Windows MSVC 静态库 + 头文件（0.22.2，OpenMP + AVX2）
+│   └── gnu/             # Linux x86_64 静态库 + 头文件（0.22.2，含依赖）
+├── build.rs             # 构建脚本（平台检测 + 链接配置）
+├── Cargo.toml           # 项目配置
+└── README.md            # 本文件
+```
+
+---
+
+**版本**: 0.6.1  
+**最后更新**: 2026-07-24  
+
+如果觉得这个项目有用，请给个 ⭐️ Star！

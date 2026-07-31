@@ -40,12 +40,25 @@ pub fn run_classification(
     bbox: BBox,
 ) -> Result<ClassificationOutput, RecognizeError> {
     let (orig_w, orig_h) = img.dimensions();
+    if orig_w == 0 || orig_h == 0 {
+        // 非法图像尺寸 → 系统错误（图片错误），由上层映射为 NeedsReview(Classification)
+        return Err(RecognizeError::Image(image::ImageError::IoError(
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "图像尺寸为 0，无法分类"),
+        )));
+    }
 
     // ---- 1. 裁切归一化区域（pica bird_classification_service.dart:66-74） ----
-    let cx1 = (bbox.x1.clamp(0.0, 1.0) * orig_w as f32).floor() as u32;
-    let cy1 = (bbox.y1.clamp(0.0, 1.0) * orig_h as f32).floor() as u32;
-    let cx2 = (bbox.x2.clamp(0.0, 1.0) * orig_w as f32).ceil() as u32;
-    let cy2 = (bbox.y2.clamp(0.0, 1.0) * orig_h as f32).ceil() as u32;
+    // 先按轴 min/max 归一化再 clamp 到 [0,1]：反向框（x1>x2 等）在像素换算前消除，
+    // 避免 u32 相减下溢（debug panic / release 静默裁错）。
+    let x1 = bbox.x1.min(bbox.x2).clamp(0.0, 1.0);
+    let y1 = bbox.y1.min(bbox.y2).clamp(0.0, 1.0);
+    let x2 = bbox.x2.max(bbox.x1).clamp(0.0, 1.0);
+    let y2 = bbox.y2.max(bbox.y1).clamp(0.0, 1.0);
+    // 起点 clamp 到 w-1：bbox 贴右/下边缘（x1=1.0）时 cx1=orig_w 会让 crop_imm 越界 panic
+    let cx1 = ((x1 * orig_w as f32).floor() as u32).min(orig_w.saturating_sub(1));
+    let cy1 = ((y1 * orig_h as f32).floor() as u32).min(orig_h.saturating_sub(1));
+    let cx2 = (x2 * orig_w as f32).ceil() as u32;
+    let cy2 = (y2 * orig_h as f32).ceil() as u32;
     let crop_w = (cx2 - cx1).clamp(1, orig_w);
     let crop_h = (cy2 - cy1).clamp(1, orig_h);
 

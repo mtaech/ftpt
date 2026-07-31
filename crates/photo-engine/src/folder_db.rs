@@ -333,8 +333,9 @@ impl FolderDb {
         target_db: &mut FolderDb,
         entries: &[(String, String)],
     ) -> Result<(), FolderDbError> {
-        // 先批量读取本库数据
-        let mut batch = Vec::new();
+        // 先批量读取本库数据：逐条查询并成对收集（目标 rel_path, Recognition），
+        // 避免按 batch 序号索引 entries 在存在无行条目时错位写入错误目标
+        let mut pairs: Vec<(String, Recognition)> = Vec::new();
         {
             let conn = self.conn.lock();
             let mut stmt = conn.prepare_cached(
@@ -343,19 +344,18 @@ impl FolderDb {
                         eye_sharpness, eye_bbox
                  FROM recognition WHERE rel_path = ?1",
             )?;
-            for (src_rel, _dst_rel) in entries {
+            for (src_rel, dst_rel) in entries {
                 let normalized = src_rel.replace('\\', "/");
                 match stmt.query_row(rusqlite::params![normalized], |row| row_to_recognition(row)) {
-                    Ok(rec) => batch.push(rec?),
+                    Ok(rec) => pairs.push((dst_rel.clone(), rec?)),
                     Err(rusqlite::Error::QueryReturnedNoRows) => {}
                     Err(e) => return Err(e.into()),
                 }
             }
         }
-        // 依次 UPSERT 到目标库
-        for (i, rec) in batch.iter().enumerate() {
-            let dst_rel = &entries[i].1;
-            target_db.upsert_recognition(dst_rel, rec)?;
+        // 按各自目标键 UPSERT 到目标库
+        for (dst_rel, rec) in pairs {
+            target_db.upsert_recognition(&dst_rel, &rec)?;
         }
         Ok(())
     }
@@ -915,7 +915,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn test_recognition_eye_fields_roundtrip() {
         let tmp = TempDir::new().unwrap();
         let db = FolderDb::open_in_dir(tmp.path()).unwrap();
@@ -981,6 +980,7 @@ mod tests {
         assert!(got.eye_bbox.is_none(), "迁移前旧行的 eye_bbox 应为 None");
     }
 
+    #[test]
     fn test_sync_with_scan_stale_delete_and_fingerprint() {
         let tmp = TempDir::new().unwrap();
         let db = FolderDb::open_in_dir(tmp.path()).unwrap();

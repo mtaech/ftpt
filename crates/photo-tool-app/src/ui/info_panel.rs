@@ -11,6 +11,7 @@ use gpui_component::{Sizable, IconName};
 
 use crate::ui::controls::{clear_link, section_header, segmented_button};
 use crate::ui::theme;
+use crate::ui::format_file_size;
 use gpui_component::h_flex;
 
 /// Render the right info panel with EXIF info + rating/label/flag controls.
@@ -123,15 +124,6 @@ fn render_hero(focused: Option<&CaptureMeta>) -> impl IntoElement {
                     }),
             )
             .into_any_element(),
-    }
-}
-
-fn format_file_size(size: Option<u64>) -> String {
-    match size {
-        Some(s) if s < 1024 => format!("{} B", s),
-        Some(s) if s < 1024 * 1024 => format!("{:.1} KB", s as f64 / 1024.0),
-        Some(s) => format!("{:.1} MB", s as f64 / (1024.0 * 1024.0)),
-        None => "\u{2014}".into(),
     }
 }
 

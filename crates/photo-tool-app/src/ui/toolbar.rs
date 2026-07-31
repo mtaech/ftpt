@@ -265,43 +265,6 @@ fn settings_page(vh: WeakEntity<RootView>) -> SettingPage {
         )
     };
 
-    // ── 缓存大小 ──
-    let cache_field = {
-        let vh = vh.clone();
-        SettingField::<SharedString>::dropdown(
-            vec![
-                ("256".into(), "256 MB".into()),
-                ("512".into(), "512 MB".into()),
-                ("1024".into(), "1 GB".into()),
-                ("2048".into(), "2 GB".into()),
-            ],
-            {
-                let vh = vh.clone();
-                move |app: &App| {
-                    vh.upgrade()
-                        .map(|e| {
-                            let size = e.read(app).config.max_cache_size_mb;
-                            SharedString::from(size.to_string())
-                        })
-                        .unwrap_or_default()
-                }
-            },
-            {
-                let vh = vh.clone();
-                move |value: SharedString, app: &mut App| {
-                    if let Ok(size) = value.parse::<u64>() {
-                        if let Some(e) = vh.upgrade() {
-                            app.update_entity(&e, |view, _cx| {
-                                view.config.max_cache_size_mb = size;
-                                view.save_config();
-                            });
-                        }
-                    }
-                }
-            },
-        )
-    };
-
     // ── 识别线程数 ──
     let thread_field = {
         let vh = vh.clone();
@@ -347,15 +310,6 @@ fn settings_page(vh: WeakEntity<RootView>) -> SettingPage {
                 .item(
                     SettingItem::new("字体", font_field)
                         .description("应用界面字体"),
-                ),
-        )
-        .group(
-            SettingGroup::new()
-                .title("缓存")
-                .description("缩略图缓存")
-                .item(
-                    SettingItem::new("最大缓存", cache_field)
-                        .description("缩略图磁盘缓存上限"),
                 ),
         )
         .group(

@@ -37,12 +37,33 @@ impl ThumbnailCache {
 
     /// 获取或生成缩略图，返回 JPEG 字节。
     /// `cancel` 为合作式取消令牌：Some 时每次慢操作前检查，已取消则返回 `Cancelled` 错误。
+    ///
+    /// RAW 走母版缓存：完整解码（half_size）结果按 `u32::MAX` 键存一份，
+    /// 任意 size 请求从母版 DCT 降采样派生（毫秒级，不落盘）——同一文件不再按尺寸重复解码。
     pub fn get_or_generate(
         &self,
         source: &SourceFile,
         size: u32,
         cancel: Option<&AtomicBool>,
     ) -> Result<Vec<u8>, ThumbnailError> {
+        // RAW：母版缓存 + 派生
+        if matches!(source.format, ImageFormat::Raw(_)) {
+            let master_key = self.cache_key(source, u32::MAX);
+            let master_path = self.cache_dir.join(&master_key);
+            let master: Vec<u8> = if master_path.exists() {
+                std::fs::read(&master_path)?
+            } else {
+                let bytes = decode_raw_impl(&source.path, u32::MAX, cancel)?;
+                std::fs::write(&master_path, &bytes)?;
+                bytes
+            };
+            if size == u32::MAX {
+                return Ok(master);
+            }
+            return resize_jpeg(&master, size);
+        }
+
+        // 常规图：按 size 独立缓存（JPEG DCT 缩放本就快，源文件小）
         let cache_key = self.cache_key(source, size);
         let cache_path = self.cache_dir.join(&cache_key);
 
@@ -58,7 +79,7 @@ impl ThumbnailCache {
     fn cache_key(&self, source: &SourceFile, size: u32) -> String {
         use std::hash::{Hash, Hasher};
         // 缓存格式版本：解码逻辑修复（如行宽错位）时递增，旧缓存自动失效
-        const CACHE_VERSION: u8 = 2;
+        const CACHE_VERSION: u8 = 3;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         CACHE_VERSION.hash(&mut hasher);
         source.path.to_string_lossy().hash(&mut hasher);
@@ -74,10 +95,7 @@ impl ThumbnailCache {
         size: u32,
         cancel: Option<&AtomicBool>,
     ) -> Result<Vec<u8>, ThumbnailError> {
-        match source.format {
-            ImageFormat::Raw(_) => decode_raw_impl(&source.path, size, cancel),
-            _ => self.generate_image_thumbnail(&source.path, size, cancel),
-        }
+        self.generate_image_thumbnail(&source.path, size, cancel)
     }
 
     /// 常规图片格式：JPEG 走 DCT 降采样快路径，其余全解码
@@ -190,24 +208,32 @@ impl ThumbnailCache {
 
 
 
-/// 从 RAW 提取用于预览的图像（优先内嵌 JPEG，失败时回落完整解码）。
-/// 始终返回 JPEG 字节，长边缩放到 `max_size` 以内（`u32::MAX` 表示不缩放）。
+/// 从 RAW 解码用于预览的图像，返回 JPEG 字节，长边缩放到 `max_size` 以内（`u32::MAX` 表示不缩放）。
 /// 在 worker 线程中调用。
+///
+/// 策略：内嵌 JPEG 足够大（长边 ≥ 2048，如 Panasonic RW2 / 部分 DNG）时直接使用（快）；
+/// 小内嵌（多数相机 160-640px）不再使用——放大会糊，直接完整解码（half_size 预览选项，约 4x 加速）。
 pub fn decode_raw_preview(path: &Path, max_size: u32) -> Result<Vec<u8>, ThumbnailError> {
     decode_raw_impl(path, max_size, None)
 }
 
-/// RAW 解码共用实现：内嵌 JPEG 快路径（DCT 降采样缩放），失败回落完整解码。
-/// `cancel` 为合作式取消令牌：完整解码（慢操作）前检查一次。
+/// RAW 解码共用实现。`cancel` 为合作式取消令牌：完整解码（慢操作）前检查一次。
 fn decode_raw_impl(path: &Path, size: u32, cancel: Option<&AtomicBool>) -> Result<Vec<u8>, ThumbnailError> {
     let path_str = path.to_string_lossy();
-    match rawlib::extract_thumbnail(path_str.as_ref()) {
-        Ok(jpeg) => return resize_jpeg(&jpeg, size),
-        Err(e) => {
-            tracing::warn!("内嵌缩略图提取失败，回退完整解码: {} — {e}", path.display());
+    // 快路径：内嵌 JPEG 长边 ≥ 2048（大内嵌，如 RW2/DNG 全尺寸预览）直接用，省完整解码。
+    // 小内嵌不再返回：160×120 放大到预览/全分辨率会糊，统一走完整解码。
+    if let Ok(thumb) = rawlib::extract_thumbnail_with_info(path_str.as_ref()) {
+        if thumb.format == rawlib::ImageFormat::Jpeg && thumb.width.max(thumb.height) >= 2048 {
+            return resize_jpeg(&thumb.data, size);
         }
+        tracing::debug!(
+            "内嵌缩略图过小（{}×{}），走完整解码: {}",
+            thumb.width, thumb.height, path.display()
+        );
+    } else {
+        tracing::debug!("无内嵌缩略图，走完整解码: {}", path.display());
     }
-    // 完整 RAW 解码前检查取消
+    // 完整 RAW 解码（half_size 预览选项：输出分辨率减半，约 4x 加速）前检查取消
     if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
         return Err(ThumbnailError::Cancelled);
     }
@@ -306,7 +332,7 @@ fn decode_jpeg_scaled_reader<R: std::io::BufRead + std::io::Seek>(
     Ok(buf.into_inner())
 }
 
-/// 将 rawlib 解码出的 RGB bitmap 编码为 JPEG，缩放到目标尺寸。
+/// 将 rawlib 解码出的 RGB bitmap 编码为 JPEG，缩放到目标尺寸（`u32::MAX` = 不缩放，母版原尺寸）。
 fn encode_bitmap_to_jpeg(img: &rawlib::ThumbnailData, size: u32) -> Result<Vec<u8>, ThumbnailError> {
     let rgb = image::RgbImage::from_raw(img.width as u32, img.height as u32, img.data.clone())
         .ok_or_else(|| {
@@ -321,9 +347,14 @@ fn encode_bitmap_to_jpeg(img: &rawlib::ThumbnailData, size: u32) -> Result<Vec<u
             )))
         })?;
     let dynamic = image::DynamicImage::ImageRgb8(rgb);
-    let resized = dynamic.thumbnail(size, size);
+    // u32::MAX 不缩放：thumbnail(u32::MAX, u32::MAX) 会因 ratio 下溢产生错误结果
+    let out = if size == u32::MAX {
+        dynamic
+    } else {
+        dynamic.thumbnail(size, size)
+    };
     let mut buf = Cursor::new(Vec::new());
-    resized.write_to(&mut buf, image::ImageFormat::Jpeg)?;
+    out.write_to(&mut buf, image::ImageFormat::Jpeg)?;
     Ok(buf.into_inner())
 }
 

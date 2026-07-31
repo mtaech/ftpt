@@ -12,10 +12,13 @@ pub enum ScanError {
 
 /// 扫描目录，每个图片文件各自成为一个 Capture（JPG 与 RAW 不再堆叠）
 ///
+/// `filter` — 仅保留签名（供调用方传当前筛选条件），扫描期不做任何筛选：
+/// 识别状态等元数据在扫描后才从 folder_db 读取，全部筛选由 app 层
+/// `apply_filter_and_sort` 在 CaptureMeta 层面执行。
 /// `on_progress` — 可选进度回调，接收 0-100 表示扫描+归并的百分比
 pub fn scan_directory(
     dir: &Path,
-    filter: &FilterCriteria,
+    _filter: &FilterCriteria,
     on_progress: Option<Box<dyn Fn(u32) + Send>>,
 ) -> Result<Vec<Capture>, ScanError> {
     let report = |pct: u32| {
@@ -100,7 +103,6 @@ pub fn scan_directory(
 
     report(100);
 
-    apply_filter(&mut captures, filter);
     // 按完整文件名小写排序：同名 JPG/RAW 相邻且顺序确定（jpg < nef）
     captures.sort_by_key(|c| {
         c.source_files[c.primary_index]
@@ -112,20 +114,6 @@ pub fn scan_directory(
     });
 
     Ok(captures)
-}
-
-/// 应用筛选条件：Capture 层面只做 recognition_filter（全部未识别，
-/// 仅 All/NotRecognized 保留）；其余筛选（鸟种、评分等）在扫描完成后
-/// 由 `apply_filter_and_sort`（app.rs）在 CaptureMeta 层面执行。
-fn apply_filter(captures: &mut Vec<Capture>, filter: &FilterCriteria) {
-    // recognition_filter：Capture 层面全部为未识别
-    if filter.recognition_filter != photo_domain::RecognitionFilter::All
-        && filter.recognition_filter != photo_domain::RecognitionFilter::NotRecognized
-    {
-        // 对 Capture 而言，Confirmed/NeedsReview/Unrecognized 都不可能有，
-        // 因为识别扫描还没跑——直接清空
-        captures.clear();
-    }
 }
 
 #[cfg(test)]

@@ -5034,8 +5034,6 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "serde",
- "tempfile",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -5043,25 +5041,21 @@ name = "photo-engine"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "dirs",
  "image",
  "kamadak-exif",
  "parking_lot",
  "photo-domain",
  "quick-xml 0.37.5",
  "rawlib",
- "regex-lite",
  "rusqlite",
  "rusqlite_migration",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
- "toml 0.8.23",
  "tracing",
  "trash",
  "walkdir",
- "winreg 0.52.0",
  "zune-core 0.5.1",
  "zune-jpeg 0.5.15",
 ]
@@ -5693,8 +5687,6 @@ dependencies = [
 [[package]]
 name = "rawlib"
 version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98bb8fd0ae5197ac1c2b4bac350938017c9e818811065cd35860615fd1576bfd"
 dependencies = [
  "cc",
  "clap",
@@ -5706,6 +5698,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "walkdir",
 ]
@@ -5834,12 +5827,6 @@ dependencies = [
  "memchr",
  "regex-syntax",
 ]
-
-[[package]]
-name = "regex-lite"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
 
 [[package]]
 name = "regex-syntax"

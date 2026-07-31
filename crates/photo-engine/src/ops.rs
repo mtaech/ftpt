@@ -78,6 +78,14 @@ pub fn move_capture(capture: &Capture, dest_dir: &Path) -> Result<(), OpError> {
                 Ok(()) => {}
                 Err(e) if e.kind() == ErrorKind::CrossesDevices => {
                     // 跨文件系统：copy + delete 回退
+                    // 与同卷 rename 在 Windows 上的失败行为一致：目标已存在时报错，
+                    // 避免 fs::copy 静默覆盖已有目标后再删源，造成双份数据丢失
+                    if dest.exists() {
+                        return Err(OpError::Io(std::io::Error::new(
+                            ErrorKind::AlreadyExists,
+                            format!("目标文件已存在: {}", dest.display()),
+                        )));
+                    }
                     std::fs::copy(path, &dest)?;
                     std::fs::remove_file(path)?;
                 }
@@ -150,8 +158,7 @@ pub fn sync_copy_recognitions(src_db: &FolderDb, dst_db: &mut FolderDb, entries:
 }
 
 /// 移动文件后同步迁移识别行到目标库。
-/// 等价于 sync_copy_recognitions + sync_delete_recognitions（源库的删除由调用方负责，
-/// 因为 move 的语义是先复制到目标再删除源）。
+/// 本函数负责：先复制识别行到目标库，再删除源库识别行（无需调用方额外处理删除）。
 pub fn sync_move_recognitions(src_db: &FolderDb, dst_db: &mut FolderDb, entries: &[(String, String)]) -> Result<(), FolderDbError> {
     src_db.copy_recognitions_to(dst_db, entries)?;
     let src_paths: Vec<String> = entries.iter().map(|(s, _)| s.clone()).collect();

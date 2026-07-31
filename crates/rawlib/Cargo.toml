@@ -1,0 +1,43 @@
+[package]
+name = "rawlib"
+version = "0.7.1"
+edition = "2021"
+authors = ['mtaech']
+description = "High-performance RAW image thumbnail extractor with batch processing support"
+license = "MIT"
+readme = "README.md"
+keywords = ["raw", "image", "thumbnail", "libraw", "photography"]
+categories = ["multimedia::images", "command-line-utilities"]
+homepage = "https://github.com/mtaech/rawlib"
+
+[dependencies]
+libc = "0.2"
+clap = { version = "4.5", features = ["derive", "cargo", "wrap_help"] }
+indicatif = "0.17"
+walkdir = "2.5"
+thiserror = "1.0"
+log = "0.4"
+env_logger = "0.11"
+rayon = "1.8"
+num_cpus = "1.16"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+cc = "1.0"
+
+[dev-dependencies]
+tempfile = "3.8"
+
+[lib]
+name = "rawlib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rawlib"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

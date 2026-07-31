@@ -131,8 +131,10 @@ pub fn recognize_capture(
         Ok(s) => s,
         Err((stage, msg)) => {
             tracing::warn!("[识别] 输入源解析失败: {} — {}", capture.base_name, msg);
+            // 状态推断与测试共用 stage_to_status（顶部映射表：源文件不可用 → NeedsReview(Assets)）
+            let (status, failure_stage) = stage_to_status(stage, false);
             return Ok(Recognition {
-                status: RecognitionStatus::NeedsReview,
+                status,
                 bird: None,
                 class_index: None,
                 confidence: None,
@@ -140,7 +142,7 @@ pub fn recognize_capture(
                 eye_sharpness: None,
                 eye_bbox: None,
                 candidates: vec![],
-                failure_stage: stage,
+                failure_stage,
                 recognized_at,
             });
         }
@@ -155,8 +157,9 @@ pub fn recognize_capture(
         Ok(Some(d)) => d,
         Ok(None) => {
             // 检测无框 → Unrecognized (Detection)（pica recognition_pipeline_service.dart:68-75）
+            let (status, failure_stage) = stage_to_status(RecognitionFailureStage::Detection, true);
             return Ok(Recognition {
-                status: RecognitionStatus::Unrecognized,
+                status,
                 bird: None,
                 class_index: None,
                 confidence: None,
@@ -164,7 +167,7 @@ pub fn recognize_capture(
                 eye_sharpness: None,
                 eye_bbox: None,
                 candidates: vec![],
-                failure_stage: RecognitionFailureStage::Detection,
+                failure_stage,
                 recognized_at,
             });
         }
@@ -172,8 +175,10 @@ pub fn recognize_capture(
             // 检测系统故障 → NeedsReview(Classification) 而不是 Err
             // （pica 类似：catch → needs_review + classification stage）
             tracing::error!("[识别] 检测系统错误: {e}");
+            let (status, failure_stage) =
+                stage_to_status(RecognitionFailureStage::Classification, false);
             return Ok(Recognition {
-                status: RecognitionStatus::NeedsReview,
+                status,
                 bird: None,
                 class_index: None,
                 confidence: None,
@@ -181,7 +186,7 @@ pub fn recognize_capture(
                 eye_sharpness: None,
                 eye_bbox: None,
                 candidates: vec![],
-                failure_stage: RecognitionFailureStage::Classification,
+                failure_stage,
                 recognized_at,
             });
         }
@@ -230,8 +235,9 @@ pub fn recognize_region(
         Ok(s) => s,
         Err((stage, msg)) => {
             tracing::warn!("[识别] 手动框选输入源解析失败: {} — {}", capture.base_name, msg);
+            let (status, failure_stage) = stage_to_status(stage, false);
             return Ok(Recognition {
-                status: RecognitionStatus::NeedsReview,
+                status,
                 bird: None,
                 class_index: None,
                 confidence: None,
@@ -239,7 +245,7 @@ pub fn recognize_region(
                 eye_sharpness: None,
                 eye_bbox: None,
                 candidates: vec![],
-                failure_stage: stage,
+                failure_stage,
                 recognized_at,
             });
         }
@@ -305,21 +311,14 @@ fn classify_and_map(
     // ---- 名录映射（pica bird_label_resolver.dart:13-59） ----
     let (bird, map_stage) = catalog.resolve_class(classified.class_index);
 
-    // 候选列表：Top-5 跳过 Top-1 自身，最多 5 条（未映射项 bird=None 也保留）
+    // 候选列表：Top-5 跳过 Top-1 自身，至多 4 条（未映射项 bird=None 也保留）
     let candidates =
         catalog.resolve_top_candidates(&classified.top_candidates, classified.class_index);
 
     // 状态推断（pica recognition_pipeline_service.dart:88-145）
-    let (status, failure_stage) = match map_stage {
-        RecognitionFailureStage::None => {
-            // 唯一匹配 → Confirmed（pica recognition_pipeline_service.dart:120-145）
-            (RecognitionStatus::Confirmed, RecognitionFailureStage::None)
-        }
-        stage => {
-            // 映射失败 0/多 → NeedsReview(Mapping)（pica bird_label_resolver.dart:19-43）
-            (RecognitionStatus::NeedsReview, stage)
-        }
-    };
+    // 唯一匹配 → Confirmed(None)；映射失败 0/多 → NeedsReview(Mapping)
+    // （与测试共用 stage_to_status，避免测试复制一份映射逻辑）
+    let (status, failure_stage) = stage_to_status(map_stage, false);
 
     Recognition {
         status,
@@ -363,11 +362,14 @@ pub fn recognize_captures(
             Ok(rec) => results.push((i, rec)),
             Err(e) => {
                 tracing::error!("[识别] Capture {} 系统错误: {e}", capture.base_name);
-                // 系统性错误不中断批次
+                // 系统性错误不中断批次；系统故障 → NeedsReview(Classification)
+                // （顶部映射表：Assets 仅表示源文件不可用，分类/解码异常才归 Classification）
+                let (status, failure_stage) =
+                    stage_to_status(RecognitionFailureStage::Classification, false);
                 results.push((
                     i,
                     Recognition {
-                        status: RecognitionStatus::NeedsReview,
+                        status,
                         bird: None,
                         class_index: None,
                         confidence: None,
@@ -375,7 +377,7 @@ pub fn recognize_captures(
                         eye_sharpness: None,
                         eye_bbox: None,
                         candidates: vec![],
-                        failure_stage: RecognitionFailureStage::Assets,
+                        failure_stage,
                         recognized_at: chrono::Utc::now().to_rfc3339(),
                     },
                 ));
@@ -388,6 +390,33 @@ pub fn recognize_captures(
 fn report_progress(on_progress: Option<&ProgressCallback>, value: f32, stage: &'static str) {
     if let Some(cb) = on_progress {
         cb(RecognitionProgress { value, stage });
+    }
+}
+
+/// 失败阶段 → (状态, 失败阶段) 推断（pica recognition_pipeline_service.dart:88-145）。
+///
+/// 与文件顶部「失败阶段 → 状态映射」表保持一致：
+/// - 检测无框 → `Unrecognized(Detection)`
+/// - 全部成功 → `Confirmed(None)`
+/// - 其余（分类/映射/资源异常）→ `NeedsReview(原阶段)`
+///
+/// 生产路径（recognize_capture / recognize_region / classify_and_map / recognize_captures）
+/// 与单元测试共用本实现，测试不再复制一份映射逻辑。
+pub(crate) fn stage_to_status(
+    failure_stage: RecognitionFailureStage,
+    is_detection_failure: bool,
+) -> (RecognitionStatus, RecognitionFailureStage) {
+    match failure_stage {
+        RecognitionFailureStage::Detection if is_detection_failure => {
+            (RecognitionStatus::Unrecognized, RecognitionFailureStage::Detection)
+        }
+        RecognitionFailureStage::None => {
+            (RecognitionStatus::Confirmed, RecognitionFailureStage::None)
+        }
+        stage => {
+            // 分类/映射/资源异常 → NeedsReview(原阶段)
+            (RecognitionStatus::NeedsReview, stage)
+        }
     }
 }
 
@@ -416,9 +445,11 @@ fn run_eye_stage(
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
+    use super::stage_to_status;
     use photo_domain::{RecognitionFailureStage, RecognitionStatus};
 
-    /// 测试失败阶段 → 状态映射的完备性（对应 pica recognition_pipeline_service.dart）
+    /// 测试失败阶段 → 状态映射的完备性（断言生产函数 stage_to_status，对应
+    /// pica recognition_pipeline_service.dart；生产路径与测试共用同一实现）
     #[test]
     fn test_failure_stage_to_status_mapping() {
         // 检测无框 → Unrecognized(Detection)
@@ -462,25 +493,5 @@ mod tests {
             stage_to_status(RecognitionFailureStage::None, false),
             (RecognitionStatus::Confirmed, RecognitionFailureStage::None)
         );
-    }
-
-    /// 辅助：模拟管线各失败阶段的逻辑
-    fn stage_to_status(
-        failure_stage: RecognitionFailureStage,
-        is_detection_failure: bool,
-    ) -> (RecognitionStatus, RecognitionFailureStage) {
-        match failure_stage {
-            RecognitionFailureStage::Detection if is_detection_failure => (
-                RecognitionStatus::Unrecognized,
-                RecognitionFailureStage::Detection,
-            ),
-            RecognitionFailureStage::None => {
-                (RecognitionStatus::Confirmed, RecognitionFailureStage::None)
-            }
-            stage => {
-                // 映射 0/多 → NeedsReview(Mapping)，其他 → NeedsReview
-                (RecognitionStatus::NeedsReview, stage)
-            }
-        }
     }
 }

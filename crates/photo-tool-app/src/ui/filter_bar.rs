@@ -293,7 +293,6 @@ fn filter_group(
 /// 交易终端风格筛选 chip：小圆角、1px 描边、text_xs。
 /// 选中态 = accent 描边 + accent 文字 + accent_dim 底色，
 /// 未选中 = border 描边 + muted 文字。
-#[allow(dead_code)]
 pub fn filter_chip(
     id: impl Into<ElementId>,
     label: &str,

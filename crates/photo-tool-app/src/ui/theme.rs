@@ -1,5 +1,5 @@
 use gpui::{
-    BoxShadow, Hsla, Pixels, Point, Rgba, Styled, hsla, px,
+    BoxShadow, Hsla, Point, Rgba, Styled, hsla, px,
 };
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Mutex;
@@ -99,60 +99,15 @@ impl ElevationIndex {
             }],
         }
     }
-    #[allow(dead_code)]
-    pub fn bg(self, colors: &ThemeColors) -> Hsla {
-        match self {
-            ElevationIndex::Background => colors.background,
-            ElevationIndex::Surface => colors.surface_background,
-            ElevationIndex::ElevatedSurface => colors.elevated_surface_background,
-            ElevationIndex::ModalSurface => colors.elevated_surface_background,
-        }
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════
-//  Spacing
-// ═══════════════════════════════════════════════════════════════
-
-#[allow(dead_code)]
-pub const SPACING: [f32; 8] = [4.0, 8.0, 12.0, 16.0, 24.0, 32.0, 40.0, 48.0];
-
-#[allow(dead_code)]
-pub fn spacing(level: usize) -> Pixels {
-    px(SPACING[level.min(7)])
-}
-
-#[allow(dead_code)]
-pub mod sp {
-    pub const XS: usize = 0;
-    pub const SM: usize = 1;
-    pub const MD: usize = 2;
-    pub const LG: usize = 3;
-    pub const XL: usize = 4;
-    pub const XXL: usize = 5;
-    pub const XXXL: usize = 6;
-    pub const HUGE: usize = 7;
 }
 
 // ═══════════════════════════════════════════════════════════════
 //  Border Radius
 // ═══════════════════════════════════════════════════════════════
 
-#[allow(dead_code)]
-pub const BORDER_RADIUS: f32 = 6.0;
-#[allow(dead_code)]
-pub const BORDER_RADIUS_LG: f32 = 10.0;
-#[allow(dead_code)]
-pub const BORDER_RADIUS_SM: f32 = 4.0;
-#[allow(dead_code)]
-pub const FOCUS_RING_WIDTH: f32 = 2.0;
-
 // ═══════════════════════════════════════════════════════════════
 //  Font
 // ═══════════════════════════════════════════════════════════════
-
-#[allow(dead_code)]
-pub const DEFAULT_FONT_FAMILY: &str = "Microsoft YaHei UI";
 
 /// 等宽字体：EXIF 数值、文件大小、状态栏计数等数字场景统一使用。
 /// Cascadia Mono 随 Windows 11 预装；缺失时 GPUI 自动回落系统默认。
@@ -410,14 +365,6 @@ mod tests {
         let s = ElevationIndex::Surface.shadow()[0].blur_radius;
         let m = ElevationIndex::ModalSurface.shadow()[0].blur_radius;
         assert!(m > s);
-    }
-
-    #[test]
-    fn test_spacing_values() {
-        assert_eq!(SPACING[0], 4.0);
-        assert_eq!(SPACING[4], 24.0);
-        assert_eq!(spacing(0), px(4.0));
-        assert_eq!(spacing(10), px(48.0));
     }
 
     #[test]

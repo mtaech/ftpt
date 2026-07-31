@@ -7,6 +7,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 
 use crate::ui::theme;
+use crate::ui::format_file_size;
 
 /// Render a single thumbnail cell in the grid.
 /// `use<>` 精确捕获：返回元素不借用 capture（全部构建 owned 值），
@@ -100,16 +101,6 @@ pub fn render_grid_cell(
         .when(capture.color_label != ColorLabel::None, |d| {
             d.child(render_color_label_bar(capture.color_label))
         })
-}
-
-/// 文件大小格式化为 KB/MB 可读字符串
-fn format_file_size(size: Option<u64>) -> String {
-    match size {
-        Some(bytes) if bytes >= 1_048_576 => format!("{:.1} MB", bytes as f64 / 1_048_576.0),
-        Some(bytes) if bytes >= 1024 => format!("{:.0} KB", bytes as f64 / 1024.0),
-        Some(bytes) => format!("{bytes} B"),
-        None => "\u{2014}".into(),
-    }
 }
 
 fn render_thumbnail(

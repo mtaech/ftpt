@@ -69,6 +69,13 @@ fn extract_exif_regular(path: &Path) -> Result<ExifMetadata, ExifError> {
 
     let mut meta = ExifMetadata::default();
 
+    // GPS 标签（ref 字段可能出现在值字段之前或之后，先收集再统一应用符号）
+    let mut gps_lat: Option<(f64, f64, f64)> = None;
+    let mut gps_lon: Option<(f64, f64, f64)> = None;
+    let mut gps_alt: Option<f64> = None;
+    let mut lat_ref: Option<char> = None;
+    let mut lon_ref: Option<char> = None;
+
     for field in exif.fields() {
         let value = field.display_value().to_string();
         match field.tag {
@@ -114,9 +121,29 @@ fn extract_exif_regular(path: &Path) -> Result<ExifMetadata, ExifError> {
             exif::Tag::ColorSpace => {
                 meta.color_space = Some(value);
             }
+            exif::Tag::GPSLatitude => gps_lat = gps_dms_to_tuple(&field.value),
+            exif::Tag::GPSLongitude => gps_lon = gps_dms_to_tuple(&field.value),
+            exif::Tag::GPSAltitude => gps_alt = gps_rational_to_f64(&field.value),
+            exif::Tag::GPSLatitudeRef => {
+                lat_ref = value.trim_matches('"').chars().next();
+            }
+            exif::Tag::GPSLongitudeRef => {
+                lon_ref = value.trim_matches('"').chars().next();
+            }
             _ => {}
         }
     }
+
+    // 与 rawlib 路径产出格式一致：(度, 分, 秒) 元组，南纬/西经符号施加在度分量上
+    if let Some((deg, min, sec)) = gps_lat {
+        let deg = if lat_ref == Some('S') { -deg } else { deg };
+        meta.gps.latitude = Some((deg, min, sec));
+    }
+    if let Some((deg, min, sec)) = gps_lon {
+        let deg = if lon_ref == Some('W') { -deg } else { deg };
+        meta.gps.longitude = Some((deg, min, sec));
+    }
+    meta.gps.altitude = gps_alt;
 
     // 文件大小
     if let Ok(fs) = std::fs::metadata(path) {
@@ -124,6 +151,24 @@ fn extract_exif_regular(path: &Path) -> Result<ExifMetadata, ExifError> {
     }
 
     Ok(meta)
+}
+
+/// 将 GPS 经纬度的有理数分量（度/分/秒）转为 (度, 分, 秒) 元组
+fn gps_dms_to_tuple(value: &exif::Value) -> Option<(f64, f64, f64)> {
+    match value {
+        exif::Value::Rational(ratios) if ratios.len() >= 3 => {
+            Some((ratios[0].to_f64(), ratios[1].to_f64(), ratios[2].to_f64()))
+        }
+        _ => None,
+    }
+}
+
+/// 将 GPS 单值有理数（如海拔，米）转为 f64
+fn gps_rational_to_f64(value: &exif::Value) -> Option<f64> {
+    match value {
+        exif::Value::Rational(ratios) if !ratios.is_empty() => Some(ratios[0].to_f64()),
+        _ => None,
+    }
 }
 
 /// 从 RAW 文件读取 EXIF（通过 rawlib 0.7+ 的 LibRaw C API）

@@ -148,9 +148,22 @@ pub struct CaptureMeta {
     pub bird_bbox: Option<BBox>,
 }
 
+/// 从 Capture 构造 CaptureMeta。注意 index 固定为 0（历史调用约定，
+/// 预览/EXIF 缓存会按 index 错绑），新代码请改用 [`CaptureMeta::from_capture`]。
 impl From<&Capture> for CaptureMeta {
     fn from(c: &Capture) -> Self {
-        let primary = &c.source_files[c.primary_index];
+        Self::from_capture(c, 0)
+    }
+}
+
+impl CaptureMeta {
+    /// 从 Capture 构造 CaptureMeta，显式指定 index（预览图/EXIF 回填/缩略图缓存的键）。
+    /// source_files 为空或 primary_index 越界时退化到首个源文件/空主路径，绝不 panic。
+    pub fn from_capture(c: &Capture, index: usize) -> Self {
+        let primary = c
+            .source_files
+            .get(c.primary_index)
+            .or_else(|| c.source_files.first());
         let ext_list: Vec<String> = c
             .source_files
             .iter()
@@ -163,17 +176,19 @@ impl From<&Capture> for CaptureMeta {
             })
             .collect();
         Self {
-            index: 0,
+            index,
             base_name: c.base_name.clone(),
-            primary_path: primary.path.to_string_lossy().to_string(),
-            primary_format: primary.format.to_string(),
+            primary_path: primary
+                .map(|f| f.path.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            primary_format: primary.map(|f| f.format.to_string()).unwrap_or_default(),
             stack_count: c
                 .source_files
                 .iter()
                 .enumerate()
                 .filter(|(i, _f)| *i != c.primary_index)
                 .count(),
-            file_size: primary.file_size,
+            file_size: primary.and_then(|f| f.file_size),
             date_taken: None,
             extensions: ext_list,
             camera_make: None,
@@ -194,9 +209,7 @@ impl From<&Capture> for CaptureMeta {
             bird_bbox: None,
         }
     }
-}
 
-impl CaptureMeta {
     /// 填充 EXIF 摘要字段（由调用方负责提取 ExifMetadata，本方法只做字段拷贝）
     pub fn enrich_with_exif(&mut self, exif: &ExifMetadata) {
         self.camera_make = exif.camera.make.clone();
@@ -302,12 +315,6 @@ pub enum SortBy {
 pub enum SortDirection {
     Ascending,
     Descending,
-}
-
-/// 删除模式（仅支持移到回收站）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DeleteMode {
-    Trash,
 }
 
 /// 批量文件操作类型

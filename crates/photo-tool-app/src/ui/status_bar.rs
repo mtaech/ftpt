@@ -23,7 +23,13 @@ pub fn render_status_bar(
         .and_then(|p| p.to_str())
         .unwrap_or("无目录");
     let truncated = if path_str.len() > 48 {
-        format!("…{}", &path_str[path_str.len() - 45..])
+        // 按字符边界截断：中文字符 3 字节，直接按字节切片会落在字符中间 panic
+        let start = path_str
+            .char_indices()
+            .nth_back(45)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        format!("…{}", &path_str[start..])
     } else {
         path_str.to_string()
     };
@@ -37,7 +43,7 @@ pub fn render_status_bar(
     } else {
         (0, None)
     };
-    let scanning = view.scan_task.is_some();
+    let scanning = view.scan_in_progress;
 
     let tooltip_text = if view.batch_in_progress {
         if view.batch_progress_msg.is_empty() {

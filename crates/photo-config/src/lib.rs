@@ -13,35 +13,14 @@ pub enum ConfigError {
     Migration(#[from] rusqlite_migration::Error),
     #[error("JSON 序列化失败: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("TOML 解析失败: {0}")]
+    Toml(#[from] toml::de::Error),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Theme {
     Light,
     Dark,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub enum ThumbnailCacheMode {
-    None,
-    Persistent,
-    Volatile,
-}
-
-impl Default for ThumbnailCacheMode {
-    fn default() -> Self {
-        Self::Persistent
-    }
-}
-
-impl ThumbnailCacheMode {
-    pub fn is_enabled(&self) -> bool {
-        !matches!(self, Self::None)
-    }
-    pub fn is_volatile(&self) -> bool {
-        matches!(self, Self::Volatile)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,19 +32,12 @@ pub struct AppConfig {
     #[serde(default)]
     pub recent_directories: Vec<String>,
     pub theme: Theme,
-    pub window_width: u32,
-    pub window_height: u32,
     pub left_panel_width: u32,
     pub right_panel_visible: bool,
     /// 右侧信息面板宽度（px）。旧配置无此字段时默认 200。
     #[serde(default = "default_right_panel_width")]
     pub right_panel_width: u32,
-    pub thumbnail_cache_mode: ThumbnailCacheMode,
-    pub max_cache_size_mb: u64,
     pub font_family: String,
-    /// 自定义缩略图缓存目录。None 时用 config 所在目录的 thumbnails/ 子目录。
-    #[serde(default)]
-    pub cache_directory: Option<String>,
     /// 批量识别线程数（1-4）。低配设备减小，高配设备加大。默认 2。
     #[serde(default = "default_recognition_threads")]
     pub recognition_thread_count: u32,
@@ -91,15 +63,10 @@ impl Default for AppConfig {
             last_directory: None,
             recent_directories: vec![],
             theme: Theme::Light,
-            window_width: 1400,
-            window_height: 900,
             left_panel_width: 180,
             right_panel_visible: true,
             right_panel_width: 200,
-            thumbnail_cache_mode: ThumbnailCacheMode::default(),
-            max_cache_size_mb: 500,
             font_family: default_font_family(),
-            cache_directory: None,
             recognition_thread_count: default_recognition_threads(),
         }
     }
@@ -126,14 +93,7 @@ pub fn determine_config_path() -> Result<PathBuf, std::io::Error> {
         return Ok(portable);
     }
 
-    let exe_str = exe.to_string_lossy().to_lowercase();
-    let is_system = exe_str.contains("\\program files")
-        || exe_str.contains("\\windows")
-        || exe_str.starts_with("/usr/")
-        || exe_str.starts_with("/opt/")
-        || exe_str.starts_with("/bin/");
-
-    if !is_system {
+    if !is_system_location(&exe) {
         return Ok(portable);
     }
 
@@ -147,15 +107,40 @@ pub fn determine_config_path() -> Result<PathBuf, std::io::Error> {
     Ok(cfg)
 }
 
+/// 判断 exe 是否位于系统安装位置。
+/// 按路径段/前缀匹配而非子串匹配，避免 `E:\backup\Windows\ftpt.exe` 这类路径被误判为系统安装。
+fn is_system_location(exe: &Path) -> bool {
+    let lower = exe.to_string_lossy().to_lowercase();
+    // Unix 系统目录前缀
+    if lower.starts_with("/usr/") || lower.starts_with("/opt/") || lower.starts_with("/snap/") {
+        return true;
+    }
+    // Windows：仅当系统目录紧跟盘符根目录时才视为系统安装（C:\Windows\...、C:\Program Files\...），
+    // 普通目录下同名文件夹（如 E:\backup\Windows\...）仍视为便携
+    if lower.as_bytes().get(1) == Some(&b':') && lower.as_bytes().get(2) == Some(&b'\\') {
+        let rest = &lower[3..];
+        return rest.starts_with("windows\\")
+            || rest.starts_with("program files\\")
+            || rest.starts_with("program files (x86)\\");
+    }
+    false
+}
+
 pub fn load_config(path: &Path) -> Result<AppConfig, ConfigError> {
     if path.exists() {
         return load_from_sqlite(path);
     }
     let toml_path = path.with_file_name("PT.toml");
     if toml_path.exists() {
-        if let Ok(cfg) = load_from_toml(&toml_path) {
-            save_config(path, &cfg)?;
-            return Ok(cfg);
+        match load_from_toml(&toml_path) {
+            Ok(cfg) => {
+                save_config(path, &cfg)?;
+                return Ok(cfg);
+            }
+            Err(e) => {
+                // 旧 TOML 损坏时不静默迁移成全默认 PT.db：保留原文件，仅记日志
+                eprintln!("[photo-config] PT.toml 解析失败，跳过迁移（沿用默认配置）: {e}");
+            }
         }
     }
     Ok(AppConfig::default())
@@ -163,24 +148,63 @@ pub fn load_config(path: &Path) -> Result<AppConfig, ConfigError> {
 
 fn load_from_toml(path: &Path) -> Result<AppConfig, ConfigError> {
     let content = std::fs::read_to_string(path)?;
-    Ok(toml::from_str(&content).unwrap_or_default())
+    Ok(toml::from_str(&content)?)
 }
 
 fn load_from_sqlite(path: &Path) -> Result<AppConfig, ConfigError> {
+    let load = || -> Result<AppConfig, ConfigError> {
+        let mut conn = rusqlite::Connection::open(path)?;
+        config_migrations().to_latest(&mut conn)?;
+        let json: Option<Option<String>> = conn
+            .query_row(
+                "SELECT data FROM config WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(match json.flatten() {
+            Some(j) => serde_json::from_str(&j).unwrap_or_default(),
+            None => AppConfig::default(),
+        })
+    };
+    match load() {
+        Ok(cfg) => Ok(cfg),
+        // PT.db 被截断/写成垃圾字节时，open 惰性成功、迁移/查询阶段才报 SQLITE_NOTADB。
+        // 此时把损坏文件改名保留现场，重建空库并返回默认配置，避免后续 load/save 永久失败。
+        Err(e) if is_database_corruption(&e) => {
+            let mut backup_name = path.as_os_str().to_os_string();
+            backup_name.push(".bak");
+            let backup = PathBuf::from(backup_name);
+            // 先清理旧备份，避免 Windows 上 rename 因目标已存在而失败
+            let _ = std::fs::remove_file(&backup);
+            std::fs::rename(path, &backup)?;
+            rebuild_fresh_database(path)?;
+            Ok(AppConfig::default())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// 遍历错误链，判断是否为“库文件损坏”（SQLITE_NOTADB：目标文件不是 SQLite 数据库）。
+/// 普通 IO 错误（权限、路径不存在等）不属于损坏，仍会照常传播。
+fn is_database_corruption(err: &ConfigError) -> bool {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = cur {
+        if let Some(sqlite_err) = e.downcast_ref::<rusqlite::Error>()
+            && sqlite_err.sqlite_error_code() == Some(rusqlite::ErrorCode::NotADatabase)
+        {
+            return true;
+        }
+        cur = e.source();
+    }
+    false
+}
+
+/// 以全新库重建（空库并应用迁移），保证后续 load/save 可正常落盘。
+fn rebuild_fresh_database(path: &Path) -> Result<(), ConfigError> {
     let mut conn = rusqlite::Connection::open(path)?;
     config_migrations().to_latest(&mut conn)?;
-    let json: Option<String> = conn
-        .query_row(
-            "SELECT data FROM config WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?
-        .flatten();
-    match json {
-        Some(j) => Ok(serde_json::from_str(&j).unwrap_or_default()),
-        None => Ok(AppConfig::default()),
-    }
+    Ok(())
 }
 
 pub fn save_config(path: &Path, config: &AppConfig) -> Result<(), ConfigError> {

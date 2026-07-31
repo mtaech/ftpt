@@ -4,12 +4,12 @@
 
 Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览、标记、识别和转换照片。Cargo workspace 含 5 个成员：
 
-- `photo-domain` — 纯类型叶子 crate（Capture, ExifMetadata, XmpMetadata, Recognition 类型, 枚举），零外部依赖
-- `photo-engine` — 文件操作引擎（scanner, exif/xmp 读写, thumbnail, ops, convert, folder_db），**全同步**
+- `photo-domain` — 纯类型叶子 crate（Capture, ExifMetadata, XmpMetadata, Recognition 类型, 枚举），依赖仅 serde + chrono
+- `photo-engine` — 文件操作引擎（scanner, ops, exif, thumbnail, convert, folder_db, batch_ops），**全同步**
 - `photo-recognize` — 鸟类识别管线（YOLO 检测 → 鸟种分类 → 名录映射 → 鸟眼锐度，ONNX Runtime），**全同步**
 - `photo-config` — 配置读写（TOML + SQLite 持久化）
 - `photo-tool-app` — GPUI 前端（暗色主题，三栏布局，全键盘操作）
-核心工作流：**目录扫描 → RAW+JPEG 配对 → 浏览/标记/筛选 → 鸟类识别（单张/批量）→ 文件操作（删除/移动/复制/重命名）→ 格式转换**。识别子系统设计见 `docs/adr/0003-recognition-subsystem.md`。
+核心工作流：**目录扫描 → 浏览/标记/筛选 → 鸟类识别（单张/批量）→ 文件操作（删除/移动/复制/重命名）→ 格式转换**。识别子系统设计见 `docs/adr/0003-recognition-subsystem.md`。
 
 ---
 
@@ -43,12 +43,12 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 
 ### 核心数据流
 
-1. **scanner** → `Vec<Capture>`：walkdir 单层（`max_depth(1)`）扫描，按文件名 stem 小写归组，配对 JPEG+RAW+sidecar，`primary_index` 取 `display_priority()` 最小的非旁车文件
+1. **scanner** → `Vec<Capture>`：walkdir 单层（`max_depth(1)`）扫描，**每个图片文件一个 Capture**（JPG/RAW 不再堆叠配对）；扫描期不做任何筛选，识别状态等元数据在扫描后才从 folder_db 读取，全部筛选由 app 层 `state/filter.rs` 在 CaptureMeta 层面执行
 2. **Capture** → **exif**：提取 EXIF（常规图 kamadak-exif，RAW 走 `rawlib::exif`）；`CaptureMeta::enrich_with_exif` 回填摘要（类型 `ExifMetadata` 定义在 domain，提取机械在 engine）
 3. **Capture** → **ops**：删除（回收站/永久）/移动（跨设备 copy+delete 回退）/复制/批量重命名
-4. **SourceFile** → **thumbnail**：磁盘缓存 JPEG 字节（缓存键 = `DefaultHasher(path+size)` 的 `{:016x}.jpg`）；RAW 提取内嵌预览，常规图优先 EXIF 内嵌缩略图
+4. **SourceFile** → **thumbnail**：磁盘缓存 JPEG 字节（缓存键 = `DefaultHasher(path+size)` 的 `{:016x}.jpg`，目录 = 照片目录 `.pt/thumbs`，每文件夹独立）；RAW 完整解码（half_size 预览选项）母版按 `u32::MAX` 键存一份，网格缩略图/预览/全分辨率/识别均从母版 DCT 派生（不落盘）；内嵌 JPEG 长边 ≥2048（RW2/DNG 大内嵌）时直接用作母版省解码；常规图优先 EXIF 内嵌缩略图
 5. **Capture** → **convert**：RAW 内嵌预览→JPEG、常规图缩放（Lanczos3）
-6. **Capture** → **recognize**：`photo-recognize` 管线（YOLO 检测鸟体 → 鸟框内 eye.onnx 检测眼 → bird_model 分类 Top-5 → `sp_cls_map` JOIN `animal_info` 名录映射）→ `Recognition` 三态（Confirmed/NeedsReview/Unrecognized）+ 连续鸟眼锐度分（NULL 兜底，不影响三态）→ `folder_db` upsert 到文件夹级 `.pt/data.db`。鸟眼锐度设计见 `docs/adr/0005-eye-sharpness-stage.md`
+6. **Capture** → **recognize**：`photo-recognize` 管线（YOLO 检测鸟体 → 整图 eye.onnx 检测眼（双槽一致性选点，CPU 推理）→ bird_model 分类 Top-5 → `sp_cls_map` JOIN `animal_info` 名录映射）→ `Recognition` 三态（Confirmed/NeedsReview/Unrecognized）+ 连续鸟眼锐度分（NULL 兜底，不影响三态）→ `folder_db` upsert 到文件夹级 `.pt/data.db`。鸟眼锐度设计见 `docs/adr/0005-eye-sharpness-stage.md`
 7. **import**（近期移除，待重建）：检测可移动设备 → DCIM 递归扫描 → 按 EXIF 日期建子目录 → 委托 **ops** 移动/复制
 
 ### 模块依赖关系
@@ -57,7 +57,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 - `photo-engine` 依赖 `photo-domain`（单向 DAG，由 crate 边界强制）
 - `photo-recognize` 依赖 `photo-domain`（RAW 输入解码复用 `photo_engine::thumbnail::decode_raw_preview`，不反向依赖）
 - `photo-config` 独立，无 crate 内依赖
-- `domain` 是纯叶子：依赖仅 `std` + `serde` + `chrono` + `thiserror`，不引用任何内部模块
+- `domain` 是纯叶子：依赖仅 `std` + `serde` + `chrono`，不引用任何内部模块
 
 ---
 
@@ -65,11 +65,11 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 
 |-|-|
 | `crates/photo-domain/src/domain.rs` | 纯类型（Capture, ExifMetadata, XmpMetadata, 枚举），零外部 crate 依赖 |
-| `crates/photo-engine/src/` | 文件机械：scanner, ops, exif, xmp, thumbnail, convert, folder_db（全部同步） |
+| `crates/photo-engine/src/` | 文件机械：scanner, ops, exif, thumbnail, convert, folder_db, batch_ops, cache（全部同步） |
 | `crates/photo-engine/src/folder_db.rs` | 文件夹级 SQLite（`.pt/data.db`）：exif_cache / xmp_meta / **recognition** 三表，rusqlite_migration 版本化 |
 | `crates/photo-recognize/src/` | 识别管线：lib.rs(Recognizer 门面), detect(YOLO), classify(bird_model), catalog(名录映射), pipeline |
 | `crates/photo-config/src/lib.rs` | 配置读写（TOML + SQLite 持久化）|
-| `crates/photo-tool-app/src/state/app.rs` | RootView：全局状态 + `dispatch_action()` 路由所有交互 |
+| `crates/photo-tool-app/src/state/` | 状态层（拆分后 8 文件）：app.rs(RootView + dispatch_action 路由) / scan.rs(扫描+EXIF回填+DB同步) / image_cache.rs(缩略图/预览/全分辨率加载) / recognition.rs(单张/批量/框选识别) / metadata.rs(评分/旗标/色标/删除) / filter.rs(筛选排序+鸟种下拉) / batch_ops.rs(批量文件操作) / preview_math.rs(缩放平移坐标纯函数) |
 | `crates/photo-tool-app/src/ui/layout.rs` | 三栏弹性布局（sidebar \| grid/preview \| info_panel） |
 | `crates/photo-tool-app/src/ui/theme.rs` | Catppuccin Mocha 暗色主题常量 |
 | `local-lib/` | 预编译 Linux `libraw.so`/`libraw_r.so`（不纳入版本控制） |
@@ -97,7 +97,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 ### 模块组织
 
 - `photo-domain/src/lib.rs` 声明 `pub mod domain` + `pub use domain::*`（re-export 让消费者直接 `photo_domain::Capture`）
-- `photo-engine/src/lib.rs` 声明 7 个 `pub mod`（scanner, ops, exif, xmp, thumbnail, convert, folder_db）
+- `photo-engine/src/lib.rs` 声明 8 个 `pub mod`（scanner, ops, exif, thumbnail, convert, folder_db, batch_ops, cache）；XMP 读写实现在 folder_db 的 xmp_meta 表，无独立 xmp.rs
 - `photo-config/src/lib.rs` 即库根——config 模块就是 lib.rs 本身
 - 消费者写全路径：`photo_engine::scanner::scan_directory`
 
@@ -121,7 +121,7 @@ pub enum OpError {
 ### 序列化
 
 - 跨边界结构体统一 `#[derive(Serialize, Deserialize)]` + `#[serde(rename_all = "camelCase")]`；纯枚举（`Rating`/`ColorLabel`/`Flag`/`Theme` 等）不加 rename
-- XMP 不用 XML 解析器：字符串查找 + `regex_lite` 正则重写 `pt:Rating`/`pt:ColorLabel`/`pt:Flag` 属性（自定义命名空间 `xmlns:pt="http://ns.phototool.app/pt/1.0/"`）
+- 评分/色标/旗标（XMP 元数据）不走 XML 解析：由 folder_db 的 `xmp_meta` 表持久化（`put_xmp`/`get_xmp`，键 = 完整路径），ops 层 `sync_*_xmp` 在删除/移动/重命名时同步
 
 ### 同步 vs 异步
 
@@ -136,8 +136,8 @@ pub enum OpError {
 
 ### 已知陷阱
 
-- `quick-xml` 在根 `Cargo.toml` 的 `[workspace.dependencies]` 中声明但 `photo-engine` src 中无引用
-- `scanner::apply_filter` 当前仅实现 `text_search`（已扩展为同时匹配文件名与 `bird_name`）与 `recognition_filter`；`FilterCriteria` 其余字段未生效（`paired_only`, `date_range`, `flag_filter`, `unflagged_filter` 等被 scanner 忽略）
+- `quick-xml` 在根 `Cargo.toml` 的 `[workspace.dependencies]` 中声明但各 crate src 无引用
+- 筛选全部在 app 层 `state/filter.rs::apply_filter_and_sort` 的 CaptureMeta 层面执行（format/鸟种/日期/评分≥N/色标/旗标/未标记旗标/识别状态均已实现）；scanner 不做筛选，`FilterCriteria` 传给 `scan_directory` 仅为签名兼容
 - 使用了 let-chains（edition 2024 特性），如 `photo-config/config.rs` 便携路径判断
 
 ### 调试：GPUI 事件处理器无声失败
@@ -226,11 +226,11 @@ gpui-component 项目位于 `E:\Dev\Code\gpui-component`，含完整源码和本
 | `rayon` | 线程池，core 同步调用异步化 |
 | `image 0.25` | JPEG/PNG/TIFF/WEBP/BMP/GIF 编解码与缩放（default-features=false + 6 features） |
 | `kamadak-exif 0.6` | 常规图 EXIF 解析 |
+| `rawlib 0.7.1`（workspace 内嵌 `crates/rawlib`） | RAW 解码/EXIF/内嵌缩略图；`build.rs` 自动链接 `libraw/` 预编译库（Windows msvc 静态库；Linux 优先系统库，缺失回退 bundled gnu），并编译 `half_size.c`。源码内嵌便于修改解码逻辑（勿回退 crates.io 版本） |
 | `trash 4` | 移到回收站（跨平台） |
 | `walkdir 2` | 单层目录扫描 |
 | `chrono 0.4` / `toml 0.8` / `serde 1` | 日期 / 配置 / 序列化 |
 | `ort 2.0.0-rc.10`（photo-recognize） | ONNX Runtime 绑定；`download-binaries` 静态链接运行时，Windows 走 DirectML EP（失败回退 CPU），仅需随包携带 `DirectML.dll` |
-| `regex-lite 0.1` | XMP 属性重写 |
 | `thiserror 2` | 错误 derive |
 | `tempfile 3`（dev） | 测试临时目录 |
 
@@ -242,9 +242,32 @@ gpui-component 项目位于 `E:\Dev\Code\gpui-component`，含完整源码和本
 
 ---
 
+## 近期修复记录（2026-07-31 审查修复）
+
+全仓代码审查后按严重度修复，含：
+
+- **数据正确性**：`copy_recognitions_to` 索引错位修复（识别行不再写入错误目标）；跨设备 move 不再静默覆盖已存在目标；批量移动/复制后的识别行/XMP 同步函数已就绪但 app 层尚未接线（`execute_batch_ops` 只搬文件，见 ops.rs sync_*）
+- **崩溃路径**：空目录批量识别 `chunks(0)` 卡死已加忙/空守卫；status_bar 长中文路径截断改按字符边界；反向/越界 bbox 的 u32 下溢（classify/debug_eye）归一化修复；损坏 pica_ref.db 不再 panic（降级 NeedsReview）
+- **功能**：评分/旗标/色标/识别状态筛选在 CaptureMeta 层全部实现（scanner 不再清空）；含 alpha 图片转 JPG 展平；常规图 EXIF 现提取 GPS；乐观更新失败回滚 UI
+- **状态一致性**：扫描/删除换代（`scan_generation`）丢弃过期加载/回填结果，防缩略图/预览张冠李戴；`scan_task` 死字段替换为换代计数 + `scan_in_progress` 指示；导航清空未完成框选
+- **健壮性**：损坏 PT.db 自愈（改名 .bak + 重建）；`CaptureMeta::from_capture(c, index)` 显式索引；config 死字段/domain 死枚举（DeleteMode）/engine 死模块（cache.rs）/死依赖清除；folder_db 补上缺失 #[test]；stage_to_status 生产化后测试驱动真实映射；`ThumbnailCache::prune` 曾接线（扫描后按 `max_cache_size_mb` 清理），后随缓存按文件夹隔离（`.pt/thumbs`）移除
+- **结构**：app.rs（约 2870 行）按接缝拆分为 state/ 8 文件；ui 死主题 token、重复 format_file_size、调试日志清除
+
+## RAW 预览加载优化（2026-07-31）
+
+- **rawlib 内嵌**：`E:\Dev\Code\rawlib` 复制为 workspace 成员 `crates/rawlib`（`build.rs` 自动链接 `libraw/` 预编译库，勿回退 crates.io 版本）
+- **直接解码**：RAW 预览不再用内嵌小图（多数相机 160-640px，放大糊）——`decode_raw_impl` 直接完整解码（`DecodeOptions::preview` = half_size+bilinear+8bit，约 4x 加速）；内嵌 JPEG 长边 ≥2048（RW2/DNG）时仍直接用省解码
+- **母版缓存**：`ThumbnailCache` 对 RAW 只存一份母版（`u32::MAX` 键，完整解码 JPEG），缩略图/预览/全分辨率从母版 DCT 派生（不落盘）——同一文件不再按尺寸重复 LibRaw open+解码；`CACHE_VERSION` 2→3（旧内嵌小图缓存作废）
+- **双线程池**：`Worker` 拆 `pool`（批量：预加载/EXIF/同步/识别）+ `fast_pool`（交互：预览/全分辨率/网格懒加载，2 线程）——预览不再被 50 个预加载任务排队阻塞；预览预取焦点图优先入队；preload 补 `grid_loading` 哨兵防与懒加载重复生成
+- **EXIF 后台化**：扫描闭包只查 `exif_cache`，未命中交给 `spawn_enrich_tasks` 并发提取并写回缓存（不再串行 LibRaw open）；全部完成后重排一次（日期排序正确）
+- **convert**：RAW→JPEG 转换从内嵌小图改为完整解码（输出清晰；`max_dimension=0` 映射 `u32::MAX`）
+- **缓存按文件夹隔离**：缩略图缓存目录改为照片目录 `.pt/thumbs`（扫描时重建，与 `.pt/data.db` 同级），删除文件夹即清空缓存；移除全局 `max_cache_size_mb` 配置与 `prune` 调用（config 字段、设置面板 UI 一并删除）
+
+---
+
 ## 测试与 QA
 
-- 全部 **135 个 `#[test]`**（+ 1 个 `#[ignore]` 真机冒烟）分布在 4 个 crate 的源文件末尾内联 `#[cfg(test)] mod tests
+- 全部 **137 个 `#[test]`**（+ 1 个 doctest、1 个 `#[ignore]` 真机冒烟）分布在 4 个 crate 的源文件末尾内联 `#[cfg(test)] mod tests
 - 无外部 `tests/` 目录、无异步测试、无第三方测试框架（唯一 dev-dep：`tempfile`）
 - 真机识别冒烟：`cargo test -p photo-recognize -- --ignored`（需 worktree/发布根有 `models/` 与 `data/pica_ref.db`）；单文件手动识别工具：`cargo run -p photo-recognize --example recognize_file -- <图片路径>`（全管线）/ `recognize_region -- <图片> <x1> <y1> <x2> <y2>`（跳过检测，手动框选区域直接分类）
 
@@ -254,15 +277,14 @@ gpui-component 项目位于 `E:\Dev\Code\gpui-component`，含完整源码和本
 |---|---|---|
 | `photo-domain::domain.rs` | 23 | 扩展名解析、RAW 白名单、enrich_with_xmp/recognition、ExifMetadata 默认/摘要、XmpMetadata 枚举转换、BBox/RecognitionStatus/RecognitionFilter 序列化与状态映射 |
 | `photo-config::lib.rs` (config) | 6 | 默认值、TOML 保存/加载往返、配置路径 |
-| `photo-engine::scanner.rs` | 8 | JPEG+RAW 配对、大小写、sidecar 分离、忽略视频 |
+| `photo-engine::scanner.rs` | 8 | 每文件一个 Capture、大小写、sidecar 分离、忽略视频 |
 | `photo-engine::ops.rs` | 8+ | 移动/复制/重命名/删除（含 sidecar）、命名冲突、批量跳过缺失、识别行同步（sync_delete/copy/rename） |
 | `photo-engine::thumbnail.rs` | 6 | 缓存命中、键唯一性、stats/clear、prune 淘汰最旧、错误路径 |
-| `photo-engine::exif.rs` | 5 | 无 EXIF 报错、不存在文件、file_size 始终填充 |
+| `photo-engine::exif.rs` | 5 | 无 EXIF 报错、不存在文件、file_size 始终填充（含 GPS 提取） |
 | `photo-engine::convert.rs` | 7 | resize 三分支、格式分发、RAW 错误、输出路径命名 |
-| `photo-engine::xmp.rs` | 6 | xmp_path、读写往返、不存在的文件返回默认值、更新已有文件 |
-| `photo-engine::folder_db.rs` | 15 | 识别表建表/迁移（含 eye_sharpness/eye_bbox 列）、upsert/get/delete、rename/copy 同步、all_recognitions、旧版 cache.db 迁移 |
-| `photo-recognize::lib.rs/pipeline.rs/eye.rs/sharpness.rs` | 30 | 阶段→状态映射、输入源解析（JPEG/RAW）、检测框变换、softmax/Top-5、名录映射 0/1/多、进度回调、眼关键点解析与坐标映射、锐度融合单调性、eye.onnx 缺失报错；另 1 个 `#[ignore]` 真机冒烟 |
-| `photo-tool-app` | 19 | action/状态工具函数 |
+| `photo-engine::folder_db.rs` | 16 | 识别表建表/迁移（含 eye_sharpness/eye_bbox 列）、upsert/get/delete、rename/copy 同步、all_recognitions、旧版 cache.db 迁移、sync_with_scan 三表清理+指纹重提取 |
+| `photo-recognize::lib.rs/pipeline.rs/eye.rs/sharpness.rs` | 31 | 阶段→状态映射（生产函数 stage_to_status 驱动）、输入源解析（JPEG/RAW）、检测框变换、softmax/Top-5、名录映射 0/1/多、进度回调、眼关键点解析与坐标映射、锐度融合单调性、eye.onnx 缺失报错；另 1 个 `#[ignore]` 真机冒烟 |
+| `photo-tool-app` | 18 | action/状态工具函数（含预览数学纯函数） |
 
 ### 测试辅助
 

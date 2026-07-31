@@ -78,29 +78,40 @@ impl CatalogDb {
     }
 
     /// 内部：查询类别号对应的动物记录。
+    ///
+    /// 名录库损坏/缺失 schema 时 prepare/query 失败：记录警告并返回空 Vec，
+    /// 由 [`resolve_class`] 自然映射为 `(None, Mapping)` → NeedsReview 兑底，绝不 panic。
     fn query_animal(&self, cls: u32) -> Vec<BirdMatch> {
         // sql: 与 pica DbService.getBirdRecordsByClassIndex 对等
         // Dart 源码: pica/lib/services/bird_label_resolver.dart:18
-        let mut stmt = self
-            .conn
-            .prepare_cached(
-                "SELECT a.id, a.cn_name, a.latin_name \
-                 FROM sp_cls_map m \
-                 JOIN animal_info a ON a.latin_name = m.species \
-                 WHERE m.cls = ?1",
-            )
-            .expect("名录库映射查询编译失败（schema 不符？）");
+        let mut stmt = match self.conn.prepare_cached(
+            "SELECT a.id, a.cn_name, a.latin_name \
+             FROM sp_cls_map m \
+             JOIN animal_info a ON a.latin_name = m.species \
+             WHERE m.cls = ?1",
+        ) {
+            Ok(stmt) => stmt,
+            Err(e) => {
+                tracing::warn!("[名录] 映射查询编译失败（schema 不符？）: {e}");
+                return Vec::new();
+            }
+        };
 
-        stmt.query_map([cls], |row| {
+        let rows = match stmt.query_map([cls], |row| {
             Ok(BirdMatch {
                 bird_id: row.get(0)?,
                 cn_name: row.get(1)?,
                 latin_name: row.get(2)?,
             })
-        })
-        .expect("名录库查询执行失败")
-        .filter_map(|r| r.ok())
-        .collect()
+        }) {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("[名录] 映射查询执行失败: {e}");
+                return Vec::new();
+            }
+        };
+
+        rows.filter_map(|r| r.ok()).collect()
     }
 }
 

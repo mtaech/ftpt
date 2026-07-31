@@ -1,4 +1,4 @@
-//! 鸟眼检测：从裁剪的鸟体区域跑 eye.onnx → 定位眼关键点。
+//! 鸟眼检测：整图跑 eye.onnx → 定位眼关键点。
 //!
 //! 管线位置：第四阶段「鸟眼锐度」——在识别管线得到鸟框之后运行。
 //!
@@ -6,8 +6,16 @@
 //!
 //! 输出张量 `[1, 300, 12]`，每行：
 //! `[x1, y1, x2, y2(像素), conf, cls, kpt1(x, y, conf), kpt2(x, y, conf)]`
-//! ——鸟框恒为整幅（训练集即整幅鸟图），实际只用两个眼关键点；
-//! 取置信度最高的关键点，展开为方形小框后映射回全图坐标。
+//! ——鸟框恒为整幅（训练集即整幅鸟图），实际只用两个眼关键点。
+//!
+//! ## 输入与选点策略（2026-07-30 标定集实证，34 张真实鸟片回放）
+//!
+//! - **输入为整图**，不做鸟框裁剪：模型训练集是整幅鸟图，裁剪会破坏其空间先验——
+//!   实测裁剪输入下被遮挡眼会被幻觉到头顶/脸颊且置信度虚高（0.95+），压过真眼。
+//! - 两个关键点槽位 = 左/右眼。正脸双眼分立均有效；侧脸时被遮眼为幻觉点。
+//!   没有任何单一槽位恒真，取全局最高置信必选错（3.05 案例：头顶 0.957 > 真眼 0.848）。
+//! - **采信判据 = 双槽一致性**：两槽各自最优关键点均 ≥ 阈值且归一化间距 ≤ 0.15
+//!   时取高置信点；否则返回 None（无眼/不确定 → 锐度 NULL 兑底，不误标错框）。
 
 use image::{DynamicImage, GenericImageView};
 use ort::session::Session;
@@ -24,19 +32,23 @@ use crate::RecognizeError;
 /// 眼关键点置信度阈值（实测：真眼 0.86–0.93，噪声 <0.1，余量充足）
 const EYE_KPT_CONF_THRESHOLD: f32 = 0.5;
 
-/// 眼框边长相对裁剪区域的比例（覆盖眼睛及周围羽毛供锐度统计）
+/// 双槽关键点一致性阈值：归一化间距上限（输入边长占比）。
+/// 实证：正脸双眼间距 ≈0.14（5.14_P1080702），幻觉点对间距 ≥0.19。
+const EYE_KPT_AGREEMENT_MAX_DIST: f32 = 0.15;
+
+/// 眼框边长相对鸟框短边的比例（覆盖眼睛及周围羽毛供锐度统计）
 const EYE_BOX_SIDE_RATIO: f32 = 0.15;
 
 // ---------------------------------------------------------------------------
 // 公共接口
 // ---------------------------------------------------------------------------
 
-/// 在鸟框裁剪区域上检测眼睛，返回全图归一化眼框。
+/// 在整图上检测眼睛，返回全图归一化眼框。
 ///
 /// # 参数
 /// - `session`: eye.onnx session
 /// - `img`: 全分辨率原始图像
-/// - `bird_bbox`: 鸟体检测框（归一化 0-1，全图坐标）
+/// - `bird_bbox`: 鸟体检测框（归一化 0-1，全图坐标），仅用于确定眼框边长
 ///
 /// # 返回
 /// - `Ok(Some(bbox))` 检测到眼框
@@ -53,54 +65,22 @@ pub fn detect_eye(
         .tensor_shape()
         .ok_or_else(|| RecognizeError::ModelLoad("eye.onnx 输入非张量类型".into()))?;
 
-    // 兼容 NCHW ([1, 3, H, W]) 与 NHWC ([1, H, W, 3])
+    // 输入恒为 NCHW [1, 3, H, W]（模型由 python 导出，通道在前），
+    // 因此 [2]/[3] 维即 H/W；不存在 NHWC 布局的喂入路径。
     let (input_h, input_w) = if input_shape.len() >= 4 {
-        let d0 = input_shape[1];
-        let d3 = input_shape[3];
-        if d3 == 3 || d3 == -1 {
-            (input_shape[1], input_shape[2])
-        } else if d0 == 3 || d0 == -1 {
-            (input_shape[2], input_shape[3])
-        } else if d0 == 1 {
-            (input_shape[2], input_shape[3])
-        } else if d3 == 1 {
-            (input_shape[1], input_shape[2])
-        } else {
-            (input_shape[2], input_shape[3])
-        }
+        (input_shape[2], input_shape[3])
     } else {
         return Err(RecognizeError::ModelLoad("eye.onnx 输入至少需要 4 维".into()));
     };
 
+    // 动态维度（shape 值为 -1）按 640 兜底
     let input_h = if input_h <= 0 { 640usize } else { input_h as usize };
     let input_w = if input_w <= 0 { 640usize } else { input_w as usize };
 
-    // ---- 从 bird_bbox 裁剪鸟体区域（外扩 ~10% 并夹紧） ----
+    // ---- 预处理：整图 resize 至模型输入尺寸 + RGB/255 归一化 ----
+    // 不裁剪鸟框：模型训练集为整幅鸟图，裁剪会破坏空间先验并放大幻觉点置信度。
     let (full_w, full_h) = img.dimensions();
-
-    let margin = 0.10;
-    let expand_w = (bird_bbox.x2 - bird_bbox.x1) * margin;
-    let expand_h = (bird_bbox.y2 - bird_bbox.y1) * margin;
-
-    let crop_x1 = (bird_bbox.x1 - expand_w).clamp(0.0, 1.0);
-    let crop_y1 = (bird_bbox.y1 - expand_h).clamp(0.0, 1.0);
-    let crop_x2 = (bird_bbox.x2 + expand_w).clamp(0.0, 1.0);
-    let crop_y2 = (bird_bbox.y2 + expand_h).clamp(0.0, 1.0);
-
-    let px1 = (crop_x1 * full_w as f32).floor() as u32;
-    let py1 = (crop_y1 * full_h as f32).floor() as u32;
-    let px2 = (crop_x2 * full_w as f32).ceil() as u32;
-    let py2 = (crop_y2 * full_h as f32).ceil() as u32;
-
-    let crop_w = (px2 - px1).max(1);
-    let crop_h = (py2 - py1).max(1);
-
-    let crop = DynamicImage::ImageRgba8(
-        image::imageops::crop_imm(img, px1, py1, crop_w, crop_h).to_image(),
-    );
-
-    // ---- 预处理：resize 至模型输入尺寸 + RGB/255 归一化 ----
-    let resized = crop.resize_exact(
+    let resized = img.resize_exact(
         input_w as u32, input_h as u32,
         image::imageops::FilterType::CatmullRom,
     );
@@ -132,171 +112,128 @@ pub fn detect_eye(
     // 每行 12 值：[x1,y1,x2,y2(像素), conf, cls, kpt1(x,y,conf), kpt2(x,y,conf)]。
     // 鸟框对本场景无用（训练集即整幅鸟图，框恒为整幅），只用两个眼关键点。
     let (_shape, flat) = output.try_extract_tensor::<f32>()?;
-    let Some((nx, ny, _conf)) = pick_best_eye_keypoint(&flat, input_w, input_h) else {
+    let Some((nx, ny, _conf)) = pick_eye_keypoint(flat, input_w, input_h) else {
         return Ok(None);
     };
 
-    // 关键点 → 以眼为中心的方形小框（crop 归一化），再映射回全图
-    let half = EYE_BOX_SIDE_RATIO / 2.0;
-    let (ex1, ey1) = ((nx - half).clamp(0.0, 1.0), (ny - half).clamp(0.0, 1.0));
-    let (ex2, ey2) = ((nx + half).clamp(0.0, 1.0), (ny + half).clamp(0.0, 1.0));
-
+    // 整图输入：模型归一化坐标即全图归一化坐标，无需裁剪反映射。
+    // 眼框边长 = 鸟框短边 × 比例（像素域构造再归一化，保证正方形）。
     let fw = full_w as f32;
     let fh = full_h as f32;
-    let cw = crop_w as f32;
-    let ch = crop_h as f32;
-    let cox = px1 as f32;
-    let coy = py1 as f32;
+    let bird_short = ((bird_bbox.x2 - bird_bbox.x1) * fw).min((bird_bbox.y2 - bird_bbox.y1) * fh);
+    let half_px = (bird_short * EYE_BOX_SIDE_RATIO / 2.0).max(1.0);
+
+    let kx = nx * fw;
+    let ky = ny * fh;
 
     Ok(Some(BBox::new(
-        (cox + ex1 * cw) / fw,
-        (coy + ey1 * ch) / fh,
-        (cox + ex2 * cw) / fw,
-        (coy + ey2 * ch) / fh,
+        ((kx - half_px) / fw).clamp(0.0, 1.0),
+        ((ky - half_px) / fh).clamp(0.0, 1.0),
+        ((kx + half_px) / fw).clamp(0.0, 1.0),
+        ((ky + half_px) / fh).clamp(0.0, 1.0),
     )))
 }
 
-/// 从姿态头输出中挑选置信度最高的眼关键点（ADR 0005：取最高置信度单眼）。
+/// 双槽一致性选点：左/右眼关键点各自取全图最优（置信度最高），
+/// 两者均过阈值且归一化间距 ≤ [`EYE_KPT_AGREEMENT_MAX_DIST`] 时取高置信点。
 ///
-/// 输入为展平的 f32 输出（每 12 值一行），返回 (crop 归一化 x, y, conf)。
-fn pick_best_eye_keypoint(flat: &[f32], input_w: usize, input_h: usize) -> Option<(f32, f32, f32)> {
-    if flat.len() < 12 || flat.len() % 12 != 0 {
+/// 侧脸照片中被遮挡的眼会被模型幻觉到头顶/脸颊且置信度虚高，
+/// 单取全局最高置信必选错；双眼间距过大（含正脸以外的分散幻觉）时判不可信。
+///
+/// 输入为展平的 f32 输出（每 12 值一行），返回 (归一化 x, y, conf)。
+fn pick_eye_keypoint(flat: &[f32], input_w: usize, input_h: usize) -> Option<(f32, f32, f32)> {
+    if flat.len() < 12 || !flat.len().is_multiple_of(12) {
         return None;
     }
-    let mut best: Option<(f32, f32, f32)> = None;
+    let mut best: [Option<(f32, f32, f32)>; 2] = [None, None];
     for row in flat.chunks_exact(12) {
-        for kpt in [&row[6..9], &row[9..12]] {
+        for (slot, kpt) in [&row[6..9], &row[9..12]].into_iter().enumerate() {
             let (kx, ky, kc) = (kpt[0], kpt[1], kpt[2]);
             if kc < EYE_KPT_CONF_THRESHOLD {
                 continue;
             }
-            if best.is_none_or(|b| kc > b.2) {
-                best = Some((kx / input_w as f32, ky / input_h as f32, kc));
+            if best[slot].is_none_or(|b| kc > b.2) {
+                best[slot] = Some((kx / input_w as f32, ky / input_h as f32, kc));
             }
         }
     }
-    best
+    let (a, b) = (best[0]?, best[1]?);
+    let dist = ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt();
+    if dist > EYE_KPT_AGREEMENT_MAX_DIST {
+        return None;
+    }
+    Some(if a.2 >= b.2 { a } else { b })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 验证 crop 内坐标 → 全图归一化坐标的正逆变换一致性。
+    /// 双槽一致且均过阈值 → 取高置信点
     #[test]
-    fn test_eye_coord_mapping_crop_to_full() {
-        let bird_bbox = BBox::new(0.2, 0.3, 0.6, 0.7);
-        let full_w: f32 = 1600.0;
-        let full_h: f32 = 1200.0;
-
-        let margin = 0.10;
-        let expand_w = (bird_bbox.x2 - bird_bbox.x1) * margin;
-        let expand_h = (bird_bbox.y2 - bird_bbox.y1) * margin;
-
-        let crop_x1 = (bird_bbox.x1 - expand_w).clamp(0.0, 1.0);
-        let crop_y1 = (bird_bbox.y1 - expand_h).clamp(0.0, 1.0);
-        let crop_x2 = (bird_bbox.x2 + expand_w).clamp(0.0, 1.0);
-        let crop_y2 = (bird_bbox.y2 + expand_h).clamp(0.0, 1.0);
-
-        let px1 = (crop_x1 * full_w).floor() as u32;
-        let py1 = (crop_y1 * full_h).floor() as u32;
-        let px2 = (crop_x2 * full_w).ceil() as u32;
-        let py2 = (crop_y2 * full_h).ceil() as u32;
-
-        let crop_w = (px2 - px1).max(1) as f32;
-        let crop_h = (py2 - py1).max(1) as f32;
-        let cox = px1 as f32;
-        let coy = py1 as f32;
-
-        let eye_in_crop = BBox::new(0.4, 0.4, 0.6, 0.6);
-
-        // 正向：crop 内归一化 → 全图归一化
-        let eye_full = BBox::new(
-            (cox + eye_in_crop.x1 * crop_w) / full_w,
-            (coy + eye_in_crop.y1 * crop_h) / full_h,
-            (cox + eye_in_crop.x2 * crop_w) / full_w,
-            (coy + eye_in_crop.y2 * crop_h) / full_h,
-        );
-
-        // 逆向：全图归一化 → crop 内归一化
-        let roundtrip = BBox::new(
-            (eye_full.x1 * full_w - cox) / crop_w,
-            (eye_full.y1 * full_h - coy) / crop_h,
-            (eye_full.x2 * full_w - cox) / crop_w,
-            (eye_full.y2 * full_h - coy) / crop_h,
-        );
-
-        // 正逆变换应在 f32 精度内一致
-        assert!((roundtrip.x1 - eye_in_crop.x1).abs() < 1e-4, "x1");
-        assert!((roundtrip.y1 - eye_in_crop.y1).abs() < 1e-4, "y1");
-        assert!((roundtrip.x2 - eye_in_crop.x2).abs() < 1e-4, "x2");
-        assert!((roundtrip.y2 - eye_in_crop.y2).abs() < 1e-4, "y2");
-
-        // 全图范围检查
-        assert!(eye_full.x1 >= 0.0 && eye_full.x1 <= 1.0);
-        assert!(eye_full.y1 >= 0.0 && eye_full.y1 <= 1.0);
-        assert!(eye_full.x2 >= 0.0 && eye_full.x2 <= 1.0);
-        assert!(eye_full.y2 >= 0.0 && eye_full.y2 <= 1.0);
-    }
-
-    /// 验证边界处的裁剪计算
-    #[test]
-    fn test_eye_crop_edge_cases() {
-        let bird_bbox = BBox::new(0.0, 0.0, 0.1, 0.1);
-        let full_w = 100u32;
-        let full_h = 100u32;
-
-        let margin = 0.10;
-        let expand_w = (bird_bbox.x2 - bird_bbox.x1) * margin;
-        let expand_h = (bird_bbox.y2 - bird_bbox.y1) * margin;
-
-        let crop_x1 = (bird_bbox.x1 - expand_w).clamp(0.0, 1.0);
-        let crop_y1 = (bird_bbox.y1 - expand_h).clamp(0.0, 1.0);
-        let crop_x2 = (bird_bbox.x2 + expand_w).clamp(0.0, 1.0);
-        let crop_y2 = (bird_bbox.y2 + expand_h).clamp(0.0, 1.0);
-
-        let px1 = (crop_x1 * full_w as f32).floor() as u32;
-        let py1 = (crop_y1 * full_h as f32).floor() as u32;
-        let px2 = (crop_x2 * full_w as f32).ceil() as u32;
-        let py2 = (crop_y2 * full_h as f32).ceil() as u32;
-
-        assert_eq!(px1, 0);
-        assert_eq!(py1, 0);
-        assert!(px2 >= px1 + 1);
-        assert!(py2 >= py1 + 1);
-    }
-
-    /// 关键点解析：取置信度最高的单眼（跨行、跨两个关键点位）
-    #[test]
-    fn test_pick_best_eye_keypoint_picks_highest_conf() {
+    fn test_pick_eye_keypoint_agreement_picks_higher_conf() {
         let row = |k1: (f32, f32, f32), k2: (f32, f32, f32)| -> Vec<f32> {
             vec![
                 0.0, 0.0, 640.0, 640.0, 0.9, 0.0, k1.0, k1.1, k1.2, k2.0, k2.1, k2.2,
             ]
         };
-        let mut flat = row((100.0, 100.0, 0.6), (200.0, 200.0, 0.9));
-        flat.extend(row((300.0, 300.0, 0.7), (50.0, 50.0, 0.8)));
+        // 两槽最优来自相近位置（间距 ~6px），k2 置信更高
+        let mut flat = row((100.0, 100.0, 0.6), (104.0, 103.0, 0.9));
+        flat.extend(row((98.0, 102.0, 0.7), (50.0, 50.0, 0.55)));
 
-        let (nx, ny, conf) = pick_best_eye_keypoint(&flat, 640, 640).unwrap();
+        let (nx, ny, conf) = pick_eye_keypoint(&flat, 640, 640).unwrap();
         assert!((conf - 0.9).abs() < 1e-6);
-        assert!((nx - 200.0 / 640.0).abs() < 1e-6);
-        assert!((ny - 200.0 / 640.0).abs() < 1e-6);
+        assert!((nx - 104.0 / 640.0).abs() < 1e-6);
+        assert!((ny - 103.0 / 640.0).abs() < 1e-6);
+    }
+
+    /// 幻觉点压过真眼（3.05 案例）：单槽高置信但双槽分散 → None
+    #[test]
+    fn test_pick_eye_keypoint_rejects_hallucinated_slot() {
+        let row = |k1: (f32, f32, f32), k2: (f32, f32, f32)| -> Vec<f32> {
+            vec![
+                0.0, 0.0, 640.0, 640.0, 0.9, 0.0, k1.0, k1.1, k1.2, k2.0, k2.1, k2.2,
+            ]
+        };
+        // k1 真眼 (348,190)@0.85；k2 幻觉头顶 (229,106)@0.96，间距 ~150px
+        let flat = row((348.0, 190.0, 0.85), (229.0, 106.0, 0.96));
+        assert!(pick_eye_keypoint(&flat, 640, 640).is_none());
+    }
+
+    /// 正脸双眼分立（间距 ≈0.14）仍采信
+    #[test]
+    fn test_pick_eye_keypoint_frontal_two_eyes_accepted() {
+        let flat = vec![
+            0.0, 0.0, 640.0, 640.0, 0.9, 0.0, 357.0, 336.0, 0.89, 267.0, 336.0, 0.91,
+        ];
+        let (nx, _ny, conf) = pick_eye_keypoint(&flat, 640, 640).unwrap();
+        assert!((conf - 0.91).abs() < 1e-6);
+        assert!((nx - 267.0 / 640.0).abs() < 1e-6);
+    }
+
+    /// 只有一个槽位过阈值 → None（实证：单槽通过样本全为误检）
+    #[test]
+    fn test_pick_eye_keypoint_single_slot_rejected() {
+        let flat = vec![
+            0.0, 0.0, 640.0, 640.0, 0.9, 0.0, 100.0, 100.0, 0.8, 200.0, 200.0, 0.49,
+        ];
+        assert!(pick_eye_keypoint(&flat, 640, 640).is_none());
     }
 
     /// 全部关键点低于阈值 → None
     #[test]
-    fn test_pick_best_eye_keypoint_below_threshold() {
+    fn test_pick_eye_keypoint_below_threshold() {
         let flat = vec![
             0.0, 0.0, 640.0, 640.0, 0.9, 0.0, 100.0, 100.0, 0.3, 200.0, 200.0, 0.49,
         ];
-        assert!(pick_best_eye_keypoint(&flat, 640, 640).is_none());
+        assert!(pick_eye_keypoint(&flat, 640, 640).is_none());
     }
 
     /// 长度非法（非 12 的倍数 / 空）→ None 而非 panic
     #[test]
-    fn test_pick_best_eye_keypoint_malformed_input() {
-        assert!(pick_best_eye_keypoint(&[], 640, 640).is_none());
-        assert!(pick_best_eye_keypoint(&[1.0; 6], 640, 640).is_none());
-        assert!(pick_best_eye_keypoint(&[1.0; 13], 640, 640).is_none());
+    fn test_pick_eye_keypoint_malformed_input() {
+        assert!(pick_eye_keypoint(&[], 640, 640).is_none());
+        assert!(pick_eye_keypoint(&[1.0; 6], 640, 640).is_none());
+        assert!(pick_eye_keypoint(&[1.0; 13], 640, 640).is_none());
     }
 }

@@ -4,6 +4,7 @@ use image::GenericImageView;
 use thiserror::Error;
 
 use photo_domain::ImageFormat;
+use crate::thumbnail::decode_raw_preview;
 
 #[derive(Error, Debug)]
 pub enum ConvertError {
@@ -49,7 +50,10 @@ fn write_jpeg_bytes(img: &image::DynamicImage, options: &ConvertOptions) -> Resu
     let mut buf = Cursor::new(Vec::new());
     let mut jpeg_encoder =
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, options.jpeg_quality);
-    jpeg_encoder.encode(img.as_bytes(), img.width(), img.height(), img.color().into())?;
+    // JPEG 不支持 alpha：先展平为 RGB8，否则带透明度的 PNG/TIFF/WebP
+    // 以 ExtendedColorType::Rgba8 编码会被 JpegEncoder 拒绝（Unsupported）
+    let rgb = img.to_rgb8();
+    jpeg_encoder.encode(rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8)?;
     Ok(buf.into_inner())
 }
 
@@ -88,24 +92,30 @@ fn output_path(input: &Path, options: &ConvertOptions) -> PathBuf {
     options.output_dir.join(&name)
 }
 
-/// RAW 转 JPEG：提取 RAW 内嵌预览（不解拜耳），可选缩放
+/// RAW 转 JPEG：完整解码（half_size 预览选项），可选缩放。
+/// 不再使用内嵌小图（多数相机 160-640px，输出会糊）。
 pub fn convert_raw_preview(raw_path: &Path, options: &ConvertOptions) -> Result<PathBuf, ConvertError> {
     std::fs::create_dir_all(&options.output_dir)?;
-
-    let path_str = raw_path.to_string_lossy();
-    let thumb_bytes = rawlib::extract_thumbnail(path_str.as_ref())
-        .map_err(|e| ConvertError::Raw(e.to_string()))?;
 
     let out_path = output_path(raw_path, options);
     if out_path.exists() && !options.overwrite {
         return Ok(out_path);
     }
 
-    let img = image::load_from_memory(&thumb_bytes)?;
-    let final_img = scale_if_needed(img, options.max_dimension);
-    let bytes = encode_image(&final_img, options)?;
+    // 0 = 不缩放（映射 u32::MAX，与母版缓存语义一致；0 会令 DCT 尺寸为 0）
+    let size = if options.max_dimension == 0 { u32::MAX } else { options.max_dimension };
+    let jpeg = decode_raw_preview(raw_path, size)
+        .map_err(|e| ConvertError::Raw(e.to_string()))?;
 
-    std::fs::write(&out_path, bytes)?;
+    // JPEG 输出直接用解码字节（已按 max_dimension 缩放，免一次重编码）；
+    // PNG 等其他格式需重编码
+    if matches!(options.output_format.as_str(), "jpg" | "jpeg") {
+        std::fs::write(&out_path, jpeg)?;
+    } else {
+        let img = image::load_from_memory(&jpeg)?;
+        let bytes = encode_image(&img, options)?;
+        std::fs::write(&out_path, bytes)?;
+    }
     Ok(out_path)
 }
 
