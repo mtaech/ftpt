@@ -34,6 +34,7 @@ impl RootView {
         let generation = self.scan_generation;
         self.scan_in_progress = true;
         self.grid_loading.clear();
+        self.grid_cancel.clear();
         self.preview_loading.clear();
         self.preview_cancel.clear();
         self.fullres_loading.clear();

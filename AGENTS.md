@@ -271,6 +271,8 @@ gpui-component 项目位于 `E:\Dev\Code\gpui-component`，含完整源码和本
 - **检测框默认不显示**：`bbox_visible` 默认 false；预览缩放栏新增「检测框」开关（ToggleBbox，开启高亮+✓），与信息面板按钮/V 键双入口
 - **重扫增量保留缓存**：扫描 on_done 不再全量 clear 内存缓存——按 primary_path 映射到新 capture 索引，仅丢弃消失文件的缩略图/预览/全分辨率（批量操作后重扫不重载未变化文件，网格不闪烁）
 - **缩略图预解码为 RenderImage**：`thumbnail_data` 从字节源（GPUI 绘制时异步解码，快速拖动滚动条时解码排队渐显慢）改为 worker 预解码 RenderImage（到达即绘制，与预览图同方案）；grid_cell/filmstrip 渲染走 `ImageSource::from`
+- **缩略图拖动取消机制**：`grid_cancel` 令牌（与 preview_cancel 同款）——grid/filmstrip 渲染时按保留区（可见 ± 缓冲）调用 `cancel_thumbnails_outside`，离开保留区的在途任务被标记（执行前检查快速放弃），队列积压快速排空，拖动时新位置任务立即轮到；fast 池 2→4 线程；grid 预取 ±2 行、filmstrip 按滚动位置预取（原来只看焦点 ±20，拖滚动条不触发加载）
+- **批量操作安全边界**：`FilterCriteria::has_active_filter()`——无任何筛选条件时批量操作三按钮禁用（黄色警告提示），`run_batch_op` 兜底拒绝（toast），防对全部文件误操作；面板顶部新增操作指引（操作对象 = 当前筛选结果）
 
 ---
 

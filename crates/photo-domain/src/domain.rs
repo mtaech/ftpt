@@ -300,6 +300,22 @@ pub struct FilterCriteria {
     pub recognition_filter: RecognitionFilter,
 }
 
+impl FilterCriteria {
+    /// 是否有激活的筛选条件（任一字段非默认）。
+    /// 无筛选时操作集 = 全部文件，批量文件操作应拒绝执行（防误操作）。
+    pub fn has_active_filter(&self) -> bool {
+        self.format_filter.is_some()
+            || !self.bird_names.is_empty()
+            || self.date_from.is_some()
+            || self.date_to.is_some()
+            || self.min_rating.is_some()
+            || self.color_label.is_some()
+            || self.flag_filter.is_some()
+            || self.unflagged_filter
+            || self.recognition_filter != RecognitionFilter::All
+    }
+}
+
 /// 排序方式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SortBy {

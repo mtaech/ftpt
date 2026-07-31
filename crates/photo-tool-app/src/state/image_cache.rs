@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use gpui::*;
@@ -439,7 +439,8 @@ impl RootView {
         self.filmstrip_scroll.set_offset(point(target_x, y));
     }
 
-    /// 为单个 capture 生成网格缩略图（懒加载：滚动时按需触发）
+    /// 为单个 capture 生成网格缩略图（懒加载：滚动时按需触发）。
+    /// 任务带取消令牌：离开可见区的任务被标记，执行前检查快速放弃（不堵队列）。
     pub fn ensure_thumbnail_loaded(&mut self, capture_idx: usize, cx: &mut Context<Self>) {
         if self.thumbnail_data.contains_key(&capture_idx) { return; }
         if !self.grid_loading.insert(capture_idx) { return; } // 已在加载
@@ -464,12 +465,15 @@ impl RootView {
 
             file_size: meta.file_size,
         };
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.grid_cancel.insert(capture_idx, cancel.clone());
+        let cancel_work = cancel.clone();
 
         self.worker.spawn_fast(
             cx,
             move || {
                 cache
-                    .get_or_generate(&source, thumbnail_size * 2, None)
+                    .get_or_generate(&source, thumbnail_size * 2, Some(cancel_work.as_ref()))
                     .map_err(|e| {
                         tracing::warn!("懒加载缩略图失败 {}: {e}", source.path.display());
                     })
@@ -480,6 +484,11 @@ impl RootView {
                     return;
                 }
                 this.grid_loading.remove(&capture_idx);
+                this.grid_cancel.remove(&capture_idx);
+                // 已取消（滚动离开保留区）→ 丢弃结果，滚动回来重新加载
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
                 if let Some(bytes) = result {
                     // 预解码为 RenderImage：到达即可绘制，避免 GPUI 异步解码排队
                     if let Some(render) = decode_render_image_scaled(&bytes, true, u32::MAX) {
@@ -489,6 +498,20 @@ impl RootView {
                 }
             },
         );
+    }
+
+    /// 取消保留区（可见 ± 缓冲）之外的缩略图加载：标记令牌，执行前快速放弃，
+    /// 队列积压快速排空——快速拖动滚动条时新位置任务立即轮到。
+    pub(crate) fn cancel_thumbnails_outside(&mut self, keep: &HashSet<usize>) {
+        use std::sync::atomic::Ordering as AtOrdering;
+        self.grid_cancel.retain(|&ci, token| {
+            if keep.contains(&ci) {
+                true
+            } else {
+                token.store(true, AtOrdering::Relaxed);
+                false
+            }
+        });
     }
 
     /// Spawn background tasks to preload thumbnails for the first N visible items.
@@ -538,10 +561,13 @@ impl RootView {
             let cache_clone = cache.clone();
             let ci = capture_idx;
             let path_display = source.path.clone();
+            let cancel = Arc::new(AtomicBool::new(false));
+            self.grid_cancel.insert(ci, cancel.clone());
+            let cancel_work = cancel.clone();
             self.worker.spawn(cx, move || {
                 // 2x 生成：高 DPI 下 1x 缩略图拉伸会模糊
                 cache_clone
-                    .get_or_generate(&source, thumbnail_size * 2, None)
+                    .get_or_generate(&source, thumbnail_size * 2, Some(cancel_work.as_ref()))
                     .map_err(|e| {
                         tracing::warn!("缩略图生成失败 {}: {e}", path_display.display());
                     })
@@ -551,6 +577,11 @@ impl RootView {
                     return;
                 }
                 this.grid_loading.remove(&ci);
+                this.grid_cancel.remove(&ci);
+                // 已取消（滚动离开保留区）→ 丢弃，避免旧区域任务占显示
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
                 if let Some(bytes) = result {
                     // 预解码为 RenderImage（与网格懒加载一致）
                     if let Some(render) = decode_render_image_scaled(&bytes, true, u32::MAX) {

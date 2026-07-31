@@ -17,8 +17,9 @@ impl Worker {
         let n = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        // fast 池固定 2 线程：交互加载任务少而短，独占 2 线程即可不被批量任务拖延
-        let fast = n.clamp(1, 2);
+        // fast 池 4 线程：交互加载（预览/全分辨率/网格缩略图）任务小而多，
+        // 快速拖动滚动条时大量缩略图任务排队，2 线程吞吐不够导致渐显慢
+        let fast = n.clamp(1, 4);
         let pool = ThreadPoolBuilder::new()
             .num_threads(n)
             .build()

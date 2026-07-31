@@ -14,6 +14,44 @@ pub fn render_filmstrip(view: &RootView, cx: &mut Context<RootView>) -> impl Int
     let view_handle = cx.entity().downgrade();
     let focus_index = view.focus_index;
 
+    // 按滚动位置预取：拖动横向滚动条时 focus_index 不变，
+    // 原来只在焦点 ±20 内触发加载，拖过去看到空白。
+    // 每项宽 68px（外框），由 scroll offset 推算保留区（可见 ± 20 缓冲）：
+    // 缺失项触发加载，离开保留区的在途任务取消（执行前快速放弃，不堵队列）。
+    {
+        let scroll = &view.filmstrip_scroll;
+        let off_x: f32 = scroll.offset().x.into();
+        let visible_w: f32 = scroll.bounds().size.width.into();
+        let item_w = 68.0;
+        let start_item = (off_x / item_w).floor() as usize;
+        let visible_count = (visible_w / item_w).ceil() as usize + 1;
+        let pre_start = start_item.saturating_sub(20);
+        let pre_end = (start_item + visible_count + 20).min(view.display_order.len());
+        let mut keep: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut missing: Vec<usize> = Vec::new();
+        for di in pre_start..pre_end {
+            if let Some(&ci) = view.display_order.get(di) {
+                keep.insert(ci);
+                if !view.thumbnail_data.contains_key(&ci) {
+                    missing.push(ci);
+                }
+            }
+        }
+        if !keep.is_empty() {
+            let vh = view_handle.clone();
+            cx.defer(move |cx| {
+                if let Some(view) = vh.upgrade() {
+                    cx.update_entity(&view, |root_view, cx| {
+                        root_view.cancel_thumbnails_outside(&keep);
+                        for ci in missing {
+                            root_view.ensure_thumbnail_loaded(ci, cx);
+                        }
+                    });
+                }
+            });
+        }
+    }
+
     let thumbs: Vec<AnyElement> = view
         .display_order
         .iter()

@@ -175,6 +175,13 @@ impl RootView {
         use std::sync::atomic::{AtomicU32, Ordering};
         use std::sync::Arc;
 
+        // 无筛选条件拒绝执行：操作集 = 全部文件，防误操作（UI 已禁用，此处兜底）
+        if !self.filter.has_active_filter() {
+            self.show_toast("未设置筛选条件，已拒绝执行（请先在筛选栏设置条件）", cx);
+            cx.notify();
+            return;
+        }
+
         let Some(src_dir) = self.dir_path.clone() else { return };
         let paths: Vec<PathBuf> = self
             .display_order

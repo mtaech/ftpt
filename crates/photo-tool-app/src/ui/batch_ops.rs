@@ -23,6 +23,8 @@ pub fn render_batch_ops_section(
 
     let count = view.display_order.len();
     let empty = count == 0;
+    // 无筛选条件时拒绝执行：操作集 = 全部文件，防误操作
+    let no_filter = !view.filter.has_active_filter();
     let sync_enabled = view.batch_sync_enabled;
     let sync_extra = view.batch_sync_extra;
     let in_progress = view.batch_in_progress;
@@ -31,9 +33,22 @@ pub fn render_batch_ops_section(
 
     v_flex()
         .gap_2()
+        // ── 操作指引（简短）──
+        .child(
+            div()
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .bg(theme::colors().surface_background)
+                .text_size(px(11.))
+                .text_color(theme::colors().text_muted)
+                .child("操作对象 = 当前筛选结果。流程：标记/筛选 → 可选「同步同名文件」→ 移动/复制/删除（删除进回收站）"),
+        )
         // ── 操作对象说明（数量随筛选实时联动）──
         .child({
-            let rule = if sync_enabled {
+            let rule = if no_filter {
+                "未设置筛选条件——为防止全文件误操作，请先在筛选栏设置条件（旗标/格式/评分等）".to_string()
+            } else if sync_enabled {
                 format!("操作对象：当前筛选结果（{count} 张），同步 +{sync_extra}")
             } else {
                 format!("操作对象：当前筛选结果（{count} 张）")
@@ -44,7 +59,11 @@ pub fn render_batch_ops_section(
                 .rounded_sm()
                 .bg(theme::colors().surface_background)
                 .text_size(px(11.))
-                .text_color(theme::colors().text_muted)
+                .text_color(if no_filter {
+                    theme::colors().warning
+                } else {
+                    theme::colors().text_muted
+                })
                 .child(rule)
         })
         // ── 同步开关 ──
@@ -170,20 +189,21 @@ pub fn render_batch_ops_section(
         // ── 主操作横排：移动到… / 复制到… ──
         .child({
             let vh = vh.clone();
+            let disabled = empty || no_filter;
             h_flex()
                 .gap_2()
                 .child(render_action_button(
                     "batch-move",
                     "移动到…",
                     BatchOpType::Move,
-                    empty,
+                    disabled,
                     vh.clone(),
                 ))
                 .child(render_action_button(
                     "batch-copy",
                     "复制到…",
                     BatchOpType::Copy,
-                    empty,
+                    disabled,
                     vh,
                 ))
         })
@@ -192,7 +212,7 @@ pub fn render_batch_ops_section(
             let vh = vh.clone();
             div()
                 .mt_1()
-                .child(render_delete_button("batch-delete", empty, vh))
+                .child(render_delete_button("batch-delete", empty || no_filter, vh))
         })
         // ── 执行中提示 ──
         .when(in_progress, |parent| {

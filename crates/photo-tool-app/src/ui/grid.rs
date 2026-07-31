@@ -39,6 +39,8 @@ pub fn render_grid(
             let Some(view) = view_handle.upgrade() else {
                 return Vec::new();
             };
+            // range 被下方 map 消费，先保存边界供预取区使用
+            let (range_start, range_end) = (range.start, range.end);
             // 闭包在 prepaint 阶段执行（render 借用已释放，下方 update_entity 可证），
             // 直接读实体，避免每帧克隆 captures/display_order/缩略图表。
             let rows: Vec<AnyElement> = {
@@ -140,9 +142,31 @@ pub fn render_grid(
                     .collect::<Vec<_>>()
             };
 
-            // 触发懒加载：可见区域内缺少缩略图的 capture
-            if !missing.is_empty() {
+            // 保留区 = 可见区 ± 2 行：拖动滚动条时即将进入视口的行提前就绪，
+            // 离开保留区的在途任务被取消（执行前快速放弃，不堵队列）
+            let prefetch_start = range_start.saturating_sub(2 * cols);
+            let prefetch_end = (range_end + 2 * cols).min(row_count);
+            let mut keep: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            {
+                let state = view.read(app);
+                for row in prefetch_start..prefetch_end {
+                    let p_start = row * cols;
+                    let p_end = (p_start + cols).min(item_count);
+                    for i in p_start..p_end {
+                        if let Some(&ci) = state.display_order.get(i) {
+                            keep.insert(ci);
+                            if !state.thumbnail_data.contains_key(&ci) {
+                                missing.push(ci);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 取消保留区外的在途缩略图任务 + 触发保留区内缺失的加载
+            if !keep.is_empty() {
                 let _ = app.update_entity(&view, |root_view, cx| {
+                    root_view.cancel_thumbnails_outside(&keep);
                     for ci in missing {
                         root_view.ensure_thumbnail_loaded(ci, cx);
                     }
