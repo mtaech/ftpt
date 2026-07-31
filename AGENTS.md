@@ -268,6 +268,9 @@ gpui-component 项目位于 `E:\Dev\Code\gpui-component`，含完整源码和本
 - **全分辨率 DCT 降采样（jpeg-decoder）**：放大场景（非 1:1）按显示上限解码——`FULLRES_LOAD_SIZE=3200`，`decode_scaled_rgba`/`decode_jpeg_scaled_reader` 换 jpeg-decoder `scale`（1/2 因子快 4x，输出仍超目标时 Lanczos 收尾）；1:1 保持全量真实像素。**修复**：原 zune `set_max_width` 是输入硬限制而非降采样，engine 的「DCT 快路径」此前从未生效（一直在 fallback 全解码），换 jpeg-decoder 后真快路径生效，缩略图/预览/全分辨率派生全部受益
 - **全分辨率二轮优化**：JPEG 全量路径（u32::MAX/1:1）也换 jpeg-decoder（默认 rayon 多线程 IDCT，替代 zune 单线程）；去掉人为 1/2 因子上限——目标尺寸直接交 `choose_idct_size` 自动权衡（小目标 1/2 快路径，大目标 1/1 全量保精度）；`fullres_target()` 按显示尺寸量化阶梯（2048~6144，避免 zoom 微调抖动重解），放大 2-3x 也能拿到足够分辨率
 - **RAW 真 1:1**：rawlib 新增 `DecodeOptions::full()`（half_size=false + AHD + 8bit + 自动亮度，24MP 约 3-5s）；`ThumbnailCache::get_or_generate_full` 独立全尺寸母版缓存（键带 `full` 变体，与 half_size 母版分离，惰性生成——仅 1:1 查看过才落盘，24MP JPEG 8-15MB/文件）；`ensure_fullres_loaded` 1:1（zoom==0）时 RAW 走全尺寸解码，放大仍走 half_size 母版派生（秒级）
+- **检测框默认不显示**：`bbox_visible` 默认 false；预览缩放栏新增「检测框」开关（ToggleBbox，开启高亮+✓），与信息面板按钮/V 键双入口
+- **重扫增量保留缓存**：扫描 on_done 不再全量 clear 内存缓存——按 primary_path 映射到新 capture 索引，仅丢弃消失文件的缩略图/预览/全分辨率（批量操作后重扫不重载未变化文件，网格不闪烁）
+- **缩略图预解码为 RenderImage**：`thumbnail_data` 从字节源（GPUI 绘制时异步解码，快速拖动滚动条时解码排队渐显慢）改为 worker 预解码 RenderImage（到达即绘制，与预览图同方案）；grid_cell/filmstrip 渲染走 `ImageSource::from`
 
 ---
 

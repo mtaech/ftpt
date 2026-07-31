@@ -477,6 +477,31 @@ pub fn render_preview(
                 .child(zoom_button(IconName::Plus, "zoom-in", crate::action::Action::ZoomIn, false, view_handle.clone()))
                 .child(zoom_button(IconName::Frame, "zoom-fit", crate::action::Action::ZoomToFit, zoom == 1.0, view_handle.clone()))
                 .child(zoom_text_button("1:1", "zoom-actual", crate::action::Action::ZoomActual, zoom == 0.0, view_handle.clone()))
+                // 检测框显隐开关（默认不显示，V 快捷键同款）
+                .child(
+                    div()
+                        .id("bbox-toggle")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .px_2()
+                        .h(px(36.))
+                        .rounded_md()
+                        .bg(if view.bbox_visible { theme::colors().element_hover } else { theme::colors().element_background })
+                        .text_color(if view.bbox_visible { theme::colors().text_accent } else { theme::colors().text_muted })
+                        .cursor(CursorStyle::PointingHand)
+                        .on_click({
+                            let vh = view_handle.clone();
+                            move |_event: &ClickEvent, _window, cx| {
+                                if let Some(view) = vh.upgrade() {
+                                    let _ = cx.update_entity(&view, |root_view, root_cx| {
+                                        root_view.dispatch_action(crate::action::Action::ToggleBbox, root_cx);
+                                    });
+                                }
+                            }
+                        })
+                        .child(if view.bbox_visible { "检测框 ✓" } else { "检测框" }),
+                )
         )
 }
 

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -112,6 +113,55 @@ impl RootView {
                         this.thumbnail_cache = Some(photo_engine::thumbnail::ThumbnailCache::new(
                             dir.join(".pt").join("thumbs"),
                         ));
+                        // 增量保留内存缓存：按 primary_path 映射到新 capture 索引，
+                        // 仅丢弃消失文件的项（批量操作后重扫不重载未变化文件的缩略图/预览/全分辨率）
+                        let old_captures = std::mem::take(&mut this.captures);
+                        let old_thumbs = std::mem::take(&mut this.thumbnail_data);
+                        let old_previews = std::mem::take(&mut this.preview_data);
+                        let old_fullres = std::mem::take(&mut this.fullres_data);
+                        let old_preview_order = std::mem::take(&mut this.preview_order);
+                        let old_fullres_order = std::mem::take(&mut this.fullres_order);
+                        let mut path_to_new: HashMap<PathBuf, usize> = HashMap::new();
+                        for m in &metas {
+                            path_to_new.insert(PathBuf::from(&m.primary_path), m.index);
+                        }
+                        let path_of = |old_idx: usize| {
+                            old_captures
+                                .get(old_idx)
+                                .map(|m| PathBuf::from(&m.primary_path))
+                        };
+                        for (old_idx, img) in old_thumbs {
+                            if let Some(path) = path_of(old_idx)
+                                && let Some(&new_idx) = path_to_new.get(&path)
+                            {
+                                this.thumbnail_data.insert(new_idx, img);
+                            }
+                        }
+                        for (old_idx, img) in old_previews {
+                            if let Some(path) = path_of(old_idx)
+                                && let Some(&new_idx) = path_to_new.get(&path)
+                            {
+                                this.preview_data.insert(new_idx, img);
+                            }
+                        }
+                        for (old_idx, img) in old_fullres {
+                            if let Some(path) = path_of(old_idx)
+                                && let Some(&new_idx) = path_to_new.get(&path)
+                            {
+                                this.fullres_data.insert(new_idx, img);
+                            }
+                        }
+                        // FIFO 顺序按保留项过滤（近似 LRU，保序）
+                        for idx in old_preview_order {
+                            if this.preview_data.contains_key(&idx) {
+                                this.preview_order.push_back(idx);
+                            }
+                        }
+                        for idx in old_fullres_order {
+                            if this.fullres_data.contains_key(&idx) {
+                                this.fullres_order.push_back(idx);
+                            }
+                        }
                         this.captures = metas;
                         this.folder_db = cache;
                         this.dir_path = Some(dir.clone());
@@ -123,11 +173,6 @@ impl RootView {
                         this.config.recent_directories.insert(0, dir_str);
                         this.config.recent_directories.truncate(10);
                         this.save_config();
-                        this.thumbnail_data.clear();
-                        this.preview_data.clear();
-                        this.preview_order.clear();
-                        this.fullres_data.clear();
-                        this.fullres_order.clear();
                         this.apply_filter_and_sort();
                         // 扫描完成后，用 folder_db 中已有的识别记录 enrich CaptureMeta
                         if let Some(ref db) = this.folder_db {

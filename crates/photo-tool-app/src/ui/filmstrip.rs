@@ -24,8 +24,8 @@ pub fn render_filmstrip(view: &RootView, cx: &mut Context<RootView>) -> impl Int
 
             // 外框 68x52 含 2px 边框（border-box），内容区恰好 64x48
             let content: AnyElement = if let Some(image) = view.thumbnail_data.get(&capture_idx) {
-                // 字节源 img 必须显式尺寸（size_full + object_fit 不生效，见 preview.rs 注释）
-                img(image.clone())
+                // 预解码 RenderImage：到达即绘制（字节源走 GPUI 异步解码，快速拖动时渐显慢）
+                img(ImageSource::from(image.clone()))
                     .w(px(64.))
                     .h(px(48.))
                     .object_fit(ObjectFit::Cover)
@@ -56,7 +56,7 @@ pub fn render_filmstrip(view: &RootView, cx: &mut Context<RootView>) -> impl Int
                 .child(content)
                 .on_click(move |_event: &ClickEvent, _window, cx| {
                     if let Some(view) = vh.upgrade() {
-                        let _ = cx.update_entity(&view, |root_view, root_cx| {
+                        cx.update_entity(&view, |root_view, root_cx| {
                             root_view.focus_index = Some(display_idx);
                             root_view.preview_zoom = 1.0;
                             root_view.preview_pan = (0.0, 0.0);

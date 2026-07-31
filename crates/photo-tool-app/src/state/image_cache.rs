@@ -481,9 +481,11 @@ impl RootView {
                 }
                 this.grid_loading.remove(&capture_idx);
                 if let Some(bytes) = result {
-                    this.thumbnail_data
-                        .insert(capture_idx, Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes)));
-                    cx.notify();
+                    // 预解码为 RenderImage：到达即可绘制，避免 GPUI 异步解码排队
+                    if let Some(render) = decode_render_image_scaled(&bytes, true, u32::MAX) {
+                        this.thumbnail_data.insert(capture_idx, Arc::new(render));
+                        cx.notify();
+                    }
                 }
             },
         );
@@ -550,9 +552,11 @@ impl RootView {
                 }
                 this.grid_loading.remove(&ci);
                 if let Some(bytes) = result {
-                    this.thumbnail_data
-                        .insert(ci, Arc::new(Image::from_bytes(gpui::ImageFormat::Jpeg, bytes)));
-                    _cx.notify();
+                    // 预解码为 RenderImage（与网格懒加载一致）
+                    if let Some(render) = decode_render_image_scaled(&bytes, true, u32::MAX) {
+                        this.thumbnail_data.insert(ci, Arc::new(render));
+                        _cx.notify();
+                    }
                 }
             });
         }

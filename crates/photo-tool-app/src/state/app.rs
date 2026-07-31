@@ -59,7 +59,9 @@ pub struct RootView {
     pub display_order: Vec<usize>,
     /// 已解码缩略图按 capture 索引缓存。存 Arc<Image>（加载时构建一次、哈希一次），
     /// 渲染路径只做指针拷贝——此前存 Vec<u8>，grid/preview 每帧克隆整表字节，是卡顿主因。
-    pub thumbnail_data: HashMap<usize, Arc<Image>>,
+    /// 网格缩略图按 capture 索引缓存：worker 预解码为 RenderImage（字节源走 GPUI
+    /// 异步解码，快速拖动滚动条时解码排队导致渐显慢；RenderImage 到达即可绘制）
+    pub thumbnail_data: HashMap<usize, Arc<RenderImage>>,
     /// 预览图按 capture 索引缓存：worker 线程预解码为 RenderImage，
     /// 到达即可绘制（字节源走 GPUI asset 异步解码，首帧会画空白——切换白屏根因）
     pub preview_data: HashMap<usize, Arc<RenderImage>>,
@@ -235,7 +237,7 @@ impl RootView {
             batch_counts: (0, 0, 0),
             batch_cancel: Arc::new(AtomicBool::new(false)),
             sync_progress: None,
-            bbox_visible: true,
+            bbox_visible: false,
             show_recognize_all_confirm: false,
             focused_recognition: None,
             folder_menu_dir: None,

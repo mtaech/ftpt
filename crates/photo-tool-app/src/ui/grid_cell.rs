@@ -16,7 +16,7 @@ pub fn render_grid_cell(
     capture: &CaptureMeta,
     _index: usize,
     is_selected: bool,
-    thumbnail: Option<Arc<Image>>,
+    thumbnail: Option<Arc<RenderImage>>,
 ) -> impl IntoElement + use<> {
     let border_color = if is_selected {
         theme::colors().text_accent
@@ -105,10 +105,10 @@ pub fn render_grid_cell(
 
 fn render_thumbnail(
     capture: &CaptureMeta,
-    thumbnail: Option<Arc<Image>>,
+    thumbnail: Option<Arc<RenderImage>>,
 ) -> impl IntoElement + use<> {
     if let Some(image) = thumbnail {
-        img(image)
+        img(ImageSource::from(image))
             .object_fit(ObjectFit::Cover)
             .size_full()
             .into_any_element()
