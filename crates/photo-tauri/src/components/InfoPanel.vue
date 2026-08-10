@@ -15,6 +15,7 @@ import {
   XIcon,
 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useCapturesStore } from '@/stores/captures'
 import { useSelectionStore } from '@/stores/selection'
 import { usePreviewStore } from '@/stores/preview'
@@ -371,34 +372,24 @@ function valueCls(v: number): string {
       @pointermove="onHandleMove"
     />
 
-    <!-- 面板标题栏：信息/调整 tab + 关闭按钮（对齐 GPUI info_panel 头部） -->
+    <!-- 面板标题栏：信息/调整 tab + 关闭按钮（对齐 GPUI info_panel 头部；标准 Tabs 组件） -->
     <div class="flex h-9 shrink-0 items-center justify-between border-b border-border px-2">
-      <div class="flex h-full items-center gap-1">
-        <button
-          type="button"
-          class="flex h-full cursor-pointer items-center border-b-2 px-2 text-xs select-none"
-          :class="
-            activeTab === 'info'
-              ? 'border-primary font-medium text-foreground'
-              : 'border-transparent text-muted-foreground hover:text-foreground'
-          "
-          @click="activeTab = 'info'"
-        >
-          信息
-        </button>
-        <button
-          type="button"
-          class="flex h-full cursor-pointer items-center border-b-2 px-2 text-xs select-none"
-          :class="
-            activeTab === 'adjust'
-              ? 'border-primary font-medium text-foreground'
-              : 'border-transparent text-muted-foreground hover:text-foreground'
-          "
-          @click="activeTab = 'adjust'"
-        >
-          调整
-        </button>
-      </div>
+      <Tabs v-model="activeTab" class="h-full">
+        <TabsList class="h-full items-stretch rounded-none bg-transparent p-0 text-muted-foreground">
+          <TabsTrigger
+            value="info"
+            class="h-full rounded-none border-b-2 border-transparent px-2 text-xs data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:font-medium data-[state=active]:text-foreground data-[state=active]:shadow-none"
+          >
+            信息
+          </TabsTrigger>
+          <TabsTrigger
+            value="adjust"
+            class="h-full rounded-none border-b-2 border-transparent px-2 text-xs data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:font-medium data-[state=active]:text-foreground data-[state=active]:shadow-none"
+          >
+            调整
+          </TabsTrigger>
+        </TabsList>
+      </Tabs>
       <Button
         size="icon-xs"
         variant="ghost"

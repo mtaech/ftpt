@@ -8,6 +8,7 @@ import { getVersion, getTauriVersion } from '@tauri-apps/api/app'
 import { version as vueVersion } from 'vue'
 import { BookOpenIcon, InfoIcon, SettingsIcon, XIcon } from '@lucide/vue'
 import { Dialog, DialogClose, DialogContent, DialogTitle } from '@/components/ui/dialog'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Button } from '@/components/ui/button'
 import { useConfigStore } from '@/stores/config'
 import { listSystemFonts } from '@/lib/ipc'
@@ -216,29 +217,23 @@ const aboutRows = computed(
         </DialogClose>
       </div>
 
-      <!-- 主体：左 tab 导航 + 右内容（对齐 GPUI Settings 页布局） -->
-      <div class="flex min-h-0 flex-1">
-        <nav class="w-44 shrink-0 space-y-1 border-r p-2">
-          <button
+      <!-- 主体：左 tab 导航 + 右内容（对齐 GPUI Settings 页布局；标准 Tabs 组件） -->
+      <Tabs v-model="activeTab" class="flex min-h-0 flex-1">
+        <TabsList class="flex w-44 shrink-0 flex-col items-stretch gap-1 rounded-none border-r bg-transparent p-2">
+          <TabsTrigger
             v-for="t in TABS"
             :key="t.id"
-            type="button"
-            class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors"
-            :class="
-              activeTab === t.id
-                ? 'bg-accent text-accent-foreground'
-                : 'text-muted-foreground hover:bg-muted hover:text-foreground'
-            "
-            @click="activeTab = t.id"
+            :value="t.id"
+            class="justify-start gap-2 rounded-md px-2 py-1.5 data-[state=active]:bg-accent data-[state=active]:text-accent-foreground data-[state=active]:shadow-none"
           >
             <component :is="t.icon" class="h-4 w-4" />
             {{ t.label }}
-          </button>
-        </nav>
+          </TabsTrigger>
+        </TabsList>
 
         <div class="min-w-0 flex-1 overflow-y-auto p-4">
           <!-- ── 通用 ── -->
-          <section v-if="activeTab === 'general'" class="space-y-6">
+          <TabsContent value="general" class="mt-0 space-y-6">
             <!-- 主题：亮/暗，即时切换（html.dark） -->
             <div class="space-y-1.5">
               <label class="text-sm font-medium">主题</label>
@@ -308,10 +303,10 @@ const aboutRows = computed(
                 即时调整网格 cell（对齐 GPUI）；缩略图缓存按需重新生成
               </p>
             </div>
-          </section>
+          </TabsContent>
 
           <!-- ── 快捷键 ── -->
-          <section v-else-if="activeTab === 'shortcuts'" class="space-y-5">
+          <TabsContent value="shortcuts" class="mt-0 space-y-5">
             <div v-for="sec in SHORTCUT_SECTIONS" :key="sec.title" class="space-y-1.5">
               <h3 class="text-sm font-medium">{{ sec.title }}</h3>
               <div class="space-y-1">
@@ -329,10 +324,10 @@ const aboutRows = computed(
                 </div>
               </div>
             </div>
-          </section>
+          </TabsContent>
 
           <!-- ── 关于 ── -->
-          <section v-else class="space-y-5">
+          <TabsContent value="about" class="mt-0 space-y-5">
             <div class="space-y-1">
               <h3 class="text-sm font-medium">Photo Tool（ftpt）</h3>
               <p class="text-xs text-muted-foreground">照片管理与筛选工具（鸟类摄影工作流）</p>
@@ -353,9 +348,9 @@ const aboutRows = computed(
               <p>配置存于可执行文件旁的 PT.db（程序不在系统安装目录时始终视为便携版）。</p>
               <p>缩略图缓存随扫描目录存放（每个目录下 .pt/thumbs）。</p>
             </div>
-          </section>
+          </TabsContent>
         </div>
-      </div>
+      </Tabs>
     </DialogContent>
   </Dialog>
 </template>
