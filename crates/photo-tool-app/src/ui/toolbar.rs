@@ -255,9 +255,11 @@ fn settings_page(vh: WeakEntity<RootView>) -> SettingPage {
                 let vh = vh.clone();
                 move |value: SharedString, app: &mut App| {
                     if let Some(e) = vh.upgrade() {
-                        app.update_entity(&e, |view, _cx| {
+                        app.update_entity(&e, |view, cx| {
                             view.config.font_family = value.to_string();
                             view.save_config();
+                            // save_config 只落盘不触发重绘，补 notify 让新字体立即生效
+                            cx.notify();
                         });
                     }
                 }
@@ -287,9 +289,11 @@ fn settings_page(vh: WeakEntity<RootView>) -> SettingPage {
                 move |value: f64, app: &mut App| {
                     let count = value.round().clamp(1.0, 4.0) as u32;
                     if let Some(e) = vh.upgrade() {
-                        app.update_entity(&e, |view, _cx| {
+                        app.update_entity(&e, |view, cx| {
                             view.config.recognition_thread_count = count;
                             view.save_config();
+                            // save_config 只落盘不触发重绘，补 notify 刷新设置项显示
+                            cx.notify();
                         });
                     }
                 }

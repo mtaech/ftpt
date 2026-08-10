@@ -39,7 +39,7 @@ pub fn render_grid(
             let Some(view) = view_handle.upgrade() else {
                 return Vec::new();
             };
-            tracing::info!("渲染闭包: rows={}..{} thumbnails={}", range.start, range.end, view.read(app).thumbnail_data.len());
+            tracing::debug!("渲染闭包: rows={}..{} thumbnails={}", range.start, range.end, view.read(app).thumbnail_data.len());
             // range 被下方 map 消费，先保存边界供预取区使用
             let (range_start, range_end) = (range.start, range.end);
             // 闭包在 prepaint 阶段执行（render 借用已释放，下方 update_entity 可证），
