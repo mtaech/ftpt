@@ -133,7 +133,7 @@ impl RootView {
             .filter_map(|&ci| {
                 self.captures
                     .get(ci)
-                    .map(|m| format!("{}.{}", m.base_name, m.primary_format.to_lowercase()))
+                    .map(|m| m.display_name())
             })
             .collect();
         (total, synced, files)
@@ -252,14 +252,23 @@ impl RootView {
                 (results, progress, total)
             },
             move |this, (results, _progress, total), cx| {
+                // B4：无条件先复位哨兵与轮询终止条件——即使代际不匹配也必须解除
+                // batch_in_progress，否则 300ms 轮询任务永不退出、面板永久「执行中」
+                this.batch_in_progress = false;
+                this.batch_progress_msg.clear();
                 if generation != this.scan_generation {
+                    // 重扫导致代际不匹配：结果基于旧索引，丢弃，不应用不刷新
+                    tracing::warn!(
+                        "批量操作结果代际不匹配（{} != {}），丢弃结果",
+                        generation,
+                        this.scan_generation
+                    );
+                    cx.notify();
                     return;
                 }
-                this.batch_in_progress = false;
                 this.batch_progress =
                     Some((total.load(Ordering::Relaxed), total.load(Ordering::Relaxed)));
                 this.batch_results = results;
-                this.batch_progress_msg.clear();
                 // 完成反馈：toast 摘要
                 let ok = this.batch_results.iter().filter(|m| !m.contains("失败")).count();
                 let fail = this.batch_results.len() - ok;
@@ -277,7 +286,8 @@ impl RootView {
             },
         );
 
-        // 轮询进度：每 300ms 检查 atomic 计数器并更新 UI
+        // 轮询进度：每 300ms 检查 atomic 计数器并更新 UI；
+        // on_done 置 batch_in_progress=false 后轮询退出，不再永久空转
         let vh = cx.entity().downgrade();
         cx.spawn(|_: WeakEntity<RootView>, cx: &mut AsyncApp| {
             let mut cx = cx.clone();
@@ -288,15 +298,22 @@ impl RootView {
                         .await;
                     let done = progress_poll.load(Ordering::Relaxed);
                     let tot = total_poll.load(Ordering::Relaxed);
-                    if let Some(view) = vh.upgrade() {
-                        cx.update_entity(&view, |view: &mut RootView, cx: &mut Context<RootView>| {
-                            if view.batch_in_progress {
-                                view.batch_progress = Some((done, tot));
-                                view.batch_progress_msg = format!("处理中: {done}/{tot}");
-                                cx.notify();
+                    let Some(view) = vh.upgrade() else {
+                        break;
+                    };
+                    let running = cx.update_entity(
+                        &view,
+                        |view: &mut RootView, cx: &mut Context<RootView>| {
+                            if !view.batch_in_progress {
+                                return false;
                             }
-                        });
-                    } else {
+                            view.batch_progress = Some((done, tot));
+                            view.batch_progress_msg = format!("处理中: {done}/{tot}");
+                            cx.notify();
+                            true
+                        },
+                    );
+                    if !running {
                         break;
                     }
                 }

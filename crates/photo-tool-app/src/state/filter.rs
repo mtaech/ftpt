@@ -33,6 +33,17 @@ impl RootView {
     }
 
     pub fn apply_filter_and_sort(&mut self) {
+        // 焦点/锚点身份快照：display_order 重建后按身份重映射（焦点跟随同一张照片，
+        // 被筛选掉/删除则落位相邻项，绝不越界）。pending_focus_remap 由先失效
+        // display_order 的入口（delete_selected）预置，其余入口在此快照一致状态。
+        let remap = match self.pending_focus_remap.take() {
+            Some(snap) => snap,
+            None => self.snapshot_focus_state(),
+        };
+        let old_focus_capture = self
+            .focus_index
+            .and_then(|di| self.display_order.get(di))
+            .copied();
         let filter = &self.filter;
         let sort_by = self.sort_by;
         let sort_dir = self.sort_dir;
@@ -191,6 +202,8 @@ impl RootView {
         });
 
         self.display_order = indices;
+        // 焦点/锚点按身份重映射（在下次渲染前完成）
+        self.apply_focus_remap(remap, old_focus_capture);
         // 筛选集变化 → 同步预估失效重算（UI 显示「+M」）
         self.refresh_batch_sync_extra();
     }

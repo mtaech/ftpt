@@ -272,31 +272,10 @@ impl RootView {
         }
 
         // 收集被删除文件的唯一主路径（去重）
-        let path_set: Vec<PathBuf> = capture_indices
-            .iter()
-            .filter_map(|&i| self.captures.get(i))
-            .map(|meta| PathBuf::from(&meta.primary_path))
-            .collect();
-
-        // 计算 rel_paths 用于删除后的识别行同步
-        let dir_clone = self.dir_path.clone();
-        let rel_paths: Vec<String> = path_set
-            .iter()
-            .filter_map(|primary| {
-                dir_clone.as_ref().and_then(|d| {
-                    primary.strip_prefix(d).ok().map(|rel| {
-                        rel.to_string_lossy().replace('\\', "/")
-                    })
-                })
-            })
-            .collect();
-
         let paths: Vec<PathBuf> = capture_indices
             .iter()
             .filter_map(|&i| self.captures.get(i))
-            .map(|meta| {
-                PathBuf::from(&meta.primary_path)
-            })
+            .map(|meta| PathBuf::from(&meta.primary_path))
             .collect();
 
         self.worker.spawn(
@@ -311,7 +290,8 @@ impl RootView {
                 results
             },
             move |this, results, cx| {
-                let mut deleted = HashSet::new();
+                // 只统计删除成功的文件：失败文件的识别行必须保留（避免数据丢失）
+                let mut deleted: HashSet<PathBuf> = HashSet::new();
                 for (path, result) in &results {
                     match result {
                         Ok(()) => {
@@ -323,12 +303,24 @@ impl RootView {
                         }
                     }
                 }
-                // 同步删除识别行
-                if let Some(ref db) = this.folder_db {
+                // 同步删除识别行（仅删除成功者）
+                if let Some(db) = &this.folder_db
+                    && let Some(dir) = &this.dir_path
+                {
+                    let rel_paths: Vec<String> = deleted
+                        .iter()
+                        .filter_map(|primary| {
+                            primary.strip_prefix(dir).ok().map(|rel| {
+                                rel.to_string_lossy().replace('\\', "/")
+                            })
+                        })
+                        .collect();
                     if !rel_paths.is_empty() {
                         let _ = photo_engine::ops::sync_delete_recognitions(db, &rel_paths);
                     }
                 }
+                // 焦点/锚点身份快照：必须在 captures.retain 之前（此后 display_order 失效）
+                this.pending_focus_remap = Some(this.snapshot_focus_state());
                 // Remove deleted captures from the list
                 this.captures.retain(|meta| {
                     let primary = PathBuf::from(&meta.primary_path);
@@ -350,17 +342,23 @@ impl RootView {
                 this.preview_loading.clear();
                 this.preview_cancel.clear();
                 this.fullres_loading.clear();
-                this.refresh_focused_recognition();
+                // 重建 display_order 并重映射焦点（apply_focus_remap 内部消费 pending 快照）
                 this.apply_filter_and_sort();
+                // 显式兜底刷新：删除路径进入 apply 时 display_order 已失效，内部
+                // 「焦点 capture 数值变化」比较不可靠，这里保证识别卡片/调整参数绑定新焦点
+                this.refresh_focused_recognition();
+                this.refresh_adjustments_sync();
                 cx.notify();
             },
         );
     }
 
     pub(crate) fn apply_rating(&mut self, rating: Rating, cx: &mut Context<Self>) {
+        // 焦点 capture 直接取索引（display_order → capture 索引）：不能用 base_name 定位，
+        // 同目录同名不同扩展（如 DSC_0001.jpg + DSC_0001.nef）的 base_name 相同会命中错误文件
         let indices: Vec<usize> = if self.selected.is_empty() {
-            self.get_focused_capture()
-                .and_then(|m| self.captures.iter().position(|c| c.base_name == m.base_name))
+            self.focus_index
+                .and_then(|di| self.display_order.get(di).copied())
                 .into_iter()
                 .collect()
         } else {
@@ -372,9 +370,10 @@ impl RootView {
     }
 
     pub(crate) fn apply_label(&mut self, label: ColorLabel, cx: &mut Context<Self>) {
+        // 同 apply_rating：按 capture 索引而非 base_name 定位（base_name 可能重名）
         let indices: Vec<usize> = if self.selected.is_empty() {
-            self.get_focused_capture()
-                .and_then(|m| self.captures.iter().position(|c| c.base_name == m.base_name))
+            self.focus_index
+                .and_then(|di| self.display_order.get(di).copied())
                 .into_iter()
                 .collect()
         } else {
@@ -386,9 +385,10 @@ impl RootView {
     }
 
     pub(crate) fn apply_flag(&mut self, flag: Option<Flag>, cx: &mut Context<Self>) {
+        // 同 apply_rating：按 capture 索引而非 base_name 定位（base_name 可能重名）
         let indices: Vec<usize> = if self.selected.is_empty() {
-            self.get_focused_capture()
-                .and_then(|m| self.captures.iter().position(|c| c.base_name == m.base_name))
+            self.focus_index
+                .and_then(|di| self.display_order.get(di).copied())
                 .into_iter()
                 .collect()
         } else {

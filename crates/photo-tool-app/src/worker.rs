@@ -1,3 +1,6 @@
+use std::any::Any;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+
 use gpui::*;
 use rayon::ThreadPoolBuilder;
 
@@ -32,6 +35,11 @@ impl Worker {
     }
 
     /// Spawn work on rayon, deliver result via GPUI async context.
+    ///
+    /// 泛型约束 `R: Default`：worker 闭包 panic 时无法构造结果值，用 `R::default()`
+    /// 兜底（Option 类型即 None），保证 on_done 必定执行——否则 UI 侧 loading/进度
+    /// 哨兵（grid_loading、preview_loading、batch_in_progress 等）会永久置位，
+    /// 且 GPUI 吞掉 UI 线程 panic，表现为「点了没反应」。
     pub fn spawn<F, R>(
         &self,
         cx: &Context<RootView>,
@@ -39,9 +47,9 @@ impl Worker {
         on_done: impl Fn(&mut RootView, R, &mut Context<RootView>) + 'static,
     ) where
         F: FnOnce() -> R + Send + 'static,
-        R: Send + 'static,
+        R: Default + Send + 'static,
     {
-        self.spawn_on(&self.pool, cx, f, on_done);
+        self.spawn_on(&self.pool, cx, f, on_done, std::panic::Location::caller());
     }
 
     /// 交互优先池：用于用户等待结果的加载（预览/全分辨率/网格懒加载），
@@ -53,9 +61,9 @@ impl Worker {
         on_done: impl Fn(&mut RootView, R, &mut Context<RootView>) + 'static,
     ) where
         F: FnOnce() -> R + Send + 'static,
-        R: Send + 'static,
+        R: Default + Send + 'static,
     {
-        self.spawn_on(&self.fast_pool, cx, f, on_done);
+        self.spawn_on(&self.fast_pool, cx, f, on_done, std::panic::Location::caller());
     }
 
     fn spawn_on<F, R>(
@@ -64,13 +72,20 @@ impl Worker {
         cx: &Context<RootView>,
         f: F,
         on_done: impl Fn(&mut RootView, R, &mut Context<RootView>) + 'static,
+        location: &'static std::panic::Location<'static>,
     ) where
         F: FnOnce() -> R + Send + 'static,
-        R: Send + 'static,
+        R: Default + Send + 'static,
     {
         let (tx, rx) = oneshot::channel();
         pool.spawn(move || {
-            let _ = tx.send(f());
+            // 闭包 panic 防护：捕获后记录载荷（含调用位置）并以 R::default() 兜底，
+            // 照常 send 让 on_done 必定执行、UI 侧 loading/进度哨兵复位
+            let result = catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|payload| {
+                log_worker_panic(payload, location);
+                R::default()
+            });
+            let _ = tx.send(result);
         });
         // GPUI 的 Task 丢弃即取消，必须 detach 让桥接任务跑完
         cx.spawn(|weak_view: WeakEntity<RootView>, cx: &mut AsyncApp| {
@@ -85,4 +100,21 @@ impl Worker {
         })
         .detach();
     }
+}
+
+/// 记录 worker 闭包 panic 的载荷与调用位置；on_done 会收到 `R::default()` 兜底值。
+fn log_worker_panic(
+    payload: Box<dyn Any + Send>,
+    location: &'static std::panic::Location<'static>,
+) {
+    let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "非字符串 panic 载荷".to_string()
+    };
+    tracing::error!(
+        "worker 任务 panic（调用位置 {location}），结果以默认值兜底，on_done 仍会执行: {msg}"
+    );
 }

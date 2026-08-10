@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gpui::*;
 use std::sync::LazyLock;
@@ -37,6 +37,25 @@ pub enum ViewMode {
     Preview,
 }
 
+/// 焦点/锚点重映射的身份标识：按 primary_path（+ 同路径多 capture 的序号）定位。
+/// display_order 重建后焦点应跟随同一张照片，而非停留在旧索引（旧索引可能越界 panic 或指向另一张照片）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FocusIdentity {
+    /// 焦点 capture 的主路径（唯一身份，优先）
+    pub primary_path: PathBuf,
+    /// 同一主路径出现多个 capture 时的序号（当前扫描每文件一 capture 恒为 0；防御保留）
+    pub path_ordinal: usize,
+}
+
+/// display_order 重建前对焦点+锚点取的身份快照（apply_filter_and_sort 消费后重映射）。
+/// 由先失效 display_order 的入口（如 delete_selected 的 captures.retain）预置到
+/// `pending_focus_remap`，其余入口在 apply_filter_and_sort 内即时快照一致状态。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FocusRemapSnapshot {
+    pub focus: Option<FocusIdentity>,
+    pub anchor: Option<FocusIdentity>,
+}
+
 pub struct RootView {
     pub config: AppConfig,
     pub config_path: PathBuf,
@@ -57,6 +76,9 @@ pub struct RootView {
     pub focus_index: Option<usize>,
     /// Sorted, filtered indices into `self.captures`.
     pub display_order: Vec<usize>,
+    /// 待消费的焦点/锚点身份快照：captures 重排先于 apply_filter_and_sort 的入口
+    /// （delete_selected）在失效前预置，重建后按身份重映射（见 apply_filter_and_sort）。
+    pub(crate) pending_focus_remap: Option<FocusRemapSnapshot>,
     /// 已解码缩略图按 capture 索引缓存。存 Arc<Image>（加载时构建一次、哈希一次），
     /// 渲染路径只做指针拷贝——此前存 Vec<u8>，grid/preview 每帧克隆整表字节，是卡顿主因。
     /// 网格缩略图按 capture 索引缓存：worker 预解码为 RenderImage（字节源走 GPUI
@@ -84,6 +106,16 @@ pub struct RootView {
     pub bird_options: Vec<String>,
     /// 鸟种下拉待重建标记（扫描/识别完成或外部清除筛选时置位）
     pub bird_options_dirty: bool,
+    /// 手动修正鸟种：全量名录（bird_id/中文/学名），懒加载（首次展开修正时）
+    pub(crate) correction_birds: Vec<photo_domain::BirdMatch>,
+    /// 修正下拉数据源（全部中文名，排序）
+    pub(crate) correction_options: Vec<String>,
+    /// 修正鸟种下拉实体（创建需 Window，由 info_panel render 按 dirty 重建）
+    pub(crate) correction_select: Option<gpui::Entity<gpui_component::combobox::ComboboxState<gpui_component::select::SearchableVec<String>>>>,
+    /// 修正下拉待重建标记
+    pub(crate) correction_select_dirty: bool,
+    /// 修正面板展开状态
+    pub(crate) correction_open: bool,
     pub show_settings: bool,
     /// 设置弹窗独立 View（拥有自身 render 生命周期，避免每帧重建）
     pub settings_overlay: Option<gpui::Entity<SettingsOverlay>>,
@@ -133,6 +165,8 @@ pub struct RootView {
     // ── 识别 ──
     /// 单张识别中的 capture index（None=空闲）
     pub recognizing_single: Option<usize>,
+    /// 单张识别缓存 Recognizer（启动后台预热；单次识别用完归还，避免每次点击重建模型）
+    pub(crate) single_recognizer: Option<photo_recognize::Recognizer>,
     /// 当前识别阶段文本（检测中/分类中/名录映射中）
     pub recognize_stage: Option<String>,
     /// 批量识别进行中
@@ -187,15 +221,6 @@ pub struct RootView {
     pub adjust_drag: Option<usize>,
     /// 三个 slider 的窗口边界 (left, top, width)，on_prepaint 写入，拖动算值用
     pub adjust_slider_bounds: [(f32, f32, f32); 3],
-    // ── 裁切交互（ADR 0007：调整视图内框选/移动/手柄调整；拖动中只更新 draft，mouse_up 才提交）──
-    /// 裁切框选中（Shift+拖拽，窗口坐标：(起始x, 起始y, 当前x, 当前y)）
-    pub crop_draw: Option<(f32, f32, f32, f32)>,
-    /// 裁切拖动中显示用框（归一化；crop_draft 优先于 current_adjust.crop 显示）
-    pub crop_draft: Option<photo_domain::BBox>,
-    /// 手柄调整中：(手柄索引 0-7, 原框)。手柄索引约定：0=左上 1=上中 2=右上 3=右中 4=右下 5=下中 6=左下 7=左中
-    pub crop_resize: Option<(usize, photo_domain::BBox)>,
-    /// 移动框中：(起始窗口x, 起始窗口y, 原框)
-    pub crop_move: Option<(f32, f32, photo_domain::BBox)>,
 }
 
 impl RootView {
@@ -235,6 +260,7 @@ impl RootView {
             filter: FilterCriteria::default(),
             focus_index: None,
             display_order: Vec::new(),
+            pending_focus_remap: None,
             scan_generation: 0,
             scan_in_progress: false,
             preview_loading: HashSet::new(),
@@ -254,6 +280,11 @@ impl RootView {
             bird_select,
             bird_options: Vec::new(),
             bird_options_dirty: false,
+            correction_birds: Vec::new(),
+            correction_options: Vec::new(),
+            correction_select: None,
+            correction_select_dirty: false,
+            correction_open: false,
             show_settings: false,
             settings_overlay: None,
             filter_bar_expanded: false,
@@ -273,6 +304,8 @@ impl RootView {
             batch_show_progress_popup: false,
             recognizing_single: None,
             recognize_stage: None,
+            // 单张识别缓存 Recognizer（启动后台预热；用完归还，避免每次点击重建模型 ~5s）
+            single_recognizer: None,
             batch_recognizing: false,
             batch_progress_rc: (0, 0),
             batch_current_file: String::new(),
@@ -297,15 +330,14 @@ impl RootView {
             adjust_export_msg: None,
             adjust_drag: None,
             adjust_slider_bounds: [(0.0, 0.0, 1.0); 3],
-            crop_draw: None,
-            crop_draft: None,
-            crop_resize: None,
-            crop_move: None,
         };
 
         if let Some(last_dir) = &auto_dir {
             this.scan_directory(PathBuf::from(last_dir), cx);
         }
+
+        // 后台预热单张识别 Recognizer：DirectML 初始化 ~2-5s，首次点击识别不应再等待
+        this.warmup_single_recognizer(cx);
 
         this
     }
@@ -326,6 +358,93 @@ impl RootView {
         self.focus_index
             .and_then(|di| self.display_order.get(di))
             .and_then(|&ci| self.captures.get(ci))
+    }
+
+    /// 快照当前焦点/锚点的身份（display_order 重建前、captures/display_order 一致时调用；
+    /// delete_selected 在 captures.retain 之前调用并存入 pending_focus_remap）
+    pub(crate) fn snapshot_focus_state(&self) -> FocusRemapSnapshot {
+        FocusRemapSnapshot {
+            focus: self.focus_identity_at(self.focus_index),
+            anchor: self.focus_identity_at(self.anchor),
+        }
+    }
+
+    /// display_order 索引 → 身份（主路径 + 同路径序号）
+    fn focus_identity_at(&self, di: Option<usize>) -> Option<FocusIdentity> {
+        let di = di?;
+        let &ci = self.display_order.get(di)?;
+        let meta = self.captures.get(ci)?;
+        let primary_path = PathBuf::from(&meta.primary_path);
+        // 同一主路径多 capture 时的序号（防御：当前扫描每文件一 capture）
+        let path_ordinal = self
+            .captures
+            .iter()
+            .take(ci)
+            .filter(|m| Path::new(&m.primary_path) == primary_path.as_path())
+            .count();
+        Some(FocusIdentity {
+            primary_path,
+            path_ordinal,
+        })
+    }
+
+    /// 在新 display_order 中按身份查找索引
+    fn find_display_index_of(&self, id: &FocusIdentity) -> Option<usize> {
+        self.display_order.iter().position(|&ci| {
+            self.captures.get(ci).is_some_and(|m| {
+                let ord = self
+                    .captures
+                    .iter()
+                    .take(ci)
+                    .filter(|x| Path::new(&x.primary_path) == id.primary_path.as_path())
+                    .count();
+                Path::new(&m.primary_path) == id.primary_path.as_path() && ord == id.path_ordinal
+            })
+        })
+    }
+
+    /// 按身份快照重映射 focus_index / anchor（display_order 已重建后调用）：
+    /// 照片仍在（身份可寻）→ 跟随同一张；被筛选掉/删除 → clamp 到原位置（删除场景即相邻项）；
+    /// 列表为空 → 清空。焦点 capture 变化时同步刷新右侧识别卡片与调整参数。
+    pub(crate) fn apply_focus_remap(
+        &mut self,
+        snap: FocusRemapSnapshot,
+        old_focus_capture: Option<usize>,
+    ) {
+        if self.display_order.is_empty() {
+            self.focus_index = None;
+            self.anchor = None;
+        } else {
+            let last = self.display_order.len() - 1;
+            // 焦点：身份可寻则跟随；否则 clamp 到原位置
+            if let Some(id) = &snap.focus {
+                self.focus_index = Some(
+                    self.find_display_index_of(id)
+                        .unwrap_or_else(|| self.focus_index.unwrap_or(0).min(last)),
+                );
+            } else if let Some(fi) = self.focus_index {
+                // 身份缺失（进入时状态已不一致）：仅防越界
+                self.focus_index = Some(fi.min(last));
+            }
+            // 锚点同理
+            if let Some(id) = &snap.anchor {
+                self.anchor = Some(
+                    self.find_display_index_of(id)
+                        .unwrap_or_else(|| self.anchor.unwrap_or(0).min(last)),
+                );
+            } else if let Some(a) = self.anchor {
+                self.anchor = Some(a.min(last));
+            }
+        }
+        // 焦点 capture 变化 → 识别卡片/调整参数同步（廉价 SQLite 点查）
+        let new_focus_capture = self
+            .focus_index
+            .and_then(|di| self.display_order.get(di))
+            .copied();
+        if new_focus_capture != old_focus_capture {
+            self.refresh_focused_recognition();
+            self.refresh_adjustments_sync();
+        }
     }
 
     /// Dispatch an action. Returns true if the view should be re-rendered.
