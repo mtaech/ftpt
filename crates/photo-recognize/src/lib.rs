@@ -30,7 +30,6 @@ mod pipeline;
 mod sharpness;
 
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
 
 use ort::ep;
 use ort::session::Session;
@@ -193,6 +192,29 @@ impl Recognizer {
         )
     }
 
+    /// 单张全管线识别（缩略图优先输入）。
+    ///
+    /// `thumb_bytes` 非空时优先从内存解码——跳过全图 `image::open`
+    /// （24MP 全量解码 100-300ms/张；缩略图为 app 侧 `.pt/thumbs` 派生图字节，
+    /// JPEG DCT 快路径毫秒级），解码失败自动回落完整路径；
+    /// `None` 时与 [`Recognizer::recognize`] 行为完全一致。
+    pub fn recognize_with_thumbnail(
+        &mut self,
+        capture: &Capture,
+        thumb_bytes: Option<&[u8]>,
+        on_progress: Option<&pipeline::ProgressCallback>,
+    ) -> Result<Recognition, RecognizeError> {
+        pipeline::recognize_capture_with_thumbnail(
+            &mut self.detection_session,
+            &mut self.classification_session,
+            &mut self.eye_session,
+            &self.catalog,
+            capture,
+            thumb_bytes,
+            on_progress,
+        )
+    }
+
     /// 手动框选区域识别。
     ///
     /// 跳过 YOLO 检测，直接对用户给的 `bbox`（归一化 0-1 坐标）分类 + 名录映射。
@@ -214,35 +236,27 @@ impl Recognizer {
         )
     }
 
-    /// 批量识别。
+    /// 手动框选区域识别（缩略图优先输入）。
     ///
-    /// 顺序执行，每张后检查 `cancel` 标志，取消时返回已完成部分的识别结果。
-    /// 每个结果关联 Capture 在输入切片中的索引。
-    pub fn recognize_paths(
+    /// `thumb_bytes` 语义同 [`Recognizer::recognize_with_thumbnail`]：
+    /// 非空优先内存解码省全图 `image::open`，失败回落完整路径；
+    /// `None` 时与 [`Recognizer::recognize_region`] 行为完全一致。
+    pub fn recognize_region_with_thumbnail(
         &mut self,
-        captures: &[Capture],
+        capture: &Capture,
+        bbox: BBox,
+        thumb_bytes: Option<&[u8]>,
         on_progress: Option<&pipeline::ProgressCallback>,
-        cancel: &AtomicBool,
-    ) -> Vec<(usize, Recognition)> {
-        pipeline::recognize_captures(
-            &mut self.detection_session,
+    ) -> Result<Recognition, RecognizeError> {
+        pipeline::recognize_region_with_thumbnail(
             &mut self.classification_session,
             &mut self.eye_session,
             &self.catalog,
-            captures,
+            capture,
+            bbox,
+            thumb_bytes,
             on_progress,
-            cancel,
         )
-    }
-
-    /// 返回检测 session 的可变引用（供直接调用 detect 模块用）
-    pub fn detection_session(&mut self) -> &mut Session {
-        &mut self.detection_session
-    }
-
-    /// 返回分类 session 的可变引用（供直接调用 classify 模块用）
-    pub fn classification_session(&mut self) -> &mut Session {
-        &mut self.classification_session
     }
 
     /// 返回眼检测 session 的可变引用（供直接调用 eye 模块用）
@@ -254,6 +268,12 @@ impl Recognizer {
     pub fn backend(&self) -> Backend {
         self.backend
     }
+}
+
+/// 名录库全量鸟种（手动修正鸟种下拉数据源）：按中文名排序。
+/// 名录库路径与 [`Recognizer::new`] 的 `catalog_db` 参数相同（exe 同级 `data/pica_ref.db`）。
+pub fn list_all_species(catalog_db: &Path) -> Result<Vec<photo_domain::BirdMatch>, RecognizeError> {
+    CatalogDb::open(catalog_db).map(|db| db.all_species())
 }
 
 // ---------------------------------------------------------------------------
@@ -309,10 +329,18 @@ fn load_model_cpu(path: &Path) -> Result<(Session, Backend), RecognizeError> {
 // RAW 预览提取（供 pipeline 模块调用）
 // ---------------------------------------------------------------------------
 
-/// 使用 `photo-engine` 从 RAW 文件提取最大内嵌预览 JPEG。
+/// 识别用 RAW 预览提取：优先相机内嵌 JPEG（~50ms）。
+///
+/// 识别输入只需 640/224 分辨率（检测/眼/分类），内嵌预览（相机写入的
+/// 1600×1200 级 JPEG）足够——避免 20MP RAW 完整解码（LibRaw half_size
+/// 约 5-8s，是识别慢的主因）。内嵌缺失/非 JPEG 时回退完整解码。
 fn engine_raw_preview(path: &Path) -> Result<Vec<u8>, RecognizeError> {
-    // photo_engine::thumbnail::decode_raw_preview 提取内嵌 JPEG
-    // 若没有内嵌缩略图则回落完整解码（不解拜耳）
+    // 快路径：内嵌 JPEG（任意尺寸都收——识别会再缩到 2048/640）
+    if let Ok(bytes) = photo_engine::thumbnail::decode_raw_embedded_thumb(path, u32::MAX) {
+        tracing::info!("识别源: 内嵌 JPEG (快): {}", path.display());
+        return Ok(bytes);
+    }
+    // 回退：完整解码（无内嵌或内嵌非 JPEG 的 RAW）
     let jpeg = photo_engine::thumbnail::decode_raw_preview(path, u32::MAX)
         .map_err(|e| RecognizeError::RawPreview(e.to_string()))?;
     Ok(jpeg)
@@ -435,7 +463,7 @@ mod tests {
             }],
         };
 
-        let result = super::pipeline::resolve_source(&capture);
+        let result = super::pipeline::resolve_source_with_thumbnail(&capture, None);
         assert!(result.is_ok(), "JPEG 应直接解码成功");
     }
 
@@ -452,7 +480,7 @@ mod tests {
             }],
         };
 
-        let result = super::pipeline::resolve_source(&capture);
+        let result = super::pipeline::resolve_source_with_thumbnail(&capture, None);
         assert!(result.is_err());
         let (stage, _msg) = result.err().unwrap();
         assert_eq!(stage, RecognitionFailureStage::Assets);
@@ -476,7 +504,7 @@ mod tests {
             }],
         };
 
-        let result = super::pipeline::resolve_source(&capture);
+        let result = super::pipeline::resolve_source_with_thumbnail(&capture, None);
         assert!(result.is_err());
         let (stage, _msg) = result.err().unwrap();
         assert_eq!(stage, RecognitionFailureStage::Assets);

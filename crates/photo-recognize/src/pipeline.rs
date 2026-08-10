@@ -12,9 +12,7 @@
 //! | 源文件不可用 | `NeedsReview`(Assets) | 图片文件不存在/无法解码 |
 //! | 全部成功 | `Confirmed`(None) | 检测→分类→映射均成功 |
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
-use image::DynamicImage;
+use image::{DynamicImage, GenericImageView};
 use ort::session::Session;
 
 use photo_domain::{BBox, Capture, Recognition, RecognitionFailureStage, RecognitionStatus};
@@ -43,16 +41,59 @@ pub(crate) enum ResolvedSource {
     Image(DynamicImage),
 }
 
-/// 解析输入源：从 Capture 主显示文件获取解码图像。
+/// 识别源图长边上限（px）。检测/眼/分类输入为 640/640/224，2048 源图足够；
+/// 超限缩放一次可显著降低两次全图缩放（20MP → 640 CatmullRom）的代价。
+/// 代价：小鸟（<11% 画面）的分类裁切源分辨率下降，识别精度轻微让步于速度。
+const SOURCE_MAX_SIDE: u32 = 2048;
+
+/// 超限源图缩放到 [`SOURCE_MAX_SIDE`]，否则原样返回。
+fn cap_source_size(img: DynamicImage) -> DynamicImage {
+    let (w, h) = img.dimensions();
+    let max_side = w.max(h);
+    if max_side <= SOURCE_MAX_SIDE {
+        return img;
+    }
+    let scale = SOURCE_MAX_SIDE as f32 / max_side as f32;
+    let nw = ((w as f32 * scale).round() as u32).max(1);
+    let nh = ((h as f32 * scale).round() as u32).max(1);
+    img.resize_exact(nw, nh, image::imageops::FilterType::Lanczos3)
+}
+
+/// 解析输入源（带可选内存缩略图）。
 ///
-/// 策略（与 pica `_resolveSourcePath` 对等, recognition_pipeline_service.dart:156-173）：
+/// `thumb_bytes` 非空时优先从内存解码——跳过全图 `image::open`
+/// （24MP 全量解码 100-300ms/张；缩略图为 app 侧 `.pt/thumbs` 磁盘缓存或
+/// 预览缓存派生图字节）。解码失败时回落到完整路径。
+///
+/// 完整路径策略（与 pica `_resolveSourcePath` 对等, recognition_pipeline_service.dart:156-173）：
 /// 1. 取主显示文件路径
 /// 2. JPEG/PNG 等标准格式 → `image::open` 直接解码
 /// 3. RAW 格式 → `photo_engine::thumbnail::decode_raw_preview` 提取内嵌 JPEG 预览
 /// 4. 均失败 → `NeedsReview(Assets)`
-pub(crate) fn resolve_source(
+pub(crate) fn resolve_source_with_thumbnail(
     capture: &Capture,
+    thumb_bytes: Option<&[u8]>,
 ) -> Result<ResolvedSource, (RecognitionFailureStage, &'static str)> {
+    resolve_source_opt(capture, thumb_bytes)
+}
+
+/// 输入源解析共用实现（`thumb_bytes` 为可选缩略图优先路径）。
+fn resolve_source_opt(
+    capture: &Capture,
+    thumb_bytes: Option<&[u8]>,
+) -> Result<ResolvedSource, (RecognitionFailureStage, &'static str)> {
+    // 缩略图优先：内存解码成功即用（仍需超限截幅），失败静默回退完整路径
+    if let Some(bytes) = thumb_bytes
+        && !bytes.is_empty()
+    {
+        match image::load_from_memory(bytes) {
+            Ok(img) => return Ok(ResolvedSource::Image(cap_source_size(img))),
+            Err(e) => {
+                tracing::warn!("[识别] 缩略图字节解码失败，回退完整解码: {e}");
+            }
+        }
+    }
+
     let primary = &capture.source_files[capture.primary_index];
     let path = &primary.path;
 
@@ -70,7 +111,7 @@ pub(crate) fn resolve_source(
         | photo_domain::ImageFormat::WebP
         | photo_domain::ImageFormat::Bmp
         | photo_domain::ImageFormat::Gif => match image::open(path) {
-            Ok(img) => Ok(ResolvedSource::Image(img)),
+            Ok(img) => Ok(ResolvedSource::Image(cap_source_size(img))),
             Err(e) => {
                 tracing::warn!("标准图片解码失败: {} — {e}", path.display());
                 Err((RecognitionFailureStage::Assets, "无法解码图片"))
@@ -80,12 +121,12 @@ pub(crate) fn resolve_source(
         photo_domain::ImageFormat::Raw(_) => {
             // 先尝试用 `image` 直接解码（部分 RAW 如 DNG 可能被 image 支持）
             match image::open(path) {
-                Ok(img) => Ok(ResolvedSource::Image(img)),
+                Ok(img) => Ok(ResolvedSource::Image(cap_source_size(img))),
                 Err(_) => {
                     // 使用 photo-engine 的 RAW 预览提取
                     match crate::engine_raw_preview(path) {
                         Ok(jpeg_bytes) => match image::load_from_memory(&jpeg_bytes) {
-                            Ok(img) => Ok(ResolvedSource::Image(img)),
+                            Ok(img) => Ok(ResolvedSource::Image(cap_source_size(img))),
                             Err(e) => {
                                 tracing::warn!("RAW 预览 JPEG 解码失败: {} — {e}", path.display());
                                 Err((RecognitionFailureStage::Assets, "RAW 预览解码失败"))
@@ -128,10 +169,61 @@ pub fn recognize_capture(
     capture: &Capture,
     on_progress: Option<&ProgressCallback>,
 ) -> Result<Recognition, RecognizeError> {
+    recognize_capture_impl(
+        detection_session,
+        classification_session,
+        eye_session,
+        catalog,
+        capture,
+        None,
+        on_progress,
+    )
+}
+
+/// 带可选内存缩略图的全管线识别。
+///
+/// `thumb_bytes`：app 侧已生成的较大派生图字节（如 `.pt/thumbs` 缓存或
+/// 1600px 预览），识别前优先从内存解码，避免对每张全分辨率 `image::open`
+/// （24MP 全量解码 100-300ms/张）；解码失败自动回落完整路径。
+/// 传 `None` 时行为与 [`recognize_capture`] 完全一致。
+///
+/// app 接线建议：识别前调用 `ThumbnailCache::get_or_generate(&primary_source,
+/// 2048, None)`（JPEG 走 DCT 降采样快路径，毫秒级）取字节后传入；
+/// lib.rs 侧包装为 `Recognizer::recognize_with_thumbnail` 后移除本 allow。
+pub(crate) fn recognize_capture_with_thumbnail(
+    detection_session: &mut Session,
+    classification_session: &mut Session,
+    eye_session: &mut Session,
+    catalog: &CatalogDb,
+    capture: &Capture,
+    thumb_bytes: Option<&[u8]>,
+    on_progress: Option<&ProgressCallback>,
+) -> Result<Recognition, RecognizeError> {
+    recognize_capture_impl(
+        detection_session,
+        classification_session,
+        eye_session,
+        catalog,
+        capture,
+        thumb_bytes,
+        on_progress,
+    )
+}
+
+/// 单张全管线识别共用实现（`thumb_bytes` 为可选缩略图优先输入）。
+fn recognize_capture_impl(
+    detection_session: &mut Session,
+    classification_session: &mut Session,
+    eye_session: &mut Session,
+    catalog: &CatalogDb,
+    capture: &Capture,
+    thumb_bytes: Option<&[u8]>,
+    on_progress: Option<&ProgressCallback>,
+) -> Result<Recognition, RecognizeError> {
     let recognized_at = chrono::Utc::now().to_rfc3339();
 
     // ---- 1. 输入源解析（pica recognition_pipeline_service.dart:41-49） ----
-    let source = match resolve_source(capture) {
+    let source = match resolve_source_with_thumbnail(capture, thumb_bytes) {
         Ok(s) => s,
         Err((stage, msg)) => {
             tracing::warn!("[识别] 输入源解析失败: {} — {}", capture.base_name, msg);
@@ -155,9 +247,13 @@ pub fn recognize_capture(
 
     let ResolvedSource::Image(img) = source;
 
+    // ---- 共享 640×640 缩放：检测与眼模型同尺寸同插值（CatmullRom），
+    // 缩放一次同时喂给两者，避免对同一张图做第二次全图缩放 ----
+    let shared_640 = detect::resize_to_yolo_input(&img);
+
     // ---- 2. 检测（pica recognition_pipeline_service.dart:65-77） ----
     report_progress(on_progress, 0.35, "检测中");
-    let detection = match detect::run_yolo_detection(detection_session, &img) {
+    let detection = match detect::run_yolo_detection_resized(detection_session, &shared_640) {
         Ok(Some(d)) => d,
         Ok(None) => {
             // 检测无框 → Unrecognized (Detection)（pica recognition_pipeline_service.dart:68-75）
@@ -200,7 +296,7 @@ pub fn recognize_capture(
 
     // ---- 3. 鸟眼锐度（第四阶段） ----
     report_progress(on_progress, 0.6, "鸟眼锐度");
-    let (eye_sharpness, eye_bbox) = run_eye_stage(eye_session, &img, bbox);
+    let (eye_sharpness, eye_bbox) = run_eye_stage(eye_session, &img, Some(&shared_640), bbox);
 
     // ---- 4-5. 分类 + 名录映射（与 recognize_region 共用尾部管线） ----
     report_progress(on_progress, 0.7, "分类中");
@@ -232,10 +328,56 @@ pub fn recognize_region(
     bbox: BBox,
     on_progress: Option<&ProgressCallback>,
 ) -> Result<Recognition, RecognizeError> {
+    recognize_region_impl(
+        classification_session,
+        eye_session,
+        catalog,
+        capture,
+        bbox,
+        None,
+        on_progress,
+    )
+}
+
+/// 带可选内存缩略图的手动框选识别（跳过检测）。
+///
+/// `thumb_bytes` 语义同 [`recognize_capture_with_thumbnail`]：优先从内存解码
+/// 派生图避免全图 `image::open`，解码失败回落完整路径；`None` 时行为与
+/// [`recognize_region`] 完全一致。
+pub(crate) fn recognize_region_with_thumbnail(
+    classification_session: &mut Session,
+    eye_session: &mut Session,
+    catalog: &CatalogDb,
+    capture: &Capture,
+    bbox: BBox,
+    thumb_bytes: Option<&[u8]>,
+    on_progress: Option<&ProgressCallback>,
+) -> Result<Recognition, RecognizeError> {
+    recognize_region_impl(
+        classification_session,
+        eye_session,
+        catalog,
+        capture,
+        bbox,
+        thumb_bytes,
+        on_progress,
+    )
+}
+
+/// 手动框选识别共用实现（`thumb_bytes` 为可选缩略图优先输入）。
+fn recognize_region_impl(
+    classification_session: &mut Session,
+    eye_session: &mut Session,
+    catalog: &CatalogDb,
+    capture: &Capture,
+    bbox: BBox,
+    thumb_bytes: Option<&[u8]>,
+    on_progress: Option<&ProgressCallback>,
+) -> Result<Recognition, RecognizeError> {
     let recognized_at = chrono::Utc::now().to_rfc3339();
 
     // ---- 1. 输入源解析（与自动识别同源） ----
-    let source = match resolve_source(capture) {
+    let source = match resolve_source_with_thumbnail(capture, thumb_bytes) {
         Ok(s) => s,
         Err((stage, msg)) => {
             tracing::warn!("[识别] 手动框选输入源解析失败: {} — {}", capture.base_name, msg);
@@ -258,9 +400,9 @@ pub fn recognize_region(
 
     let ResolvedSource::Image(img) = source;
 
-    // ---- 2. 鸟眼锐度（用户框视为鸟框） ----
+    // ---- 2. 鸟眼锐度（用户框视为鸟框；无检测阶段，眼自行缩放） ----
     report_progress(on_progress, 0.4, "鸟眼锐度");
-    let (eye_sharpness, eye_bbox) = run_eye_stage(eye_session, &img, bbox);
+    let (eye_sharpness, eye_bbox) = run_eye_stage(eye_session, &img, None, bbox);
 
     // ---- 3. 分类 + 名录映射（跳过检测） ----
     report_progress(on_progress, 0.5, "分类中");
@@ -338,59 +480,6 @@ fn classify_and_map(
     }
 }
 
-/// 批量识别。
-///
-/// 顺序执行，每张后检查 `cancel` 标志，取消时返回已完成部分的识别结果。
-pub fn recognize_captures(
-    detection_session: &mut Session,
-    classification_session: &mut Session,
-    eye_session: &mut Session,
-    catalog: &CatalogDb,
-    captures: &[Capture],
-    on_progress: Option<&ProgressCallback>,
-    cancel: &AtomicBool,
-) -> Vec<(usize, Recognition)> {
-    let mut results = Vec::new();
-    for (i, capture) in captures.iter().enumerate() {
-        if cancel.load(Ordering::Relaxed) {
-            break;
-        }
-        match recognize_capture(
-            detection_session,
-            classification_session,
-            eye_session,
-            catalog,
-            capture,
-            on_progress,
-        ) {
-            Ok(rec) => results.push((i, rec)),
-            Err(e) => {
-                tracing::error!("[识别] Capture {} 系统错误: {e}", capture.base_name);
-                // 系统性错误不中断批次；系统故障 → NeedsReview(Classification)
-                // （顶部映射表：Assets 仅表示源文件不可用，分类/解码异常才归 Classification）
-                let (status, failure_stage) =
-                    stage_to_status(RecognitionFailureStage::Classification, false);
-                results.push((
-                    i,
-                    Recognition {
-                        status,
-                        bird: None,
-                        class_index: None,
-                        confidence: None,
-                        bbox: None,
-                        eye_sharpness: None,
-                        eye_bbox: None,
-                        candidates: vec![],
-                        failure_stage,
-                        recognized_at: chrono::Utc::now().to_rfc3339(),
-                    },
-                ));
-            }
-        }
-    }
-    results
-}
-
 fn report_progress(on_progress: Option<&ProgressCallback>, value: f32, stage: &'static str) {
     if let Some(cb) = on_progress {
         cb(RecognitionProgress { value, stage });
@@ -404,7 +493,7 @@ fn report_progress(on_progress: Option<&ProgressCallback>, value: f32, stage: &'
 /// - 全部成功 → `Confirmed(None)`
 /// - 其余（分类/映射/资源异常）→ `NeedsReview(原阶段)`
 ///
-/// 生产路径（recognize_capture / recognize_region / classify_and_map / recognize_captures）
+/// 生产路径（recognize_capture / recognize_region / classify_and_map）
 /// 与单元测试共用本实现，测试不再复制一份映射逻辑。
 pub(crate) fn stage_to_status(
     failure_stage: RecognitionFailureStage,
@@ -427,13 +516,20 @@ pub(crate) fn stage_to_status(
 /// 运行鸟眼锐度阶段：眼检测 → 锐度计算。
 ///
 /// 任何一步失败均返回 (None, None)，不影响管线主状态。
+/// `shared_640` 为检测阶段的共享 640×640 缩放（可选，检测路径传 `Some`，
+/// 框选路径无检测阶段传 `None` 由眼自行缩放）。
 fn run_eye_stage(
     eye_session: &mut Session,
     img: &DynamicImage,
+    shared_640: Option<&DynamicImage>,
     bird_bbox: BBox,
 ) -> (Option<f32>, Option<BBox>) {
-    // 眼检测
-    let eye_bbox = match eye::detect_eye(eye_session, img, bird_bbox) {
+    // 眼检测（复用共享缩放时避免第二次全图缩放）
+    let eye_bbox = match shared_640 {
+        Some(shared) => eye::detect_eye_shared(eye_session, img, shared, bird_bbox),
+        None => eye::detect_eye(eye_session, img, bird_bbox),
+    };
+    let eye_bbox = match eye_bbox {
         Ok(Some(bbox)) => bbox,
         _ => return (None, None),
     };

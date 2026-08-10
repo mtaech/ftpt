@@ -77,6 +77,38 @@ impl CatalogDb {
             .collect()
     }
 
+    /// 全量鸟种列表（手动修正鸟种下拉数据源）：仅鸟纲，按拼音排序。
+    /// 名录库是通用动物库（昆虫/鱼等 5 万余条），修正下拉只需鸟纲（1505 种）；
+    /// 拼音列（cn_name_pinyin）排序更符合中文检索习惯，缺失时回退中文名字节序。
+    /// 名录库损坏/缺失 schema 时记录警告并返回空 Vec，绝不 panic。
+    pub fn all_species(&self) -> Vec<BirdMatch> {
+        let mut stmt = match self.conn.prepare_cached(
+            "SELECT id, cn_name, latin_name FROM animal_info \
+             WHERE gang_cn = '鸟纲' AND cn_name IS NOT NULL AND cn_name != '' \
+             ORDER BY COALESCE(NULLIF(cn_name_pinyin, ''), cn_name)",
+        ) {
+            Ok(stmt) => stmt,
+            Err(e) => {
+                tracing::warn!("[名录] 全量查询编译失败（schema 不符？）: {e}");
+                return Vec::new();
+            }
+        };
+        let rows = match stmt.query_map([], |row| {
+            Ok(BirdMatch {
+                bird_id: row.get(0)?,
+                cn_name: row.get(1)?,
+                latin_name: row.get(2)?,
+            })
+        }) {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("[名录] 全量查询执行失败: {e}");
+                return Vec::new();
+            }
+        };
+        rows.filter_map(|r| r.ok()).collect()
+    }
+
     /// 内部：查询类别号对应的动物记录。
     ///
     /// 名录库损坏/缺失 schema 时 prepare/query 失败：记录警告并返回空 Vec，
@@ -147,21 +179,26 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE animal_info (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                latin_name TEXT, cn_name TEXT
+                latin_name TEXT, cn_name TEXT,
+                gang_cn TEXT, cn_name_pinyin TEXT
             );
             CREATE TABLE sp_cls_map (species TEXT PRIMARY KEY, cls INTEGER);
-            -- 唯一匹配（鸟种 A）
-            INSERT INTO animal_info (id, latin_name, cn_name) VALUES (1, 'Turdus merula', '乌鸫');
+            -- 唯一匹配（鸟种 A，拼音 wu）
+            INSERT INTO animal_info (id, latin_name, cn_name, gang_cn, cn_name_pinyin) VALUES (1, 'Turdus merula', '乌鸫', '鸟纲', 'wudong');
             INSERT INTO sp_cls_map (species, cls) VALUES ('Turdus merula', 100);
-            -- 唯一匹配（鸟种 B）
-            INSERT INTO animal_info (id, latin_name, cn_name) VALUES (2, 'Parus major', '大山雀');
+            -- 唯一匹配（鸟种 B，拼音 da）
+            INSERT INTO animal_info (id, latin_name, cn_name, gang_cn, cn_name_pinyin) VALUES (2, 'Parus major', '大山雀', '鸟纲', 'dashanque');
             INSERT INTO sp_cls_map (species, cls) VALUES ('Parus major', 200);
             -- 歧义匹配：类别 300 对应两个学名
-            INSERT INTO animal_info (id, latin_name, cn_name) VALUES (3, 'Species A', '物种A');
-            INSERT INTO animal_info (id, latin_name, cn_name) VALUES (4, 'Species B', '物种B');
+            INSERT INTO animal_info (id, latin_name, cn_name, gang_cn, cn_name_pinyin) VALUES (3, 'Species A', '物种A', '鸟纲', 'wuzhonga');
+            INSERT INTO animal_info (id, latin_name, cn_name, gang_cn, cn_name_pinyin) VALUES (4, 'Species B', '物种B', '鸟纲', 'wuzhongb');
             INSERT INTO sp_cls_map (species, cls) VALUES ('Species A', 300);
             INSERT INTO sp_cls_map (species, cls) VALUES ('Species B', 300);
-            -- 无映射：类别 400 无记录",
+            -- 无映射：类别 400 无记录
+            -- 非鸟纲（昆虫纲）：all_species 应排除
+            INSERT INTO animal_info (id, latin_name, cn_name, gang_cn, cn_name_pinyin) VALUES (5, 'Insect X', '某虫', '昆虫纲', 'mouchong');
+            -- 无中文名：all_species 应排除
+            INSERT INTO animal_info (id, latin_name, cn_name, gang_cn, cn_name_pinyin) VALUES (6, 'Fish Y', NULL, '辐鳍鱼纲', NULL);",
         )
         .unwrap();
 
@@ -169,6 +206,20 @@ mod tests {
             conn: Connection::open(&db_path).unwrap(),
         };
         (dir, db)
+    }
+
+    #[test]
+    fn test_all_species_sorted_and_complete() {
+        let (_dir, db) = create_test_db();
+        let all = db.all_species();
+        // 仅鸟纲 4 条（排除昆虫纲某虫、无中文名的鱼），按拼音排序（da < wu）
+        assert_eq!(all.len(), 4);
+        let names: Vec<&str> = all.iter().map(|b| b.cn_name.as_str()).collect();
+        assert_eq!(names, vec!["大山雀", "乌鸫", "物种A", "物种B"]);
+        // 字段完整
+        let ba = all.iter().find(|b| b.cn_name == "大山雀").unwrap();
+        assert_eq!(ba.bird_id, 2);
+        assert_eq!(ba.latin_name, "Parus major");
     }
 
     #[test]
