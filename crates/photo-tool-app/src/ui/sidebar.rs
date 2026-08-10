@@ -92,6 +92,12 @@ fn render_directory_section(
         .unwrap_or_default();
     let has_dir = view.dir_path.is_some();
     let photo_count = view.captures.len();
+    // 完整路径（悬停 tooltip 用）
+    let dir_full: String = view
+        .dir_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
 
     v_flex()
         .gap_1()
@@ -110,6 +116,8 @@ fn render_directory_section(
             // 交易终端 watchlist 风格目录行：左缘 2px accent 竖条 + accent_dim 底色
             // 边框遵循卡片规范（theme::card），高亮态仅覆盖 bg
             h_flex()
+                .w_full()
+                .overflow_hidden()
                 .rounded_md()
                 .border_1()
                 .border_color(theme::colors().border_variant)
@@ -124,21 +132,29 @@ fn render_directory_section(
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
                         .px_2()
                         .py_1()
                         .child(if has_dir {
                             // 双行：上行目录名，下行照片计数（等宽字体）
                             v_flex()
+                                .w_full()
                                 .child(
                                     div()
-                                        
+                                        .id(ElementId::Name("current-dir-name".into()))
+                                        .w_full()
                                         .text_color(theme::colors().text)
                                         .truncate()
+                                        // 名称截断后悬停显示完整路径
+                                        .tooltip(move |window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(dir_full.clone())
+                                                .build(window, cx)
+                                        })
                                         .child(dir_name),
                                 )
                                 .child(
                                     div()
-                                        
+                                        .w_full()
                                         .text_color(theme::colors().text_muted)
                                         .font_family(theme::MONO_FONT_FAMILY)
                                         .child(format!("{photo_count} 张")),

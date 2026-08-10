@@ -131,7 +131,6 @@ pub struct CaptureMeta {
     pub base_name: String,
     pub primary_path: String,
     pub primary_format: String,
-    pub stack_count: usize,
     pub file_size: Option<u64>,
     pub date_taken: Option<String>,
     pub extensions: Vec<String>,
@@ -165,6 +164,19 @@ impl From<&Capture> for CaptureMeta {
 }
 
 impl CaptureMeta {
+    /// 显示用文件名：base_name（无扩展名）+ 主路径的**真实**扩展名。
+    /// 不要用 primary_format 拼后缀——它是规范化格式名（如 JPEG→jpeg、TIFF→tiff），
+    /// 会让 .jpg 显示成 .jpeg、.tif 显示成 .tiff（“拼接”假后缀）。
+    pub fn display_name(&self) -> String {
+        match std::path::Path::new(&self.primary_path)
+            .extension()
+            .and_then(|e| e.to_str())
+        {
+            Some(ext) if !ext.is_empty() => format!("{}.{}", self.base_name, ext),
+            _ => self.base_name.clone(),
+        }
+    }
+
     /// 从 Capture 构造 CaptureMeta，显式指定 index（预览图/EXIF 回填/缩略图缓存的键）。
     /// source_files 为空或 primary_index 越界时退化到首个源文件/空主路径，绝不 panic。
     pub fn from_capture(c: &Capture, index: usize) -> Self {
@@ -190,12 +202,6 @@ impl CaptureMeta {
                 .map(|f| f.path.to_string_lossy().to_string())
                 .unwrap_or_default(),
             primary_format: primary.map(|f| f.format.to_string()).unwrap_or_default(),
-            stack_count: c
-                .source_files
-                .iter()
-                .enumerate()
-                .filter(|(i, _f)| *i != c.primary_index)
-                .count(),
             file_size: primary.and_then(|f| f.file_size),
             date_taken: None,
             extensions: ext_list,
@@ -353,11 +359,6 @@ pub enum BatchOpType {
 }
 
 impl BatchOpType {
-    /// 全部操作类型（UI 按钮用）
-    pub fn all() -> &'static [BatchOpType] {
-        &[Self::Move, Self::Copy, Self::Delete]
-    }
-
     /// 是否需要目标目录（删除操作不需要）
     pub fn needs_target_dir(&self) -> bool {
         !matches!(self, Self::Delete)
@@ -370,11 +371,6 @@ impl BatchOpType {
             Self::Delete => "删除",
             Self::Move => "移动",
         }
-    }
-
-    /// 是否为删除类操作（确认时红色警告）
-    pub fn is_delete(&self) -> bool {
-        matches!(self, Self::Delete)
     }
 }
 
@@ -433,38 +429,6 @@ pub struct ExifMetadata {
     pub orientation: Option<u16>,
 }
 
-impl ExifMetadata {
-    /// 生成格式化摘要文本
-    pub fn summary(&self) -> String {
-        let mut parts = Vec::new();
-        if let Some(ref make) = self.camera.make {
-            parts.push(make.clone());
-        }
-        if let Some(ref model) = self.camera.model {
-            parts.push(model.clone());
-        }
-        if let Some(ref date) = self.date_time_original {
-            parts.push(format!("拍摄: {}", date));
-        }
-        if let Some(ref exp) = self.shooting.exposure_time {
-            parts.push(format!("快门: {}", exp));
-        }
-        if let Some(ref fnum) = self.shooting.f_number {
-            parts.push(format!("光圈: {}", fnum));
-        }
-        if let Some(iso) = self.shooting.iso {
-            parts.push(format!("ISO: {}", iso));
-        }
-        if let Some(ref focal) = self.shooting.focal_length {
-            parts.push(format!("焦距: {}", focal));
-        }
-        if let (Some(w), Some(h)) = (self.image_width, self.image_height) {
-            parts.push(format!("{}×{}", w, h));
-        }
-        parts.join(" | ")
-    }
-}
-
 // ============================================================================
 // 识别数据类型（纯结构体，推理机械在 photo-recognize 中，持久化机械在 photo-engine 中）
 // ============================================================================
@@ -507,7 +471,7 @@ impl BBox {
 }
 
 /// 调整参数（参数化非破坏，ADR 0007）：per-capture，全零 = 无调整（短路现有渲染路径）。
-/// 曝光/对比度/饱和度为像素值变换，裁切为几何变换；应用顺序：先裁切 → 再色调 → 缩放显示。
+/// 曝光/对比度/饱和度均为像素值变换（裁切已移除，见 ADR 0007 修订）。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdjustParams {
@@ -517,8 +481,6 @@ pub struct AdjustParams {
     pub contrast: i32,
     /// 饱和度（-100 ~ +100，0 中性；-100 = 去饱和）
     pub saturation: i32,
-    /// 裁切框（归一化矩形，复用 BBox；None = 无裁切/全图）
-    pub crop: Option<BBox>,
 }
 
 impl Default for AdjustParams {
@@ -527,15 +489,14 @@ impl Default for AdjustParams {
             exposure: 0.0,
             contrast: 0,
             saturation: 0,
-            crop: None,
         }
     }
 }
 
 impl AdjustParams {
-    /// 是否为无调整（全零参数 + 无裁切）——渲染路径短路到现有 8-bit 链路
+    /// 是否为无调整（全零参数）——渲染路径短路到现有 8-bit 链路
     pub fn is_neutral(&self) -> bool {
-        self.exposure == 0.0 && self.contrast == 0 && self.saturation == 0 && self.crop.is_none()
+        self.exposure == 0.0 && self.contrast == 0 && self.saturation == 0
     }
 }
 
@@ -825,7 +786,6 @@ mod tests {
             base_name: "IMG_0001".into(),
             primary_path: "/tmp/IMG_0001.jpg".into(),
             primary_format: "JPEG".into(),
-            stack_count: 0,
             file_size: None,
             date_taken: None,
             extensions: vec![],
@@ -900,13 +860,6 @@ mod tests {
     }
 
     #[test]
-    fn test_exif_summary_empty_returns_empty_string() {
-        let meta = ExifMetadata::default();
-        let summary = meta.summary();
-        assert_eq!(summary, "");
-    }
-
-    #[test]
     fn test_bbox_db_string_roundtrip() {
         let b = BBox::new(0.1, 0.2, 0.8, 0.9);
         let parsed = BBox::parse(&b.to_db_string()).unwrap();
@@ -950,6 +903,57 @@ mod tests {
             assert_eq!(RecognitionFailureStage::from_str(s.as_str()), Some(s));
         }
         assert_eq!(RecognitionFailureStage::Mapping.user_message(), "名录映射失败");
+    }
+
+    #[test]
+    fn test_display_name_uses_real_extension() {
+        // .jpg 文件：规范化格式名是 JPEG，必须显示 .jpg 而非 .jpeg
+        let cm = CaptureMeta::from(&Capture {
+            base_name: "IMG_1234".into(),
+            source_files: vec![SourceFile {
+                path: std::path::PathBuf::from("/photos/IMG_1234.jpg"),
+                format: ImageFormat::Jpeg,
+                file_size: Some(1024),
+            }],
+            primary_index: 0,
+        });
+        assert_eq!(cm.display_name(), "IMG_1234.jpg");
+
+        // .tif 文件：必须显示 .tif 而非 .tiff
+        let cm = CaptureMeta::from(&Capture {
+            base_name: "SCAN_01".into(),
+            source_files: vec![SourceFile {
+                path: std::path::PathBuf::from("/photos/SCAN_01.tif"),
+                format: ImageFormat::Tiff,
+                file_size: Some(1024),
+            }],
+            primary_index: 0,
+        });
+        assert_eq!(cm.display_name(), "SCAN_01.tif");
+
+        // RAW：真实扩展名（.nef）优先
+        let cm = CaptureMeta::from(&Capture {
+            base_name: "DSC_0001".into(),
+            source_files: vec![SourceFile {
+                path: std::path::PathBuf::from("/photos/DSC_0001.nef"),
+                format: ImageFormat::Raw("NEF".into()),
+                file_size: Some(1024),
+            }],
+            primary_index: 0,
+        });
+        assert_eq!(cm.display_name(), "DSC_0001.nef");
+
+        // 无扩展名：回退 base_name
+        let cm = CaptureMeta::from(&Capture {
+            base_name: "README".into(),
+            source_files: vec![SourceFile {
+                path: std::path::PathBuf::from("/photos/README"),
+                format: ImageFormat::Other,
+                file_size: Some(1024),
+            }],
+            primary_index: 0,
+        });
+        assert_eq!(cm.display_name(), "README");
     }
 
     #[test]
@@ -1015,19 +1019,4 @@ mod tests {
         assert_eq!(cm.bird_bbox, None);
     }
 
-    #[test]
-    fn test_exif_summary_format() {
-        let mut meta = ExifMetadata::default();
-        meta.camera.make = Some("NIKON".to_string());
-        meta.camera.model = Some("Z6III".to_string());
-        meta.shooting.iso = Some(400);
-        meta.image_width = Some(6000);
-        meta.image_height = Some(4000);
-
-        let summary = meta.summary();
-        assert!(summary.contains("NIKON"));
-        assert!(summary.contains("Z6III"));
-        assert!(summary.contains("ISO: 400"));
-        assert!(summary.contains("6000×4000"));
-    }
 }

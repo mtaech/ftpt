@@ -76,7 +76,7 @@ pub fn render_grid_cell(
                                 
                                 .text_color(theme::colors().text)
                                 .truncate()
-                                .child(format!("{}.{}", capture.base_name, capture.primary_format.to_lowercase())),
+                                .child(capture.display_name()),
                         ),
                 )
                 .child(
@@ -144,7 +144,7 @@ fn render_thumbnail(
                 div()
                     
                     .text_color(theme::colors().text_muted)
-                    .child(format!("{}.{}", capture.base_name, capture.primary_format.to_lowercase())),
+                    .child(capture.display_name()),
             )
             .into_any_element()
     }

@@ -16,12 +16,12 @@ pub fn render_preview(
     // 视频等非图片格式不进预览：聚焦时预览区视为未选择（导航/网格仍可选中，识别按钮已禁用）
     let focused = focused.filter(|m| m.primary_format.to_uppercase() != "OTHER");
 
-    // 调整视图激活：右侧调整 tab + 非中性参数（曝光/对比/饱和度/裁切任一非默认）
+    // 调整视图激活：右侧调整 tab + 非中性参数
     let adjust_active = view.right_panel_tab == 1 && !view.current_adjust.is_neutral();
 
     // 放大超过预览分辨率 / 100% 时优先全分辨率；否则 1600px 预览；未加载完成回退缩略图。
     // 预览/全分辨率已在 worker 线程预解码为 RenderImage，源切换无空白帧。
-    // 调整视图锁定 1600px：优先调整渲染（含 tone/裁切效果），不加载 fullres；
+    // 调整视图锁定 1600px：优先调整渲染（含 tone 效果），不加载 fullres；
     // 调整渲染未就绪（显示源/首帧构建中）回退已解码预览，避免闪「加载中」。
     let need_full = !adjust_active && view.needs_fullres();
     let image_source: Option<ImageSource> = focused.and_then(|meta| {
@@ -165,7 +165,7 @@ pub fn render_preview(
                         .text_color(theme::colors().text)
                         .child(
                             focused
-                                .map(|m| m.base_name.clone())
+                                .map(|m| m.display_name())
                                 .unwrap_or_else(|| "无图片".into()),
                         ),
                 )
@@ -200,8 +200,7 @@ pub fn render_preview(
                         .h_full()
                         .p_4()
                         .bg(theme::colors().element_background)
-                        // 调整视图：整区十字光标（Shift 框选语义）；裁切框/手柄子元素各自覆盖光标
-                        .cursor(if adjust_active { CursorStyle::Crosshair } else { CursorStyle::Arrow })
+                        .cursor(CursorStyle::Arrow)
                         .on_scroll_wheel({
                             let vh = view_handle.clone();
                             move |event: &ScrollWheelEvent, _window, cx| {
@@ -234,16 +233,7 @@ pub fn render_preview(
                                     let _ = cx.update_entity(&view, |root_view, root_cx| {
                                         let x: f32 = pos.x.into();
                                         let y: f32 = pos.y.into();
-                                        if adjust_active {
-                                            // 调整视图：Shift+拖拽 = 框选裁切；命中框/手柄 = 移动/调整；未命中 = 平移（识别框选不启动）
-                                            root_view.adjust_mouse_down(x, y, shift, root_cx);
-                                            if root_view.crop_draw.is_none()
-                                                && root_view.crop_move.is_none()
-                                                && root_view.crop_resize.is_none()
-                                            {
-                                                root_view.preview_drag = Some((x, y, root_view.preview_pan.0, root_view.preview_pan.1));
-                                            }
-                                        } else if shift && root_view.get_focused_capture().is_some() {
+                                        if shift && root_view.get_focused_capture().is_some() {
                                             // Shift+拖拽 = 手动框选识别；普通拖拽 = 平移
                                             root_view.box_draw = Some((x, y, x, y));
                                             root_cx.notify();
@@ -263,11 +253,6 @@ pub fn render_preview(
                                     let _ = cx.update_entity(&view, |root_view, root_cx| {
                                         let cx_pos: f32 = pos.x.into();
                                         let cy_pos: f32 = pos.y.into();
-                                        if adjust_active {
-                                            // 调整视图：裁切交互（框选/移动/手柄）或平移，统一由状态层处理（只更新 draft）
-                                            root_view.adjust_mouse_move(cx_pos, cy_pos, root_cx);
-                                            return;
-                                        }
                                         // 画框优先：更新当前角点
                                         if let Some((sx, sy, _, _)) = root_view.box_draw {
                                             root_view.box_draw = Some((sx, sy, cx_pos, cy_pos));
@@ -288,19 +273,9 @@ pub fn render_preview(
                             move |_event: &MouseUpEvent, _window, cx| {
                                 if let Some(view) = vh.upgrade() {
                                     let _ = cx.update_entity(&view, |root_view, root_cx| {
-                                        if adjust_active {
-                                            // 调整视图：裁切交互提交（框选/移动/手柄 → set_adjustment，内部清空 draft/状态）
-                                            root_view.adjust_mouse_up(root_cx);
-                                        } else {
-                                            // 画框结束 → 提交手动框选识别（内部清除 box_draw）
-                                            if root_view.box_draw.is_some() {
-                                                root_view.submit_box_draw(root_cx);
-                                            }
-                                            // 防御：调整视图内开始的裁切拖拽若中途切 tab 被中断，清掉残留状态
-                                            root_view.crop_draw = None;
-                                            root_view.crop_draft = None;
-                                            root_view.crop_move = None;
-                                            root_view.crop_resize = None;
+                                        // 画框结束 → 提交手动框选识别（内部清除 box_draw）
+                                        if root_view.box_draw.is_some() {
+                                            root_view.submit_box_draw(root_cx);
                                         }
                                         root_view.preview_drag = None;
                                     });
@@ -361,7 +336,7 @@ pub fn render_preview(
                                 // 绝对定位脱离文档流：拖动/缩放只改偏移，不参与 flex 布局，
                                 // 否则 margin 会改变内容固有尺寸，把左右面板顶移位。
                                 // 坐标原点 = 父容器左上，需补回 p_4 的 16px 内边距。
-                                // 调整视图（右面板调整 tab）隐藏识别叠加（检测框/眼角/pending），只显示裁切叠加
+                                // 调整视图（右面板调整 tab）隐藏识别叠加（检测框/眼角/pending）
                                 let bbox_el: Option<AnyElement> = if view.bbox_visible && view.right_panel_tab != 1 {
                                     focused.and_then(|meta| {
                                         let status = meta.recognition_status?;
@@ -428,93 +403,6 @@ pub fn render_preview(
                                     None
                                 };
 
-                                // 裁切叠加层（调整视图：区外遮罩 + 边框 + 8 手柄；crop_draft 优先于 current_adjust.crop 显示）
-                                let crop_overlay: Vec<AnyElement> = if adjust_active {
-                                    match view.crop_draft.or(view.current_adjust.crop) {
-                                        Some(bbox) => {
-                                            let l = bbox.x1 * disp_w;
-                                            let t = bbox.y1 * disp_h;
-                                            let cw = (bbox.x2 - bbox.x1) * disp_w;
-                                            let ch = (bbox.y2 - bbox.y1) * disp_h;
-                                            let accent = theme::colors().text_accent;
-                                            // 裁切区外半透明黑遮罩（上下左右 4 条，填满图外区域）
-                                            let mask_color = Hsla::from(Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.45 });
-                                            let mask = |mx: f32, my: f32, mw: f32, mh: f32| {
-                                                div()
-                                                    .absolute()
-                                                    .left(px(mx))
-                                                    .top(px(my))
-                                                    .w(px(mw.max(0.)))
-                                                    .h(px(mh.max(0.)))
-                                                    .bg(mask_color)
-                                            };
-                                            // 8 个手柄（四角 + 四边中点，8px，accent 填充）；索引约定与状态层 crop_resize 一致
-                                            let handle_pos = [
-                                                (l, t), (l + cw / 2., t), (l + cw, t), (l + cw, t + ch / 2.),
-                                                (l + cw, t + ch), (l + cw / 2., t + ch), (l, t + ch), (l, t + ch / 2.),
-                                            ];
-                                            let handle_cursor = [
-                                                CursorStyle::ResizeUpRightDownLeft, // 0 左上（nwse）
-                                                CursorStyle::ResizeUpDown,          // 1 上中
-                                                CursorStyle::ResizeUpLeftDownRight, // 2 右上（nesw）
-                                                CursorStyle::ResizeLeftRight,       // 3 右中
-                                                CursorStyle::ResizeUpRightDownLeft, // 4 右下（nwse）
-                                                CursorStyle::ResizeUpDown,          // 5 下中
-                                                CursorStyle::ResizeUpLeftDownRight, // 6 左下（nesw）
-                                                CursorStyle::ResizeLeftRight,       // 7 左中
-                                            ];
-                                            let mut els: Vec<AnyElement> = vec![
-                                                // 上下左右 4 条遮罩
-                                                mask(0., 0., disp_w, t).into_any_element(),
-                                                mask(0., t + ch, disp_w, disp_h - (t + ch)).into_any_element(),
-                                                mask(0., t, l, ch).into_any_element(),
-                                                mask(l + cw, t, disp_w - (l + cw), ch).into_any_element(),
-                                                // 边框（accent 2px；悬停移动光标——GPUI 无 Move，用 OpenHand 表示可抓取移动）
-                                                div()
-                                                    .absolute()
-                                                    .left(px(l))
-                                                    .top(px(t))
-                                                    .w(px(cw))
-                                                    .h(px(ch))
-                                                    .border_2()
-                                                    .border_color(accent)
-                                                    .cursor(CursorStyle::OpenHand)
-                                                    .into_any_element(),
-                                            ];
-                                            for (idx, (hx, hy)) in handle_pos.iter().enumerate() {
-                                                els.push(
-                                                    div()
-                                                        .absolute()
-                                                        .left(px(hx - 4.))
-                                                        .top(px(hy - 4.))
-                                                        .w(px(8.))
-                                                        .h(px(8.))
-                                                        .bg(accent)
-                                                        .cursor(handle_cursor[idx])
-                                                        .into_any_element(),
-                                                );
-                                            }
-                                            els
-                                        }
-                                        None => {
-                                            // 无裁切：图上方提示框选操作
-                                            vec![div()
-                                                .absolute()
-                                                .top(px(8.))
-                                                .left(px(8.))
-                                                .px_2()
-                                                .py_1()
-                                                .rounded_sm()
-                                                .bg(theme::colors().surface_background)
-                                                .text_color(theme::colors().text_muted)
-                                                .child("Shift+拖拽 框选裁切区域")
-                                                .into_any_element()]
-                                        }
-                                    }
-                                } else {
-                                    Vec::new()
-                                };
-
                                 let mut container = div()
                                     .absolute()
                                     .left(px(img_x + pad_px))
@@ -532,9 +420,6 @@ pub fn render_preview(
                                 }
                                 if let Some(el) = pending_el {
                                     container = container.child(el);
-                                }
-                                if !crop_overlay.is_empty() {
-                                    container = container.children(crop_overlay);
                                 }
                                 container.into_any_element()
 

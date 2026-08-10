@@ -25,6 +25,16 @@ pub fn render_layout(
         view.ensure_adjust_ready(cx);
     }
 
+    // 右侧面板 hero 缩略图：为焦点图懒加载（已缓存/加载中则内部早退，零成本）
+    if view.config.right_panel_visible && view.right_panel_tab == 0 {
+        if let Some(ci) = view
+            .focus_index
+            .and_then(|di| view.display_order.get(di).copied())
+        {
+            view.ensure_thumbnail_loaded(ci, cx);
+        }
+    }
+
     let font_family = view.config.font_family.clone();
 
         v_flex()
