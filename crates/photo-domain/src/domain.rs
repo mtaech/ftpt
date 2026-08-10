@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// 图片格式枚举
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ImageFormat {
     Jpeg,
@@ -106,6 +107,7 @@ impl ImageFormat {
 }
 
 /// 组成一次拍摄的单个源文件
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceFile {
@@ -115,6 +117,7 @@ pub struct SourceFile {
 }
 
 /// 一次快门产生的拍摄
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capture {
@@ -124,6 +127,7 @@ pub struct Capture {
 }
 
 /// 发送到前端的拍摄摘要（轻量，不含完整 SourceFile）
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureMeta {
@@ -261,6 +265,7 @@ impl CaptureMeta {
 }
 
 /// 评分
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Rating {
     None = 0,
@@ -272,6 +277,7 @@ pub enum Rating {
 }
 
 /// 颜色标签
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ColorLabel {
     None,
@@ -283,6 +289,7 @@ pub enum ColorLabel {
 }
 
 /// Pick/Reject 旗标
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Flag {
     Pick,
@@ -290,6 +297,7 @@ pub enum Flag {
 }
 
 /// 筛选条件
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilterCriteria {
@@ -331,6 +339,7 @@ impl FilterCriteria {
 }
 
 /// 排序方式
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SortBy {
     FileName,
@@ -341,6 +350,7 @@ pub enum SortBy {
 }
 
 /// 排序方向
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SortDirection {
     Ascending,
@@ -348,6 +358,7 @@ pub enum SortDirection {
 }
 
 /// 批量文件操作类型（作用于当前筛选结果，ADR 0006）
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatchOpType {
     /// 复制到目标目录
@@ -385,6 +396,7 @@ impl std::fmt::Display for BatchOpType {
 // ============================================================================
 
 /// 相机制造商信息
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CameraInfo {
@@ -394,6 +406,7 @@ pub struct CameraInfo {
 }
 
 /// 拍摄参数
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShootingParams {
@@ -406,6 +419,7 @@ pub struct ShootingParams {
 }
 
 /// GPS 信息
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GpsInfo {
@@ -415,6 +429,7 @@ pub struct GpsInfo {
 }
 
 /// 完整的 EXIF 元数据
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExifMetadata {
@@ -434,6 +449,7 @@ pub struct ExifMetadata {
 // ============================================================================
 
 /// 检测框：归一化坐标 [x1, y1, x2, y2]（0–1，相对图像宽高）
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct BBox {
     pub x1: f32,
@@ -472,6 +488,7 @@ impl BBox {
 
 /// 调整参数（参数化非破坏，ADR 0007）：per-capture，全零 = 无调整（短路现有渲染路径）。
 /// 曝光/对比度/饱和度均为像素值变换（裁切已移除，见 ADR 0007 修订）。
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdjustParams {
@@ -501,6 +518,7 @@ impl AdjustParams {
 }
 
 /// 识别状态（三态；无识别记录 = 未识别，不占枚举值）
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecognitionStatus {
     /// 检测、分类、名录映射全部成功
@@ -533,6 +551,7 @@ impl RecognitionStatus {
 }
 
 /// 识别失败阶段
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecognitionFailureStage {
     None,
@@ -577,6 +596,7 @@ impl RecognitionFailureStage {
 }
 
 /// 鸟种匹配：分类器类别号经名录库映射到的具体鸟种
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BirdMatch {
@@ -589,6 +609,7 @@ pub struct BirdMatch {
 }
 
 /// Top-N 候选（含未映射项：bird 为 None 表示该类别号未映射到名录）
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BirdCandidate {
@@ -601,6 +622,7 @@ pub struct BirdCandidate {
 }
 
 /// 一次识别的完整结果（不含路径；路径是持久化层的键）
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Recognition {
@@ -625,6 +647,7 @@ pub struct Recognition {
 }
 
 /// 识别状态筛选条件
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecognitionFilter {
     /// 全部（不筛选）
@@ -642,6 +665,7 @@ pub enum RecognitionFilter {
 // ============================================================================
 
 /// XMP 中存储的 PT 元数据
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct XmpMetadata {

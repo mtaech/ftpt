@@ -1,4 +1,6 @@
 /target
+# Tauri 后端构建产物（workspace 成员，target 不在根目录）
+crates/photo-tauri/src-tauri/target/
 local-lib/
 libraw.so
 .worktrees/

@@ -1,0 +1,170 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Catppuccin 双主题 → shadcn 语义变量全套映射。
+ * 深色 = Mocha（默认，html.dark），亮色 = Latte（:root 预留，Phase 2 接切换）。
+ * 取色角色参照 crates/photo-tool-app/src/ui/theme.rs 的 token 分层：
+ * background(网格区底色) < card/surface(面板) < muted(元素底) < accent(悬浮)。
+ */
+
+/* ── Latte（亮，预留） ─────────────────────────────── */
+:root {
+  --background: #e6e9ef; /* mantle */
+  --foreground: #4c4f69; /* text */
+  --card: #eff1f5; /* base */
+  --card-foreground: #4c4f69;
+  --popover: #eff1f5;
+  --popover-foreground: #4c4f69;
+  --primary: #1e66f5; /* blue */
+  --primary-foreground: #eff1f5;
+  --secondary: #ccd0da; /* surface0 */
+  --secondary-foreground: #4c4f69;
+  --muted: #ccd0da;
+  --muted-foreground: #6c6f85; /* subtext0 */
+  --accent: #bcc0cc; /* surface1，悬浮底 */
+  --accent-foreground: #4c4f69;
+  --destructive: #d20f39; /* red */
+  --border: #c4c8d4;
+  --input: #bcc0cc;
+  --ring: #1e66f5;
+  --chart-1: #1e66f5;
+  --chart-2: #179299;
+  --chart-3: #40a02b;
+  --chart-4: #df8e1d;
+  --chart-5: #d20f39;
+  --sidebar: #dce0e8; /* crust */
+  --sidebar-foreground: #4c4f69;
+  --sidebar-primary: #1e66f5;
+  --sidebar-primary-foreground: #eff1f5;
+  --sidebar-accent: #bcc0cc;
+  --sidebar-accent-foreground: #4c4f69;
+  --sidebar-border: #c4c8d4;
+  --sidebar-ring: #1e66f5;
+  /* 高密度取向：圆角收紧 */
+  --radius: 0.375rem;
+}
+
+/* ── Mocha（暗，默认） ─────────────────────────────── */
+.dark {
+  --background: #181825; /* mantle：网格区最暗一档 */
+  --foreground: #cdd6f4; /* text */
+  --card: #1e1e2e; /* base：面板 */
+  --card-foreground: #cdd6f4;
+  --popover: #1e1e2e;
+  --popover-foreground: #cdd6f4;
+  --primary: #89b4fa; /* blue：主 accent */
+  --primary-foreground: #11111b; /* crust */
+  --secondary: #313244; /* surface0 */
+  --secondary-foreground: #cdd6f4;
+  --muted: #313244;
+  --muted-foreground: #a6adc8; /* subtext0 */
+  --accent: #45475a; /* surface1：悬浮底 */
+  --accent-foreground: #cdd6f4;
+  --destructive: #f38ba8; /* red */
+  --border: #313244; /* surface0：近不可见细边框，对齐 theme.rs dark 分层 */
+  --input: #45475a;
+  --ring: #89b4fa;
+  --chart-1: #89b4fa;
+  --chart-2: #94e2d5;
+  --chart-3: #a6e3a1;
+  --chart-4: #f9e2af;
+  --chart-5: #f38ba8;
+  --sidebar: #11111b; /* crust */
+  --sidebar-foreground: #cdd6f4;
+  --sidebar-primary: #89b4fa;
+  --sidebar-primary-foreground: #11111b;
+  --sidebar-accent: #313244;
+  --sidebar-accent-foreground: #cdd6f4;
+  --sidebar-border: #313244;
+  --sidebar-ring: #89b4fa;
+}
+
+/* ── 领域色（评分/色标/旗标，取 theme.rs colors 模块原值） ── */
+@theme {
+  --color-label-red: #ef4444;
+  --color-label-yellow: #e8ab07;
+  --color-label-green: #22c55e;
+  --color-label-blue: #3b82f6;
+  --color-label-purple: #8b5cf6;
+  --color-pick: #22c55e;
+  --color-reject: #ef4444;
+  --color-rating: #e8ab07;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-family-app), 'Segoe UI', system-ui, -apple-system, sans-serif;
+  }
+  /* 数字场景统一等宽（EXIF/文件大小/计数），对齐 theme.rs MONO_FONT_FAMILY */
+  .font-mono-num {
+    font-family: 'Cascadia Mono', 'JetBrains Mono', ui-monospace, monospace;
+  }
+}
+
+/* 常驻细滚动条（WebView2/Chromium + Firefox） */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--accent) transparent;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--accent);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted-foreground);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}

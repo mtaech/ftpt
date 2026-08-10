@@ -7,6 +7,7 @@ members = [
     "crates/photo-recognize",
     "crates/photo-tool-app",
     "crates/rawlib",
+    "crates/photo-tauri/src-tauri",
 ]
 
 [workspace.package]
@@ -37,6 +38,13 @@ rusqlite_migration = "2.6"
 rust-embed = "8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Tauri v2 迁移（photo-tauri crate）；specta/tauri-specta 当前为 2.0.0-rc 系列
+specta = "2.0.0-rc"
+specta-typescript = "0.0.12"
+tauri = "2"
+tauri-build = "2"
+tauri-plugin-dialog = "2"
+tauri-specta = "2.0.0-rc"
 thiserror = "2"
 toml = "0.8"
 trash = "4"

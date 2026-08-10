@@ -2,6 +2,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+use image::GenericImageView;
 use photo_domain::{AdjustParams, ImageFormat, SourceFile};
 use crate::adjustments::{apply_tone16, apply_tone8, Rgb16Image};
 use crate::thumbnail::decode_raw16_with_options;
@@ -70,6 +71,69 @@ fn rgb16_to_rgb8(img: &Rgb16Image) -> image::RgbImage {
         let p = img.get_pixel(x, y);
         image::Rgb([(p[0] >> 8) as u8, (p[1] >> 8) as u8, (p[2] >> 8) as u8])
     })
+}
+
+/// 调整渲染（内存版，ADR 0007）：源图 → 色调调整 → JPEG 字节（质量 85，预览用）。
+///
+/// 供 ptimg:// 协议 master 预览带调整参数时输出；与 `export_adjusted` 的差异是
+/// 不写文件、长边缩放到 `max_size` 内（避免全尺寸逐像素遍历拖慢预览）。
+/// - RAW：half_size 16-bit 解码（`preview16` 选项）→ 16-bit tone → 降 8-bit
+/// - 常规图：原图解码（8-bit 语义，直出即 8-bit 无高位信息）→ 8-bit tone
+pub fn render_adjusted(
+    source: &SourceFile,
+    params: &AdjustParams,
+    max_size: u32,
+) -> Result<Vec<u8>, ConvertError> {
+    let tone: crate::adjustments::ToneParams = params.into();
+    let rgb8 = match &source.format {
+        ImageFormat::Raw(_) => {
+            let img16 = decode_raw16_with_options(
+                &source.path,
+                &rawlib::DecodeOptions::preview16(),
+                None,
+            )
+            .map_err(|e| ConvertError::Raw(e.to_string()))?;
+            let (w, h) = img16.dimensions();
+            let scale = (max_size as f32 / w.max(h) as f32).min(1.0);
+            let toned = if scale < 1.0 {
+                let nw = ((w as f32 * scale).round().max(1.0)) as u32;
+                let nh = ((h as f32 * scale).round().max(1.0)) as u32;
+                let small = image::imageops::resize(
+                    &img16,
+                    nw,
+                    nh,
+                    image::imageops::FilterType::Triangle,
+                );
+                apply_tone16(&small, &tone)
+            } else {
+                apply_tone16(&img16, &tone)
+            };
+            rgb16_to_rgb8(&toned)
+        }
+        _ => {
+            let img = image::open(&source.path)?;
+            let (w, h) = img.dimensions();
+            let scale = (max_size as f32 / w.max(h) as f32).min(1.0);
+            let rgb8 = if scale < 1.0 {
+                let nw = ((w as f32 * scale).round().max(1.0)) as u32;
+                let nh = ((h as f32 * scale).round().max(1.0)) as u32;
+                img.resize_exact(nw, nh, image::imageops::FilterType::Triangle)
+                    .to_rgb8()
+            } else {
+                img.to_rgb8()
+            };
+            apply_tone8(&rgb8, &tone)
+        }
+    };
+    let mut buf = Cursor::new(Vec::new());
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 85);
+    encoder.encode(
+        rgb8.as_raw(),
+        rgb8.width(),
+        rgb8.height(),
+        image::ExtendedColorType::Rgb8,
+    )?;
+    Ok(buf.into_inner())
 }
 
 #[cfg(test)]
