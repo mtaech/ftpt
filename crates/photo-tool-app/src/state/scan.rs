@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use gpui::*;
 
-use photo_domain::CaptureMeta;
+use photo_domain::{CaptureMeta, Recognition, XmpMetadata};
 use photo_engine::{folder_db::FolderDb, scanner};
 
 use super::app::RootView;
@@ -45,60 +45,72 @@ impl RootView {
         self.worker.spawn(
             cx,
             move || {
-                scanner::scan_directory(&path, &filter, None)
+                Some(scanner::scan_directory(&path, &filter, None)
                     .map(|captures| {
-                        // 供扫描完成后同步 folder_db 的文件清单（全部非旁车源文件）
-                        let entries: Vec<photo_engine::folder_db::FileEntry> = captures
-                            .iter()
-                            .flat_map(|c| c.source_files.iter())
-                            .filter_map(|f| {
-                                let rel = f.path.strip_prefix(&path).ok()?;
-                                let m = std::fs::metadata(&f.path).ok()?;
-                                let mtime_ns = m
-                                    .modified()
-                                    .ok()
-                                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                                    .map(|d| d.as_nanos() as i64)
-                                    .unwrap_or(0);
-                                Some(photo_engine::folder_db::FileEntry {
-                                    full_path: f.path.clone(),
-                                    rel_path: rel.to_string_lossy().replace('\\', "/"),
-                                    file_size: m.len(),
-                                    mtime_ns,
-                                    format: f.format.clone(),
-                                })
-                            })
-                            .collect();
+                        // 供扫描完成后同步 folder_db 的文件清单（全部非旁车源文件）；
+                        // 顺带复用同一次 stat 构建 (size, mtime) 指纹表，供下方 exif
+                        // 缓存行做内存指纹校验（避免 N 次 SQLite 点查询 + N 次 fs::metadata）
+                        let mut entries: Vec<photo_engine::folder_db::FileEntry> = Vec::new();
+                        let mut fingerprints: HashMap<String, (u64, i64)> = HashMap::new();
+                        for f in captures.iter().flat_map(|c| c.source_files.iter()) {
+                            let Ok(rel) = f.path.strip_prefix(&path) else { continue };
+                            let Some(m) = std::fs::metadata(&f.path).ok() else { continue };
+                            let mtime_ns = m
+                                .modified()
+                                .ok()
+                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                .map(|d| d.as_nanos() as i64)
+                                .unwrap_or(0);
+                            fingerprints.insert(
+                                f.path.to_string_lossy().to_string(),
+                                (m.len(), mtime_ns),
+                            );
+                            entries.push(photo_engine::folder_db::FileEntry {
+                                full_path: f.path.clone(),
+                                rel_path: rel.to_string_lossy().replace('\\', "/"),
+                                file_size: m.len(),
+                                mtime_ns,
+                                format: f.format.clone(),
+                            });
+                        }
+                        // 一次性载入 xmp/EXIF 缓存（2 条全表查询替代 2N 条点查询），
+                        // 键与 get_xmp/get_exif 一致：完整路径字符串（Windows 反斜杠）
+                        let xmp_rows: HashMap<String, XmpMetadata> = folder_db
+                            .as_ref()
+                            .and_then(|db| db.all_xmp_meta().ok())
+                            .unwrap_or_default();
+                        let exif_rows: HashMap<String, photo_engine::folder_db::ExifCacheRow> =
+                            folder_db
+                                .as_ref()
+                                .and_then(|db| db.all_exif().ok())
+                                .unwrap_or_default();
                         let metas: Vec<CaptureMeta> = captures
                             .iter()
                             .enumerate()
                             .map(|(i, c)| {
                                 let mut meta = CaptureMeta::from_capture(c, i);
-                                if let Some(cache) = &folder_db {
-                                    let primary = &c.source_files[c.primary_index];
-                                    let xmp = cache
-                                        .get_xmp(&primary.path)
-                                        .unwrap_or(None)
-                                        .unwrap_or_default();
+                                let primary = &c.source_files[c.primary_index];
+                                let key = primary.path.to_string_lossy().to_string();
+                                if let Some(xmp) = xmp_rows.get(&key) {
                                     meta.rating = xmp.rating();
                                     meta.color_label = xmp.color_label();
                                     meta.flag = xmp.flag();
                                 }
-                                if let Some(cache) = &folder_db {
-                                    let primary = &c.source_files[c.primary_index];
-                                    // 只查缓存：未命中的 EXIF 由扫描完成后的 spawn_enrich_tasks 并发提取，
-                                    // 不再在扫描闭包内串行 LibRaw open（首次打开大目录会拖慢扫描完成）
-                                    let exif = cache
-                                        .get_exif(&primary.path)
-                                        .unwrap_or(None)
-                                        .unwrap_or_default();
-                                    meta.enrich_with_exif(&exif);
+                                // 只查缓存且校验指纹（与 get_exif 的 file_fingerprint 同源）：
+                                // 未命中/失效的 EXIF 由扫描完成后的 spawn_enrich_tasks 并发提取，
+                                // 不在扫描闭包内串行 LibRaw open（首次打开大目录会拖慢扫描完成）
+                                if let Some(&(size, mtime_ns)) = fingerprints.get(&key)
+                                    && let Some(row) = exif_rows.get(&key)
+                                    && row.file_size == size as i64
+                                    && row.mtime_ns == mtime_ns
+                                {
+                                    meta.enrich_with_exif(&row.exif);
                                 }
                                 meta
                             })
                             .collect();
                         (path, metas, folder_db, entries)
-                    })
+                    }))
             },
             move |this, result, cx| {
                 // 过期扫描：直接丢弃，避免旧结果覆盖新状态
@@ -106,6 +118,12 @@ impl RootView {
                     return;
                 }
                 this.scan_in_progress = false;
+                let Some(result) = result else {
+                    // worker 闭包 panic 兜底：扫描中断，复位状态
+                    tracing::error!("扫描任务异常中断（worker panic）");
+                    cx.notify();
+                    return;
+                };
                 match result {
                     Ok((dir, metas, cache, entries)) => {
                         // 缓存跟随文件夹：每目录独立 .pt/thumbs（与 .pt/data.db 同级），
@@ -175,15 +193,19 @@ impl RootView {
                         this.save_config();
                         this.apply_filter_and_sort();
                         // 扫描完成后，用 folder_db 中已有的识别记录 enrich CaptureMeta
-                        if let Some(ref db) = this.folder_db {
+                        if let Some(db) = &this.folder_db {
                             if let Ok(recs) = db.all_recognitions() {
+                                // 建哈希索引：O(N) 构建 + O(1)/张 查表，替代 O(N×M) 线性搜
+                                // （1 万照片 × 1 万识别行 = 上亿次 String 比较的 UI 冻结）
+                                let rec_map: HashMap<&str, &Recognition> =
+                                    recs.iter().map(|(p, r)| (p.as_str(), r)).collect();
                                 for meta in this.captures.iter_mut() {
                                     // rel_path = primary_path 相对 dir 的路径，正斜杠
                                     let primary_path = std::path::Path::new(&meta.primary_path);
                                     if let Ok(rel) = primary_path.strip_prefix(&dir) {
                                         let rel_str = rel.to_string_lossy().replace('\\', "/");
-                                        if let Some(rec) = recs.iter().find(|(p, _)| *p == rel_str) {
-                                            meta.enrich_with_recognition(&rec.1);
+                                        if let Some(rec) = rec_map.get(rel_str.as_str()) {
+                                            meta.enrich_with_recognition(rec);
                                         }
                                     }
                                 }
@@ -211,13 +233,18 @@ impl RootView {
                                 this.worker.spawn(
                                     cx,
                                     move || {
-                                        db.sync_with_scan(&entries, &|done, _| {
+                                        Some(db.sync_with_scan(&entries, &|done, _| {
                                             counter_work
                                                 .store(done, std::sync::atomic::Ordering::Relaxed);
-                                        })
+                                        }))
                                     },
                                     |this, result, cx| {
                                         this.sync_progress = None;
+                                        let Some(result) = result else {
+                                            tracing::error!("DB 同步任务异常中断（worker panic）");
+                                            cx.notify();
+                                            return;
+                                        };
                                         match result {
                                             Ok(stats) => {
                                                 tracing::info!(
@@ -371,8 +398,10 @@ impl RootView {
                     if generation != this.scan_generation {
                         return;
                     }
-                    done_work.fetch_add(1, Ordering::Relaxed);
-                    if let Some(ref exif) = exif {
+                    // fetch_add 返回旧值，+1 即本次完成后的累计数
+                    let done = done_work.fetch_add(1, Ordering::Relaxed) + 1;
+                    let is_final = done >= total;
+                    if let Some(exif) = &exif {
                         if let Some(meta) = this.captures.iter_mut().find(|m| m.index == idx) {
                             meta.camera_make = exif.camera.make.clone();
                             meta.camera_model = exif.camera.model.clone();
@@ -390,10 +419,14 @@ impl RootView {
                         }
                     }
                     // 全部提取完成后重排一次（EXIF 渐显期间排序保持原序，避免每张全量重排）
-                    if done_work.load(Ordering::Relaxed) >= total {
+                    if is_final {
                         this.apply_filter_and_sort();
                     }
-                    cx.notify();
+                    // 节流通知：每 10 个完成或全部完成时 notify 一次（全树重渲染很贵，
+                    // 逐任务 notify 在 500 张新 RAW 时会触发 500 次全树重绘）
+                    if is_final || done.is_multiple_of(10) {
+                        cx.notify();
+                    }
                 },
             );
         }

@@ -7,6 +7,7 @@
 //!   **任何清理缓存的操作都不得触碰 xmp_meta 与 recognition 表**——
 //!   识别结果不可重新计算（需要 YOLO + 模型推理），XMP 元数据为用户手动编辑。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use parking_lot::Mutex;
@@ -100,6 +101,8 @@ pub enum FolderDbError {
     Migration(#[from] rusqlite_migration::Error),
     #[error("Serde error: {0}")]
     Serde(#[from] serde_json::Error),
+    #[error("数据库值超出可表示范围: {0}")]
+    ValueOutOfRange(&'static str),
 }
 
 #[derive(Clone)]
@@ -166,7 +169,7 @@ impl FolderDb {
         )?;
 
         match stmt.query_row(
-            rusqlite::params![path_str.as_ref(), size as i64, mtime as i64],
+            rusqlite::params![path_str.as_ref(), size_to_i64(size), mtime as i64],
             |row| row_to_exif(row),
         ) {
             Ok(exif) => Ok(Some(exif)),
@@ -213,6 +216,40 @@ impl FolderDb {
         Ok(exif)
     }
 
+    /// 全量读取 exif_cache（扫描闭包一次性载入内存，替代逐文件 1 查询 + 1 stat）。
+    /// 键为写入时的完整路径字符串（与 get_exif 一致，Windows 下为反斜杠）。
+    /// 指纹校验由调用方用自己已 stat 的 (file_size, mtime_ns) 完成，本方法不做磁盘 I/O。
+    pub fn all_exif(&self) -> Result<HashMap<String, ExifCacheRow>, FolderDbError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT make, model, lens, exposure_time, f_number, iso, focal_length,
+                    exposure_compensation, white_balance, date_time_original,
+                    image_width, image_height, file_size_cache, color_space, orientation,
+                    gps_lat_deg, gps_lat_min, gps_lat_sec,
+                    gps_lon_deg, gps_lon_min, gps_lon_sec, gps_altitude,
+                    path, file_size, mtime_ns
+             FROM exif_cache",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            // 列 0-21 与 row_to_exif 对齐；22-24 追加 path/指纹
+            let exif = row_to_exif(row)?;
+            Ok((
+                row.get::<_, String>(22)?,
+                ExifCacheRow {
+                    file_size: row.get(23)?,
+                    mtime_ns: row.get(24)?,
+                    exif,
+                },
+            ))
+        })?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let (path, cache_row) = row?;
+            map.insert(path, cache_row);
+        }
+        Ok(map)
+    }
+
     /// 获取 XMP 缓存。返回 `None` 表示未缓存。
     pub fn get_xmp(&self, path: &Path) -> Result<Option<XmpMetadata>, FolderDbError> {
         let path_str = path.to_string_lossy();
@@ -243,6 +280,31 @@ impl FolderDb {
             rusqlite::params![path_str.as_ref(), meta.rating as i32, meta.color_label, meta.flag],
         )?;
         Ok(())
+    }
+
+    /// 全量读取 xmp_meta 真相表（扫描闭包一次性载入内存，替代逐文件点查询）。
+    /// 键为写入时的完整路径字符串（与 get_xmp 一致），无指纹校验（与 get_xmp 同语义）。
+    pub fn all_xmp_meta(&self) -> Result<HashMap<String, XmpMetadata>, FolderDbError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT path, rating, color_label, flag FROM xmp_meta",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                XmpMetadata {
+                    rating: row.get::<_, i32>(1)? as u8,
+                    color_label: row.get(2)?,
+                    flag: row.get(3)?,
+                },
+            ))
+        })?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let (path, meta) = row?;
+            map.insert(path, meta);
+        }
+        Ok(map)
     }
 
     // ── 识别真相表 ──
@@ -377,16 +439,14 @@ impl FolderDb {
     pub fn put_adjustments(&self, rel_path: &str, params: &AdjustParams) -> Result<(), FolderDbError> {
         let conn = self.conn.lock();
         let normalized = rel_path.replace('\\', "/");
-        let crop_str = params.crop.as_ref().map(|b| b.to_db_string());
         conn.execute(
-            "INSERT OR REPLACE INTO adjustments (rel_path, exposure, contrast, saturation, crop)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR REPLACE INTO adjustments (rel_path, exposure, contrast, saturation)
+             VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![
                 normalized,
                 params.exposure as f64,
                 params.contrast as i64,
                 params.saturation as i64,
-                crop_str,
             ],
         )?;
         Ok(())
@@ -397,18 +457,19 @@ impl FolderDb {
         let conn = self.conn.lock();
         let normalized = rel_path.replace('\\', "/");
         let mut stmt = conn.prepare_cached(
-            "SELECT exposure, contrast, saturation, crop FROM adjustments WHERE rel_path = ?1",
+            "SELECT exposure, contrast, saturation FROM adjustments WHERE rel_path = ?1",
         )?;
+        // i64 → i32 用 try_from：越界（数据损坏）报错而非静默截断
         match stmt.query_row(rusqlite::params![normalized], |row| {
-            let crop_str: Option<String> = row.get(3)?;
-            Ok(AdjustParams {
-                exposure: row.get::<_, f64>(0)? as f32,
-                contrast: row.get::<_, i64>(1)? as i32,
-                saturation: row.get::<_, i64>(2)? as i32,
-                crop: crop_str.and_then(|s| BBox::parse(&s)),
-            })
+            Ok((
+                row.get::<_, f64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         }) {
-            Ok(params) => Ok(Some(params)),
+            Ok((exposure, contrast, saturation)) => {
+                Ok(Some(adjust_params_from_parts(exposure, contrast, saturation)?))
+            }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -451,20 +512,21 @@ impl FolderDb {
         {
             let conn = self.conn.lock();
             let mut stmt = conn.prepare_cached(
-                "SELECT exposure, contrast, saturation, crop FROM adjustments WHERE rel_path = ?1",
+                "SELECT exposure, contrast, saturation FROM adjustments WHERE rel_path = ?1",
             )?;
             for (src_rel, dst_rel) in entries {
                 let normalized = src_rel.replace('\\', "/");
                 match stmt.query_row(rusqlite::params![normalized], |row| {
-                    let crop_str: Option<String> = row.get(3)?;
-                    Ok(AdjustParams {
-                        exposure: row.get::<_, f64>(0)? as f32,
-                        contrast: row.get::<_, i64>(1)? as i32,
-                        saturation: row.get::<_, i64>(2)? as i32,
-                        crop: crop_str.and_then(|s| BBox::parse(&s)),
-                    })
+                    Ok((
+                        row.get::<_, f64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
                 }) {
-                    Ok(params) => pairs.push((dst_rel.clone(), params)),
+                    Ok((exposure, contrast, saturation)) => {
+                        let params = adjust_params_from_parts(exposure, contrast, saturation)?;
+                        pairs.push((dst_rel.clone(), params));
+                    }
                     Err(rusqlite::Error::QueryReturnedNoRows) => {}
                     Err(e) => return Err(e.into()),
                 }
@@ -524,6 +586,14 @@ impl FolderDb {
         Ok(())
     }
 }
+/// exif_cache 单行：指纹 + 解析后的 EXIF（供扫描批量载入后内存校验/查表）。
+pub struct ExifCacheRow {
+    /// 缓存时记录的指纹（SQLite INTEGER 存 i64，与 get_exif 的 file_fingerprint 同源）
+    pub file_size: i64,
+    pub mtime_ns: i64,
+    pub exif: ExifMetadata,
+}
+
 /// 文件条目信息（由 app 层扫描产生，传给 sync_with_scan 做三表同步）。
 pub struct FileEntry {
     pub full_path: PathBuf,
@@ -539,6 +609,8 @@ pub struct FileEntry {
 pub struct SyncStats {
     pub cache_deleted: usize,
     pub cache_inserted: usize,
+    // cache_updated / cache_failed 为保留字段：EXIF 提取已移至 app 层
+    // spawn_enrich_tasks（sync_with_scan 只做表对齐），sync 不再产生，恒为 0
     pub cache_updated: usize,
     pub cache_failed: usize,
     pub recognition_deleted: usize,
@@ -548,8 +620,9 @@ pub struct SyncStats {
 impl FolderDb {
     /// 以扫描结果同步三表（exif_cache / xmp_meta / recognition）：
     ///
-    /// - **exif_cache**：删除文件已不存在的行；对新增/文件大小或 mtime 变化的文件，
-    ///   调用 `crate::exif::extract_exif` 更新缓存。
+    /// - **exif_cache**：删除文件已不存在的行。新增/指纹变化的文件**不在此提取 EXIF**，
+    ///   统一由 app 层 `spawn_enrich_tasks` 并发提取回填（避免与 enrich 对同一新文件
+    ///   重复 LibRaw open/unpack；RAW 100-300ms/次，串行跑会拖出数十秒的尾部）。
     /// - **xmp_meta** / **recognition**：仅删除文件已不存在的行，**不重新识别/不重新读取**。
     pub fn sync_with_scan(
         &self,
@@ -613,58 +686,39 @@ impl FolderDb {
             }
         }
 
-        // ── 2. 新增/指纹变化 → 提取 exif ──
-        for (i, entry) in entries.iter().enumerate() {
-            let changed = {
-                let mut stmt = conn.prepare_cached(
-                    "SELECT file_size, mtime_ns FROM exif_cache WHERE path = ?1",
-                )?;
-                match stmt.query_row(
-                    rusqlite::params![entry.full_path.to_string_lossy().as_ref()],
-                    |row| {
-                        let db_size: i64 = row.get(0)?;
-                        let db_mtime: i64 = row.get(1)?;
-                        Ok(db_size != entry.file_size as i64 || db_mtime != entry.mtime_ns)
-                    },
-                ) {
-                    Ok(changed) => changed,
-                    Err(rusqlite::Error::QueryReturnedNoRows) => true,
-                    Err(e) => return Err(e.into()),
-                }
-            };
-            if changed {
-                stats.cache_updated += 1;
-                match crate::exif::extract_exif(&entry.full_path, &entry.format) {
-                    Ok(exif) => {
-                        let path_str = entry.full_path.to_string_lossy();
-                        let params = exif_to_params(
-                            path_str.as_ref(),
-                            entry.file_size,
-                            entry.mtime_ns as u64,
-                            &exif,
-                        );
-                        conn.execute(
-                            "INSERT OR REPLACE INTO exif_cache
-                             (path, file_size, mtime_ns, make, model, lens, exposure_time, f_number, iso,
-                              focal_length, exposure_compensation, white_balance, date_time_original,
-                              image_width, image_height, file_size_cache, color_space, orientation,
-                              gps_lat_deg, gps_lat_min, gps_lat_sec,
-                              gps_lon_deg, gps_lon_min, gps_lon_sec, gps_altitude)
-                             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)",
-                             rusqlite::params_from_iter(params.iter().map(|b| b.as_ref())),
-                        )?;
-                    }
-                    Err(e) => {
-                        tracing::warn!("同步 EXIF 提取失败 {}: {e}", entry.full_path.display());
-                        stats.cache_failed += 1;
-                    }
-                }
-            }
-
+        // ── 2. 新增/指纹变化 → 不在此提取 EXIF ──
+        // 提取统一由 app 层 spawn_enrich_tasks 并发完成（get_or_extract_exif 原子地
+        // 查缓存→提取→写回）。本方法只做表对齐：不能插"只有指纹的占位行"，否则
+        // get_exif 会把它当命中、enrich 将不再提取；指纹不匹配/缺失的旧行保留，
+        // get_exif 按指纹拒绝，由 enrich 的 put_exif 覆盖为最新数据。
+        // 循环仅保留以驱动 on_progress（状态栏 done/total 计数）。
+        for (i, _entry) in entries.iter().enumerate() {
             on_progress(i + 1, entries.len());
         }
         Ok(stats)
     }
+}
+
+/// u64 → i64 饱和转换（SQLite INTEGER 为有符号 64 位）。文件大小超过
+/// i64::MAX（约 9.2 EB，现实中不可能）时饱和到 i64::MAX，杜绝静默回绕成负数。
+fn size_to_i64(size: u64) -> i64 {
+    i64::try_from(size).unwrap_or(i64::MAX)
+}
+
+/// adjustments 行 → AdjustParams。contrast/saturation 由 i64 收窄到 i32，
+/// 越界（数据损坏）返回 ValueOutOfRange 而非静默截断。
+fn adjust_params_from_parts(
+    exposure: f64,
+    contrast: i64,
+    saturation: i64,
+) -> Result<AdjustParams, FolderDbError> {
+    Ok(AdjustParams {
+        exposure: exposure as f32,
+        contrast: i32::try_from(contrast)
+            .map_err(|_| FolderDbError::ValueOutOfRange("contrast"))?,
+        saturation: i32::try_from(saturation)
+            .map_err(|_| FolderDbError::ValueOutOfRange("saturation"))?,
+    })
 }
 
 fn file_fingerprint(path: &Path) -> std::io::Result<(u64, u64)> {
@@ -718,7 +772,9 @@ fn row_to_exif(row: &rusqlite::Row) -> rusqlite::Result<ExifMetadata> {
         date_time_original: row.get(9)?,
         image_width: row.get(10)?,
         image_height: row.get(11)?,
-        file_size: row.get::<_, Option<i64>>(12)?.map(|v| v as u64),
+        file_size: row
+            .get::<_, Option<i64>>(12)?
+            .map(|v| u64::try_from(v).unwrap_or(0)),
         color_space: row.get(13)?,
         orientation: row.get(14)?,
         gps: GpsInfo {
@@ -740,7 +796,7 @@ fn exif_to_params<'a>(
 
     vec![
         Box::new(path.to_string()),
-        Box::new(size as i64),
+        Box::new(size_to_i64(size)),
         Box::new(mtime as i64),
         Box::new(exif.camera.make.clone()),
         Box::new(exif.camera.model.clone()),
@@ -852,7 +908,6 @@ mod tests {
             exposure: 1.25,
             contrast: -30,
             saturation: 45,
-            crop: Some(BBox::new(0.1, 0.2, 0.7, 0.8)),
         }
     }
 
@@ -1158,7 +1213,8 @@ mod tests {
         assert!(db.get_xmp(&gone).unwrap().is_none());
         assert!(db.get_recognition("gone.jpg").unwrap().is_none());
 
-        // keep 内容变化（指纹不同）→ 触发重提取；伪 jpg 提取失败 → failed 计数
+        // keep 内容变化（指纹不同）→ sync 不再串行重提取（提取统一由 app 层
+        // spawn_enrich_tasks 的 get_or_extract_exif 完成），旧行保留但指纹失效
         std::fs::write(&keep, b"changed data here").unwrap();
         let (ksize2, kmtime2) = file_fingerprint(&keep).unwrap();
         let entries2 = vec![FileEntry {
@@ -1169,8 +1225,10 @@ mod tests {
             format: ImageFormat::Jpeg,
         }];
         let stats2 = db.sync_with_scan(&entries2, &|_, _| {}).unwrap();
-        assert_eq!(stats2.cache_updated, 1);
-        assert_eq!(stats2.cache_failed, 1);
+        assert_eq!(stats2.cache_updated, 0);
+        assert_eq!(stats2.cache_failed, 0);
+        // 旧行仍在但指纹不匹配：get_exif 视为未命中（由 enrich 的 put_exif 覆盖）
+        assert!(db.get_exif(&keep).unwrap().is_none());
     }
 
     #[test]
@@ -1183,7 +1241,6 @@ mod tests {
         assert_eq!(got.exposure, params.exposure);
         assert_eq!(got.contrast, params.contrast);
         assert_eq!(got.saturation, params.saturation);
-        assert_eq!(got.crop, params.crop);
     }
 
     #[test]
@@ -1206,16 +1263,7 @@ mod tests {
         db.put_adjustments("x.jpg", &b).unwrap();
         let got = db.get_adjustments("x.jpg").unwrap().unwrap();
         assert_eq!(got.exposure, -0.5);
-        assert_eq!(got.crop, a.crop);
-    }
-
-    #[test]
-    fn test_adjustments_crop_roundtrip() {
-        let tmp = TempDir::new().unwrap();
-        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
-        // 无裁切（None）与有裁切都往返
-        db.put_adjustments("a.jpg", &AdjustParams::default()).unwrap();
-        assert!(db.get_adjustments("a.jpg").unwrap().unwrap().crop.is_none());
+        assert_eq!(got.saturation, a.saturation);
     }
 
     #[test]
@@ -1243,7 +1291,7 @@ mod tests {
         src.copy_adjustments_to(&mut dst, &[("a.jpg".into(), "b.jpg".into())]).unwrap();
         let got = dst.get_adjustments("b.jpg").unwrap().unwrap();
         assert_eq!(got.exposure, params.exposure);
-        assert_eq!(got.crop, params.crop);
+        assert_eq!(got.saturation, params.saturation);
         // 源库行保留（复制语义）
         assert!(src.get_adjustments("a.jpg").unwrap().is_some());
     }
