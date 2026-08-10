@@ -9,34 +9,44 @@ use gpui_component::rating::Rating;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::Disableable;
 use gpui_component::tab::{Tab, TabBar};
+use gpui_component::scroll::ScrollableElement;
+use gpui_component::combobox::Combobox;
 use gpui_component::ElementExt;
 use gpui_component::{Sizable, IconName};
 
-use crate::ui::controls::{clear_link, section_header, segmented_button};
+use crate::ui::controls::{clear_link, segmented_button};
 use crate::ui::theme;
 use crate::ui::format_file_size;
-use gpui_component::h_flex;
+use gpui_component::{h_flex, v_flex};
 
-/// Render the right info panel: 顶部双 tab（信息/调整）+ 对应 tab 内容。
+/// Render the right info panel: 顶部双 tab（信息/调整）+ 卡片化滚动内容。
 pub fn render_info_panel(
-    view: &RootView,
-    _window: &mut Window,
+    view: &mut RootView,
+    window: &mut Window,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
-    let focused = view.get_focused_capture();
     let vh = cx.entity().downgrade();
+
+    // 手动修正鸟种下拉按 dirty 重建（创建需要 Window）
+    if view.correction_open
+        && (view.correction_select.is_none() || view.correction_select_dirty)
+    {
+        view.rebuild_correction_select(window, cx);
+    }
 
     div()
         .flex()
         .flex_col()
         .size_full()
-        .p_3()
-        .gap_2()
         // ── 面板标题栏：信息/调整 tab + 关闭按钮 ──
         .child(
             h_flex()
                 .justify_between()
                 .items_center()
+                .px_3()
+                .py_2()
+                .border_b_1()
+                .border_color(theme::colors().border_variant)
                 .child(
                     TabBar::new("right-panel-tabs")
                         .small()
@@ -72,35 +82,74 @@ pub fn render_info_panel(
                         }),
                 ),
         )
-        .child(section_divider())
-        // ── tab 内容 ──
-        .child(if view.right_panel_tab == 0 {
-            // 信息 tab：hero/识别/EXIF/评分/色标/旗标（原有内容原样保留）
+        // ── tab 内容（卡片流，可滚动）──
+        .child(
             div()
                 .flex()
                 .flex_col()
-                .gap_2()
-                .child(render_hero(focused))
-                .child(section_divider())
-                .child(render_recognition_section(view, cx))
-                .child(section_divider())
-                .child(render_exif_section(focused))
-                .child(section_divider())
-                .child(render_rating_section(focused, cx))
-                .child(section_divider())
-                .child(render_color_label_section(focused, cx))
-                .child(section_divider())
-                .child(render_flag_section(focused, cx))
-                .into_any_element()
-        } else {
-            // 调整 tab：曝光/对比度/饱和度 slider + 重置/导出
-            render_adjust_panel(view, cx).into_any_element()
-        })
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scrollbar()
+                .p_3()
+                .gap_3()
+                .child(if view.right_panel_tab == 0 {
+                    // 信息 tab：hero/识别/EXIF/评分/色标/旗标
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(render_hero(view))
+                        .child(render_recognition_section(view, cx))
+                        .child(render_exif_section(view.get_focused_capture()))
+                        .child(render_rating_section(view.get_focused_capture(), cx))
+                        .child(render_color_label_section(view.get_focused_capture(), cx))
+                        .child(render_flag_section(view.get_focused_capture(), cx))
+                        .into_any_element()
+                } else {
+                    // 调整 tab：曝光/对比度/饱和度 slider + 重置/导出
+                    render_adjust_panel(view, cx).into_any_element()
+                }),
+        )
 }
 
-/// 调整 tab：曝光/对比度/饱和度 slider + 重置/导出（ADR 0007 参数化非破坏）。
-/// slider 状态实体常驻 RootView（不随渲染重建）；回调只更新参数 + set_adjustment（重算在 worker），
-/// 渲染路径不产生任何像素级工作。
+// ── 卡片容器与标题 ────────────────────────────────────────────────────────
+
+/// 面板卡片：element_background 底 + 细边框 + 圆角 + 统一内边距
+fn panel_card() -> Div {
+    theme::card(div()).p_3().flex().flex_col().gap_2()
+}
+
+/// 卡片标题行：左侧小号 muted 标题，右侧可选操作（清除链接等）
+fn card_title_row(label: &str, trailing: Option<AnyElement>) -> Div {
+    let row = h_flex()
+        .justify_between()
+        .items_center()
+        .child(
+            div()
+                .text_size(px(11.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::colors().text_muted)
+                .child(label.to_string()),
+        );
+    match trailing {
+        Some(el) => row.child(el),
+        None => row,
+    }
+}
+
+/// 无焦点图时的卡片占位提示
+fn empty_hint(text: &str) -> Div {
+    div()
+        .text_size(px(12.))
+        .text_color(theme::colors().text_placeholder)
+        .child(text.to_string())
+}
+
+// ── 调整 Tab ─────────────────────────────────────────────────────────────
+
+/// 调整 tab：曝光/对比度/饱和度 slider + 重置全部/导出（ADR 0007 参数化非破坏）。
+/// slider 状态实体常驻 RootView（不随渲染重建）；拖动回调走 set_adjustment_live（内存更新 + 重算，
+/// 持久化去抖），重置走 set_adjustment（立即持久化）；渲染路径不产生任何像素级工作。
 fn render_adjust_panel(view: &RootView, cx: &mut Context<RootView>) -> impl IntoElement {
     let colors = theme::colors();
     let vh = cx.entity().downgrade();
@@ -108,35 +157,35 @@ fn render_adjust_panel(view: &RootView, cx: &mut Context<RootView>) -> impl Into
 
     // 无焦点图：仅提示
     if view.get_focused_capture().is_none() {
-        return div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(
-                div()
-                    .text_color(colors.text_muted)
-                    .text_size(px(12.))
-                    .child("未选择图片"),
-            );
+        return panel_card()
+            .child(card_title_row("基础调整", None))
+            .child(empty_hint("未选择图片"));
     }
 
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        // 全中性参数提示
-        .when(params.is_neutral(), |this| {
-            this.child(
-                div()
-                    .text_color(colors.text_muted)
-                    .text_size(px(12.))
-                    .child("当前无调整"),
-            )
-        })
+    let neutral = params.is_neutral();
+
+    panel_card()
+        .child(card_title_row(
+            "基础调整",
+            (!neutral).then(|| {
+                clear_link("reset-all-adjust", "重置全部", {
+                    let vh = vh.clone();
+                    move |_, _w, cx| {
+                        if let Some(e) = vh.upgrade() {
+                            cx.update_entity(&e, |view, cx| {
+                                view.set_adjustment(photo_domain::AdjustParams::default(), cx);
+                            });
+                        }
+                    }
+                })
+                .into_any_element()
+            }),
+        ))
         // 曝光（EV ±2.0，步进 0.05）；自绘 slider（on_mouse_* 驱动，见 simple_slider）；每项独立重置
         .child(adjust_slider_row(
             "曝光",
             format!("{:+.2} EV", params.exposure),
+            params.exposure != 0.0,
             simple_slider(0, SliderTarget::Exposure, params.exposure, -2.0, 2.0, 0.05, &vh),
             reset_adjust_button("reset-exposure", params.exposure != 0.0, &vh, |view, cx| {
                 let mut p = view.current_adjust;
@@ -148,6 +197,7 @@ fn render_adjust_panel(view: &RootView, cx: &mut Context<RootView>) -> impl Into
         .child(adjust_slider_row(
             "对比度",
             format!("{:+}", params.contrast),
+            params.contrast != 0,
             simple_slider(1, SliderTarget::Contrast, params.contrast as f32, -100.0, 100.0, 1.0, &vh),
             reset_adjust_button("reset-contrast", params.contrast != 0, &vh, |view, cx| {
                 let mut p = view.current_adjust;
@@ -159,6 +209,7 @@ fn render_adjust_panel(view: &RootView, cx: &mut Context<RootView>) -> impl Into
         .child(adjust_slider_row(
             "饱和度",
             format!("{:+}", params.saturation),
+            params.saturation != 0,
             simple_slider(2, SliderTarget::Saturation, params.saturation as f32, -100.0, 100.0, 1.0, &vh),
             reset_adjust_button("reset-saturation", params.saturation != 0, &vh, |view, cx| {
                 let mut p = view.current_adjust;
@@ -166,68 +217,11 @@ fn render_adjust_panel(view: &RootView, cx: &mut Context<RootView>) -> impl Into
                 view.set_adjustment(p, cx);
             }),
         ))
-        // 裁切状态：已裁切时显示「清除裁切」按钮（只清 crop，保留色调参数）
-        .when(params.crop.is_some(), |this| {
-            this.child(
-                h_flex()
-                    .justify_between()
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_color(colors.success)
-                            .text_size(px(12.))
-                            .child("已裁切"),
-                    )
-                    .child(
-                        Button::new("adjust-crop-clear")
-                            .ghost()
-                            .small()
-                            .label("清除裁切")
-                            .on_click({
-                                let vh = vh.clone();
-                                move |_, _window, cx| {
-                                    if let Some(e) = vh.upgrade() {
-                                        let _ = cx.update_entity(&e, |view, cx| {
-                                            let mut p = view.current_adjust;
-                                            p.crop = None;
-                                            view.set_adjustment(p, cx);
-                                        });
-                                    }
-                                }
-                            }),
-                    ),
-            )
-        })
-        // ── 操作按钮行：裁切 + 重置 + 导出 ──
+        // ── 导出行 ──
         .child(
             h_flex()
-                .justify_between()
-                .gap_2()
-                .child(
-                    // 「裁切」：点击出与图片等大的全图框（BBox 全图），再拖手柄/移动微调；
-                    // 已裁切时点击重设为全图框（重新开始）
-                    Button::new("adjust-crop")
-                        .ghost()
-                        .small()
-                        .label(if params.crop.is_some() {
-                            "重设裁切"
-                        } else {
-                            "裁切"
-                        })
-                        .on_click({
-                            let vh = vh.clone();
-                            move |_, _window, cx| {
-                                if let Some(e) = vh.upgrade() {
-                                    let _ = cx.update_entity(&e, |view, cx| {
-                                        let mut p = view.current_adjust;
-                                        p.crop = Some(photo_domain::BBox::new(0.0, 0.0, 1.0, 1.0));
-                                        view.set_adjustment(p, cx);
-                                    });
-                                }
-                            }
-                        }),
-                )
+                .justify_end()
+                .pt_1()
                 .child(
                     Button::new("adjust-export")
                         .primary()
@@ -268,19 +262,20 @@ fn render_adjust_panel(view: &RootView, cx: &mut Context<RootView>) -> impl Into
         })
 }
 
-/// 调整 slider 行：左侧标签 + 中部自绘滑块 + 右侧数值 + 独立重置按钮（可选）
+/// 调整 slider 行：左侧标签 + 中部自绘滑块 + 右侧数值 + 独立重置按钮（占位防跳动）
 fn adjust_slider_row(
     label: &str,
     value_text: String,
+    non_neutral: bool,
     slider: impl IntoElement,
     reset: Option<AnyElement>,
 ) -> impl IntoElement {
     h_flex()
-        .gap_1()
+        .gap_2()
         .items_center()
         .child(
             div()
-                .w(px(40.))
+                .w(px(44.))
                 .flex_shrink_0()
                 .text_color(theme::colors().text_muted)
                 .text_size(px(12.))
@@ -289,14 +284,28 @@ fn adjust_slider_row(
         .child(div().flex_1().child(slider))
         .child(
             div()
-                .w(px(52.))
+                .w(px(68.))
                 .flex_shrink_0()
                 .text_right()
-                .text_color(theme::colors().text)
+                .font_family(theme::MONO_FONT_FAMILY)
+                // 非中性时数值用 accent 强调
+                .text_color(if non_neutral {
+                    theme::colors().text_accent
+                } else {
+                    theme::colors().text
+                })
                 .text_size(px(12.))
                 .child(value_text),
         )
-        .when_some(reset, |this, el| this.child(el))
+        // 重置按钮固定位（无按钮时留空占位，滑块宽度不跳变）
+        .child(
+            div()
+                .w(px(44.))
+                .flex_shrink_0()
+                .flex()
+                .justify_end()
+                .children(reset),
+        )
 }
 
 /// 自绘 slider 目标字段
@@ -307,7 +316,8 @@ enum SliderTarget {
     Saturation,
 }
 
-/// 将拖动目标值写入调整参数并触发重算（set_adjustment 无条件 notify，拖动实时刷新）
+/// 将拖动目标值写入调整参数并触发重算（set_adjustment_live 无条件 notify，拖动实时刷新；
+/// 持久化走 350ms 去抖，停止拖动后才写 DB，不逐帧 UPSERT）
 fn apply_slider_value(view: &mut RootView, target: SliderTarget, value: f32, cx: &mut Context<RootView>) {
     let mut p = view.current_adjust;
     match target {
@@ -315,7 +325,7 @@ fn apply_slider_value(view: &mut RootView, target: SliderTarget, value: f32, cx:
         SliderTarget::Contrast => p.contrast = value as i32,
         SliderTarget::Saturation => p.saturation = value as i32,
     }
-    view.set_adjustment(p, cx);
+    view.set_adjustment_live(p, cx);
 }
 
 /// 鼠标窗口 x → slider 值（按元素边界归一化，step 取整，夹紧范围）
@@ -329,9 +339,11 @@ fn slider_value_from_pos(x: f32, bounds: (f32, f32, f32), min: f32, max: f32, st
     ((v / step).round() * step).clamp(min, max)
 }
 
-/// 自绘 slider：轨道 + 填充 + thumb，on_mouse_down/move/up 驱动（项目验证路径，
+/// 自绘 slider：轨道 + 中性点→当前值填充 + thumb，on_mouse_down/move/up 驱动（项目验证路径，
 /// 不依赖 gpui-component Slider 的 on_drag——锁定 gpui 4ebc154 下拖动实测无效）。
-/// 拖动中每帧 set_adjustment（取消式重算 <8ms，实时）；on_prepaint 记录边界供算值。
+/// 拖动中每帧 set_adjustment_live（取消式重算 <8ms，实时；持久化 350ms 去抖，见状态层）；
+/// on_prepaint 记录边界供算值。
+/// 注意：GPUI `relative()` 取小数比例（1.0 = 100%），禁止传百分数（曾导致填充条溢出整行）。
 fn simple_slider(
     idx: usize,
     target: SliderTarget,
@@ -343,6 +355,13 @@ fn simple_slider(
 ) -> impl IntoElement {
     let colors = theme::colors();
     let pct = ((value - min) / (max - min)).clamp(0.0, 1.0);
+    // 双极滑块（min<0<max）：填充从中性点（0 值位置）画到当前值，直观表达正负方向
+    let zero_pct = ((0.0 - min) / (max - min)).clamp(0.0, 1.0);
+    let (fill_left, fill_width) = if min < 0.0 && max > 0.0 {
+        (pct.min(zero_pct), (pct - zero_pct).abs())
+    } else {
+        (0.0, pct)
+    };
     let vh_down = vh.clone();
     let vh_move = vh.clone();
     let vh_up = vh.clone();
@@ -350,41 +369,44 @@ fn simple_slider(
     div()
         .id(ElementId::Name(format!("adjust-slider-{idx}").into()))
         .relative()
-        .h(px(18.))
+        .h(px(20.))
         .w_full()
         .cursor(CursorStyle::PointingHand)
-        // 轨道
+        // 轨道（4px，比边框色更可见的 element_active）
         .child(
             div()
                 .absolute()
                 .left(px(0.))
                 .right(px(0.))
                 .top(px(8.))
-                .h(px(2.))
+                .h(px(4.))
                 .rounded_full()
-                .bg(colors.border_variant),
+                .bg(colors.element_active),
         )
-        // 填充
+        // 填充（中性点 → 当前值）
         .child(
             div()
                 .absolute()
-                .left(px(0.))
+                .left(relative(fill_left))
                 .top(px(8.))
-                .h(px(2.))
-                .w(relative(pct * 100.0))
+                .h(px(4.))
+                .w(relative(fill_width))
                 .rounded_full()
                 .bg(colors.text_accent),
         )
-        // thumb
+        // thumb（12px 圆点 + accent 描边 + 阴影，始终可见）
         .child(
             div()
                 .absolute()
-                .left(relative(pct * 100.0))
-                .ml(-px(5.))
-                .top(px(5.))
-                .size(px(8.))
+                .left(relative(pct))
+                .ml(-px(6.))
+                .top(px(4.))
+                .size(px(12.))
                 .rounded_full()
-                .bg(colors.text),
+                .bg(colors.elevated_surface_background)
+                .border_2()
+                .border_color(colors.text_accent)
+                .shadow_sm(),
         )
         .on_mouse_down(
             MouseButton::Left,
@@ -437,7 +459,7 @@ fn simple_slider(
         })
 }
 
-/// 单调整项独立重置按钮：非中性时显示，点击将该参数归零（ADR 0007）
+/// 单调整项独立重置按钮：非中性时显示（文字按钮），点击将该参数归零（ADR 0007）
 fn reset_adjust_button(
     id: &'static str,
     visible: bool,
@@ -449,8 +471,7 @@ fn reset_adjust_button(
         Button::new(id)
             .ghost()
             .small()
-            .icon(IconName::Close)
-            .tooltip("重置该项")
+            .label("重置")
             .on_click(move |_, _window, cx| {
                 if let Some(e) = vh.upgrade() {
                     let _ = cx.update_entity(&e, |view, cx| apply(view, cx));
@@ -460,180 +481,265 @@ fn reset_adjust_button(
     })
 }
 
-/// 1px 分隔线
-fn section_divider() -> impl IntoElement {
-    div().h(px(1.)).w_full().bg(theme::colors().border_variant)
-}
+// ── Hero 卡片 ─────────────────────────────────────────────────────────────
 
-/// Hero 区：文件名（粗体截断）+ 鸟种（条件显示）+ 分辨率/文件大小（等宽强调）
-fn render_hero(focused: Option<&CaptureMeta>) -> impl IntoElement {
-    match focused {
-        None => div()
-            
-            .text_color(theme::colors().text_placeholder)
-            .child("未选择图片")
-            .into_any_element(),
-        Some(meta) => div()
-            .flex()
-            .flex_col()
-            .gap_0p5()
-            .child(
-                h_flex()
-                    .justify_between()
-                    .child(
-                        div()
-                            
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme::colors().text)
-                            .truncate()
-                            .child(meta.base_name.clone()),
-                    )
-                    .child(
-                        div()
-                            .font_family(theme::MONO_FONT_FAMILY)
-                            
-                            .text_color(theme::colors().text_muted)
-                            .child(format_file_size(meta.file_size)),
-                    ),
-            )
-            // 鸟种中文名（存在时显示）
-            .when_some(meta.bird_name.as_ref(), |this, name| {
-                this.child(
-                    div()
-                        .text_base()
-                        .text_color(theme::colors().text_accent)
-                        .truncate()
-                        .child(name.clone()),
-                )
-            })
+/// Hero 卡片：缩略图 + 文件名/格式徽标 + 鸟种（条件）+ 分辨率/文件大小
+fn render_hero(view: &RootView) -> impl IntoElement {
+    let colors = theme::colors();
+    let focused = view.get_focused_capture();
+
+    let Some(meta) = focused else {
+        return panel_card()
             .child(
                 div()
-                    .font_family(theme::MONO_FONT_FAMILY)
-                    .text_xl()
-                    .text_color(theme::colors().text_accent)
-                    .child(match (meta.image_width, meta.image_height) {
-                        (Some(w), Some(h)) => format!("{} × {}", w, h),
-                        _ => "\u{2014} × \u{2014}".into(),
-                    }),
+                    .h(px(140.))
+                    .w_full()
+                    .rounded_md()
+                    .bg(colors.element_hover)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        gpui_component::Icon::new(IconName::GalleryVerticalEnd)
+                            .text_color(colors.text_placeholder.opacity(0.4)),
+                    ),
             )
-            .into_any_element(),
-    }
-}
+            .child(empty_hint("未选择图片"));
+    };
 
-/// 信息行：标签（左 muted 小字） 值（右等宽对齐）
-fn info_row(label: &str, value: &str) -> impl IntoElement {
-    let label = format!("{}:", label);
-    h_flex()
-        .justify_between()
-        
+    // 焦点 capture 索引 → 已解码缩略图/预览图（加载由 layout.rs 渲染前触发）
+    let capture_idx = view
+        .focus_index
+        .and_then(|di| view.display_order.get(di).copied());
+    let image = capture_idx
+        .and_then(|ci| view.thumbnail_data.get(&ci).cloned())
+        .or_else(|| capture_idx.and_then(|ci| view.preview_data.get(&ci).cloned()));
+
+    panel_card()
+        // 缩略图（封面裁切；未就绪时占位图标）
         .child(
             div()
-                .text_color(theme::colors().text_muted)
-                .child(label),
+                .h(px(140.))
+                .w_full()
+                .rounded_md()
+                .overflow_hidden()
+                .bg(colors.element_hover)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(match image {
+                    Some(img) => gpui::img(ImageSource::from(img))
+                        .object_fit(ObjectFit::Cover)
+                        .size_full()
+                        .into_any_element(),
+                    None => gpui_component::Icon::new(IconName::GalleryVerticalEnd)
+                        .text_color(colors.text_placeholder.opacity(0.4))
+                        .into_any_element(),
+                }),
+        )
+        // 文件名 + 格式徽标
+        .child(
+            h_flex()
+                .justify_between()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(13.))
+                        .text_color(colors.text)
+                        .truncate()
+                        .child(meta.display_name()),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .px_1()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(colors.border)
+                        .text_size(px(10.))
+                        .font_family(theme::MONO_FONT_FAMILY)
+                        .text_color(colors.text_muted)
+                        .child(meta.primary_format.to_uppercase()),
+                ),
+        )
+        // 鸟种中文名（存在时显示）
+        .when_some(meta.bird_name.as_ref(), |this, name| {
+            this.child(
+                div()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(colors.text_accent)
+                    .truncate()
+                    .child(name.clone()),
+            )
+        })
+        // 分辨率 · 文件大小
+        .child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .font_family(theme::MONO_FONT_FAMILY)
+                        .text_size(px(12.))
+                        .text_color(colors.text)
+                        .child(match (meta.image_width, meta.image_height) {
+                            (Some(w), Some(h)) => format!("{} × {}", w, h),
+                            _ => "— × —".into(),
+                        }),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(colors.text_placeholder)
+                        .child("·"),
+                )
+                .child(
+                    div()
+                        .font_family(theme::MONO_FONT_FAMILY)
+                        .text_size(px(12.))
+                        .text_color(colors.text_muted)
+                        .child(format_file_size(meta.file_size)),
+                ),
+        )
+}
+
+// ── EXIF 卡片 ────────────────────────────────────────────────────────────
+
+/// 拍摄参数格：小标签 + 等宽值（element_hover 底圆角格）
+fn stat_cell(label: &str, value: &str) -> Div {
+    let colors = theme::colors();
+    div()
+        .flex_1()
+        .rounded_md()
+        .bg(colors.element_hover)
+        .px_2()
+        .py_1()
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .child(
+            div()
+                .text_size(px(10.))
+                .text_color(colors.text_muted)
+                .child(label.to_string()),
         )
         .child(
             div()
                 .font_family(theme::MONO_FONT_FAMILY)
+                .text_size(px(13.))
+                .text_color(colors.text)
+                .truncate()
+                .child(value.to_string()),
+        )
+}
+
+/// 信息行：标签（左 muted 小字） 值（右对齐）
+fn info_row(label: &str, value: &str) -> impl IntoElement {
+    h_flex()
+        .justify_between()
+        .gap_2()
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(12.))
+                .text_color(theme::colors().text_muted)
+                .child(label.to_string()),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(12.))
                 .text_color(theme::colors().text)
                 .child(value.to_string()),
         )
 }
 
-// ── EXIF Section ─────────────────────────────────────────────────────────
-
 fn render_exif_section(
     focused: Option<&CaptureMeta>,
 ) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .py_2()
-        .child(section_header("信息"))
-        .child(match focused {
-            None => div()
-                
-                .text_color(theme::colors().text_muted)
-                .child("无 EXIF 信息")
-                .into_any_element(),
-            Some(meta) => div()
-                .flex()
-                .flex_col()
-                .gap_0p5()
-                .child(info_row(
-                    "相机",
-                    meta.camera_make.as_deref().unwrap_or("\u{2014}"),
-                ))
-                .child(info_row(
-                    "型号",
-                    meta.camera_model.as_deref().unwrap_or("\u{2014}"),
-                ))
-                .child(info_row(
-                    "镜头",
-                    meta.lens.as_deref().unwrap_or("\u{2014}"),
-                ))
-                .child(info_row(
-                    "焦距",
-                    meta.focal_length.as_deref().unwrap_or("\u{2014}"),
-                ))
-                .child(info_row(
-                    "光圈",
-                    meta.f_number.as_deref().unwrap_or("\u{2014}"),
-                ))
-                .child(info_row(
-                    "快门",
-                    meta.exposure_time.as_deref().unwrap_or("\u{2014}"),
-                ))
-                .child(info_row(
+    let Some(meta) = focused else {
+        return panel_card()
+            .child(card_title_row("拍摄信息", None))
+            .child(empty_hint("无 EXIF 信息"));
+    };
+
+    // 相机行：厂商 + 型号拼接（如 "Canon EOS R5"）
+    let camera = match (meta.camera_make.as_deref(), meta.camera_model.as_deref()) {
+        (Some(make), Some(model)) => format!("{make} {model}"),
+        (Some(make), None) => make.to_string(),
+        (None, Some(model)) => model.to_string(),
+        (None, None) => "—".into(),
+    };
+    let dash = "\u{2014}";
+
+    panel_card()
+        .child(card_title_row("拍摄信息", None))
+        // 关键参数 2×2 网格
+        .child(
+            h_flex()
+                .gap_2()
+                .child(stat_cell("焦距", meta.focal_length.as_deref().unwrap_or(dash)))
+                .child(stat_cell("光圈", meta.f_number.as_deref().unwrap_or(dash))),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .child(stat_cell("快门", meta.exposure_time.as_deref().unwrap_or(dash)))
+                .child(stat_cell(
                     "ISO",
-                    &meta
-                        .iso
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "\u{2014}".into()),
-                ))
-                .child(info_row(
-                    "日期",
-                    meta.date_taken.as_deref().unwrap_or("\u{2014}"),
-                ))
-                .into_any_element(),
-        })
+                    &meta.iso.map(|v| v.to_string()).unwrap_or_else(|| dash.into()),
+                )),
+        )
+        // 次级信息行
+        .child(info_row("相机", &camera))
+        .child(info_row("镜头", meta.lens.as_deref().unwrap_or(dash)))
+        .child(info_row("日期", meta.date_taken.as_deref().unwrap_or(dash)))
 }
 
-// ── Rating Section ───────────────────────────────────────────────────────
+// ── 评分卡片 ─────────────────────────────────────────────────────────────
 
 fn render_rating_section(
     focused: Option<&CaptureMeta>,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
-    if focused.is_none() {
-        return div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .py_2()
-            .child(section_header("评分"))
-            .child(
-                div()
-                    
-                    .text_color(theme::colors().text_muted)
-                    .child("未选择图片"),
-            )
-            .into_any_element();
-    }
-
-    let current_rating = focused.map(|m| m.rating).unwrap_or(DomainRating::None);
-    let rating_value = current_rating as usize;
-
     let vh = cx.entity().downgrade();
 
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .py_2()
-        .child(section_header("评分"))
+    let Some(meta) = focused else {
+        return panel_card()
+            .child(card_title_row("评分", None))
+            .child(empty_hint("未选择图片"));
+    };
+
+    let rating_value = meta.rating as usize;
+    let has_rating = meta.rating != DomainRating::None;
+
+    panel_card()
+        .child(card_title_row(
+            "评分",
+            has_rating.then(|| {
+                clear_link("clear-rating", "清除", {
+                    let vh = vh.clone();
+                    move |_, _w, cx| {
+                        if let Some(entity) = vh.upgrade() {
+                            cx.update_entity(&entity, |view, cx| {
+                                view.dispatch_action(Action::Rate0, cx)
+                            });
+                        }
+                    }
+                })
+                .into_any_element()
+            }),
+        ))
         .child(
             Rating::new("rating")
+                .with_size(gpui_component::Size::Medium)
+                .color(*theme::colors::LABEL_YELLOW)
                 .value(rating_value)
                 .max(5)
                 .on_click({
@@ -657,47 +763,23 @@ fn render_rating_section(
                     }
                 }),
         )
-        .child(
-            h_flex()
-                .justify_end()
-                .child(clear_link("clear-rating", "清除评分", {
-                    let vh = vh.clone();
-                    move |_, _w, cx| {
-                        if let Some(entity) = vh.upgrade() {
-                            cx.update_entity(&entity, |view, cx| {
-                                view.dispatch_action(Action::Rate0, cx)
-                            });
-                        }
-                    }
-                })),
-        )
-        .into_any_element()
 }
 
-// ── Color Label Section ──────────────────────────────────────────────────
+// ── 颜色标签卡片 ─────────────────────────────────────────────────────────
 
 fn render_color_label_section(
     focused: Option<&CaptureMeta>,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
-    if focused.is_none() {
-        return div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .py_2()
-            .child(section_header("颜色标签"))
-            .child(
-                div()
-                    
-                    .text_color(theme::colors().text_muted)
-                    .child("未选择图片"),
-            )
-            .into_any_element();
-    }
-
-    let current_label = focused.map(|m| m.color_label).unwrap_or(ColorLabel::None);
     let vh = cx.entity().downgrade();
+
+    let Some(meta) = focused else {
+        return panel_card()
+            .child(card_title_row("颜色标签", None))
+            .child(empty_hint("未选择图片"));
+    };
+
+    let current_label = meta.color_label;
 
     fn label_dot(
         color: Hsla,
@@ -706,34 +788,49 @@ fn render_color_label_section(
         is_selected: bool,
         cx: &mut Context<RootView>,
     ) -> impl IntoElement {
-        let size = if is_selected { px(28.) } else { px(22.) };
+        // 固定 20px + 恒 2px 描边：选中态改描边色（不改尺寸），布局零跳动
         let border_color = if is_selected {
-            theme::colors().text_accent
+            theme::colors().text
         } else {
-            theme::colors().border_variant
+            theme::colors().border_transparent
         };
-        let border_w = if is_selected { px(3.) } else { px(1.) };
         div()
             .id(ElementId::Name(id.into()))
-            .w(size)
-            .h(size)
+            .size(px(20.))
             .rounded_full()
             .bg(color)
-            .border(border_w)
+            .border_2()
             .border_color(border_color)
             .cursor_pointer()
-            .hover(|style| style.opacity(0.8))
+            .hover(|style| {
+                style.border_color(if is_selected {
+                    theme::colors().text
+                } else {
+                    theme::colors().text_muted
+                })
+            })
             .on_click(cx.listener(move |view, _event: &ClickEvent, _window, cx| {
                 view.dispatch_action(action, cx);
             }))
     }
 
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .py_2()
-        .child(section_header("颜色标签"))
+    panel_card()
+        .child(card_title_row(
+            "颜色标签",
+            (current_label != ColorLabel::None).then(|| {
+                clear_link("clear-label", "清除", {
+                    let vh = vh.clone();
+                    move |_, _w, cx| {
+                        if let Some(entity) = vh.upgrade() {
+                            cx.update_entity(&entity, |view, cx| {
+                                view.dispatch_action(Action::LabelNone, cx)
+                            });
+                        }
+                    }
+                })
+                .into_any_element()
+            }),
+        ))
         .child(
             h_flex()
                 .justify_between()
@@ -743,54 +840,26 @@ fn render_color_label_section(
                 .child(label_dot(*theme::colors::LABEL_BLUE, Action::LabelBlue, "color-label-blue", current_label == ColorLabel::Blue, cx))
                 .child(label_dot(*theme::colors::LABEL_PURPLE, Action::LabelPurple, "color-label-purple", current_label == ColorLabel::Purple, cx)),
         )
-        .child(
-            h_flex()
-                .justify_end()
-                .child(clear_link("clear-label", "清除标签", {
-                    let vh = vh.clone();
-                    move |_, _w, cx| {
-                        if let Some(entity) = vh.upgrade() {
-                            cx.update_entity(&entity, |view, cx| {
-                                view.dispatch_action(Action::LabelNone, cx)
-                            });
-                        }
-                    }
-                })),
-        )
-        .into_any_element()
 }
 
-// ── Flag Section ─────────────────────────────────────────────────────────
+// ── 旗标卡片 ─────────────────────────────────────────────────────────────
 
 fn render_flag_section(
     focused: Option<&CaptureMeta>,
     cx: &mut Context<RootView>,
 ) -> impl IntoElement {
-    if focused.is_none() {
-        return div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .py_2()
-            .child(section_header("旗标"))
-            .child(
-                div()
-                    
-                    .text_color(theme::colors().text_muted)
-                    .child("未选择图片"),
-            )
-            .into_any_element();
-    }
-
-    let current_flag: Option<Flag> = focused.map(|m| m.flag).unwrap_or(None);
     let vh = cx.entity().downgrade();
 
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .py_2()
-        .child(section_header("旗标"))
+    let Some(meta) = focused else {
+        return panel_card()
+            .child(card_title_row("旗标", None))
+            .child(empty_hint("未选择图片"));
+    };
+
+    let current_flag: Option<Flag> = meta.flag;
+
+    panel_card()
+        .child(card_title_row("旗标", None))
         .child(
             h_flex()
                 .justify_between()
@@ -840,10 +909,9 @@ fn render_flag_section(
                     },
                 )),
         )
-        .into_any_element()
 }
 
-// ── Recognition Section ─────────────────────────────────────────────────
+// ── 识别卡片 ─────────────────────────────────────────────────────────────
 
 /// 置信度阈值色：>=80 success / >=50 warning / <50 info
 fn confidence_color(confidence: f32) -> Hsla {
@@ -856,21 +924,21 @@ fn confidence_color(confidence: f32) -> Hsla {
     }
 }
 
-/// 2px 细进度条：条色按阈值动态，底为 element_background
+/// 4px 细进度条：条色按阈值动态，底为 element_active
 fn confidence_bar(confidence: f32) -> impl IntoElement {
     let color = confidence_color(confidence);
     let pct = confidence.clamp(0.0, 100.0) / 100.0;
     div()
-        .h(px(2.))
+        .h(px(4.))
         .w_full()
-        .bg(theme::colors().element_background)
-        .rounded_sm()
+        .bg(theme::colors().element_active)
+        .rounded_full()
         .child(
             div()
                 .h_full()
                 .w(relative(pct))
                 .bg(color)
-                .rounded_sm(),
+                .rounded_full(),
         )
 }
 
@@ -880,7 +948,7 @@ fn status_chip(label: &str, text_color: Hsla, bg_color: Hsla, border_color: Hsla
         .px_2()
         .py_0p5()
         .rounded_sm()
-        
+        .text_size(px(11.))
         .text_color(text_color)
         .bg(bg_color)
         .border_1()
@@ -888,7 +956,7 @@ fn status_chip(label: &str, text_color: Hsla, bg_color: Hsla, border_color: Hsla
         .child(label.to_string())
 }
 
-/// 识别 section：五态切换 + 切换检测框按钮
+/// 识别卡片：五态切换 + 重新识别/检测框按钮
 fn render_recognition_section(
     view: &RootView,
     cx: &mut Context<RootView>,
@@ -909,12 +977,10 @@ fn render_recognition_section(
         .get_focused_capture()
         .is_some_and(|m| m.primary_format.to_uppercase() == "OTHER");
 
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .py_2()
-        .child(section_header("识别"))
+    let no_focus = view.get_focused_capture().is_none();
+
+    panel_card()
+        .child(card_title_row("识别", None))
         .child(match (view.focused_recognition.as_ref(), is_busy) {
             // ── 识别中 ──
             (_, true) => {
@@ -928,7 +994,7 @@ fn render_recognition_section(
                     .child(gpui_component::spinner::Spinner::new().with_size(gpui_component::Size::Small))
                     .child(
                         div()
-                            
+                            .text_size(px(12.))
                             .text_color(colors.text_muted)
                             .child(stage.to_string()),
                     )
@@ -939,19 +1005,18 @@ fn render_recognition_section(
                 div()
                     .flex()
                     .flex_col()
-                    .gap_1()
+                    .gap_2()
                     .child(
                         div()
-                            
+                            .text_size(px(12.))
                             .text_color(colors.text_muted)
-                            .child("尚未识别"),
+                            .child(if no_focus { "未选择图片" } else { "尚未识别" }),
                     )
                     .child(
                         if is_other {
                             div()
-                                
-                                .text_color(colors.text_muted)
                                 .text_size(px(11.))
+                                .text_color(colors.text_muted)
                                 .child("非图片格式，不支持识别")
                                 .into_any_element()
                         } else {
@@ -959,6 +1024,7 @@ fn render_recognition_section(
                                 .primary()
                                 .small()
                                 .label("识别此照片 (b)")
+                                .disabled(no_focus)
                                 .on_click({
                                     let vh = vh.clone();
                                     move |_, _window, cx| {
@@ -984,6 +1050,58 @@ fn render_recognition_section(
                 this.child(render_recognition_actions(view, &vh))
             },
         )
+        // 手动修正鸟种入口（有焦点图且非识别中/非视频时显示）
+        .when(
+            view.get_focused_capture().is_some() && !is_busy && !is_other,
+            |this| {
+                this.child(
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            h_flex()
+                                .justify_end()
+                                .child(
+                                    Button::new("correct-bird-toggle")
+                                        .ghost()
+                                        .small()
+                                        .label(if view.correction_open {
+                                            "收起修正"
+                                        } else {
+                                            "修正鸟种…"
+                                        })
+                                        .on_click({
+                                            let vh = vh.clone();
+                                            move |_, _window, cx| {
+                                                if let Some(e) = vh.upgrade() {
+                                                    let _ = cx.update_entity(&e, |view, cx| {
+                                                        view.correction_open = !view.correction_open;
+                                                        if view.correction_open {
+                                                            // 展开：加载名录并重建下拉（选中态复位）
+                                                            view.ensure_correction_species(cx);
+                                                            view.correction_select_dirty = true;
+                                                        }
+                                                        cx.notify();
+                                                    });
+                                                }
+                                            }
+                                        }),
+                                ),
+                        )
+                        // 展开后显示搜索下拉（全量名录，选即修正）
+                        .when(view.correction_open, |this| {
+                            this.when_some(view.correction_select.as_ref(), |this, sel| {
+                                this.child(
+                                    Combobox::new(sel)
+                                        .placeholder("搜索鸟种...")
+                                        .search_placeholder("搜索鸟种...")
+                                        .menu_width(px(240.))
+                                        .small(),
+                                )
+                            })
+                        }),
+                )
+            },
+        )
 }
 
 /// 有识别记录时的内容渲染
@@ -1000,33 +1118,28 @@ fn render_recognition_content(
             div()
                 .flex()
                 .flex_col()
-                .gap_1()
-                // 置信度数字 + 进度条
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_0p5()
-                        .child(
-                            div()
-                                .font_family(theme::MONO_FONT_FAMILY)
-                                .text_lg()
-                                .text_color(conf_color)
-                                .child(format!("{:.1}%", confidence)),
-                        )
-                        .child(confidence_bar(confidence)),
-                )
-                // 状态 chip「已识别」
+                .gap_2()
+                // 状态 chip + 置信度数字
                 .child(
                     h_flex()
                         .justify_between()
+                        .items_center()
                         .child(status_chip(
                             "已识别",
                             colors.success,
                             colors.success_background,
                             colors.success_border,
-                        )),
+                        ))
+                        .child(
+                            div()
+                                .font_family(theme::MONO_FONT_FAMILY)
+                                .text_size(px(15.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(conf_color)
+                                .child(format!("{:.1}%", confidence)),
+                        ),
                 )
+                .child(confidence_bar(confidence))
                 // 鸟眼锐度
                 .when_some(r.eye_sharpness, |this, s| {
                     this.child(eye_sharpness_row(&colors, s))
@@ -1044,7 +1157,7 @@ fn render_recognition_content(
             div()
                 .flex()
                 .flex_col()
-                .gap_1()
+                .gap_2()
                 .child(status_chip(
                     "待复核",
                     colors.warning,
@@ -1053,14 +1166,14 @@ fn render_recognition_content(
                 ))
                 .child(
                     div()
-                        
+                        .text_size(px(12.))
                         .text_color(colors.warning)
                         .child(failure_msg.to_string()),
                 )
                 .when_some(best_candidate, |this, (name, conf)| {
                     this.child(
                         div()
-                            
+                            .text_size(px(12.))
                             .text_color(colors.text_muted)
                             .child(format!("最接近：{} {:.1}%", name, conf)),
                     )
@@ -1075,7 +1188,7 @@ fn render_recognition_content(
             div()
                 .flex()
                 .flex_col()
-                .gap_1()
+                .gap_2()
                 .child(status_chip(
                     "未检测到鸟类",
                     colors.text_muted,
@@ -1097,6 +1210,7 @@ fn eye_sharpness_row(colors: &theme::ThemeColors, score: f32) -> AnyElement {
         .items_center()
         .child(
             div()
+                .text_size(px(12.))
                 .text_color(colors.text_muted)
                 .child(format!("眼锐度 {:.2}", score)),
         )
@@ -1210,4 +1324,3 @@ mod tests {
         assert_eq!(slider_value_from_pos(0.0, (0.0, 0.0, 0.0), -2.0, 2.0, 0.05), -2.0);
     }
 }
-

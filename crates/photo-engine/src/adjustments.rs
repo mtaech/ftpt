@@ -1,17 +1,15 @@
-//! 参数化调整的纯函数（ADR 0007）：曝光 / 对比度 / 饱和度单次遍历 + 裁切。
+//! 参数化调整的纯函数（ADR 0007）：曝光 / 对比度 / 饱和度单次遍历。
 //! 全同步、无 IO、无依赖注入，供 app 层 worker 线程调用（性能预算：1600px 单帧 ≤ 5ms）。
 //!
 //! 色彩语义：
 //! - **曝光**在线性域做（sRGB → 线性 → ×2^EV → sRGB 查表）：sRGB 编码值直接乘法
 //!   在 +1EV 时中灰（128）即溢出，线性域乘才是相机曝光行为
 //! - **对比度 / 饱和度**在编码域做（围绕中灰缩放 / 亮度加权混合），常见实现惯例
-//! - 应用顺序：先裁切（几何）→ 再色调（像素）→ 缩放显示（调用方负责缩放）
 
 use std::sync::LazyLock;
 
-use image::imageops;
 use image::RgbImage;
-use photo_domain::{AdjustParams, BBox};
+use photo_domain::AdjustParams;
 
 /// 16-bit RGB 缓冲（image 0.25 的 `Rgb16Image` 为 crate 私有，自行别名）
 pub type Rgb16Image = image::ImageBuffer<image::Rgb<u16>, Vec<u16>>;
@@ -36,10 +34,17 @@ impl ToneParams {
 
 impl From<&AdjustParams> for ToneParams {
     fn from(a: &AdjustParams) -> Self {
+        // 防御 DB/外部坏值：Q15 定点饱和数学依赖 saturation∈[-100,100]（已验算该范围无 i32 溢出），
+        // 对比度参与浮点缩放（超出范围 f32 溢出成 inf），曝光 ±2 外查表产生 NaN/inf 路径——
+        // 三者钳制到各自文档范围；非有限 exposure（NaN/inf）归零（等价中性）。
         Self {
-            exposure: a.exposure,
-            contrast: a.contrast,
-            saturation: a.saturation,
+            exposure: if a.exposure.is_finite() {
+                a.exposure.clamp(-2.0, 2.0)
+            } else {
+                0.0
+            },
+            contrast: a.contrast.clamp(-100, 100),
+            saturation: a.saturation.clamp(-100, 100),
         }
     }
 }
@@ -122,12 +127,12 @@ fn exposure_tab8(ev: f32) -> Vec<u8> {
 /// 对 16-bit RGB 缓冲应用色调调整（单次遍历，性能预算 ≤5ms/帧 @1600px）。
 /// 性能设计：**曝光 + 对比度合成单张查表**（一次查表完成两项，消除对比度浮点）；
 /// **饱和度用 Q15 整数定点**（避免每像素浮点乘加与 round/clamp 标量调用，允许编译器向量化）。
-/// 中性参数仅拷贝。
+/// 中性参数仅拷贝（检查前置：不构建查表、不遍历像素；签名返回 owned 缓冲，无法零拷贝借用）。
 pub fn apply_tone16(img: &Rgb16Image, p: &ToneParams) -> Rgb16Image {
-    let mut out = img.clone();
     if p.is_neutral() {
-        return out;
+        return img.clone();
     }
+    let mut out = img.clone();
     let c = 1.0 + p.contrast as f32 / 100.0;
     let s = 1.0 + p.saturation as f32 / 100.0;
     let tab = tone_tab16(p.exposure, c);
@@ -159,10 +164,10 @@ pub fn apply_tone16(img: &Rgb16Image, p: &ToneParams) -> Rgb16Image {
 
 /// 对 8-bit RGB 缓冲应用色调调整（同 16-bit 语义，Q15 定点饱和度）
 pub fn apply_tone8(img: &RgbImage, p: &ToneParams) -> RgbImage {
-    let mut out = img.clone();
     if p.is_neutral() {
-        return out;
+        return img.clone();
     }
+    let mut out = img.clone();
     let c = 1.0 + p.contrast as f32 / 100.0;
     let s = 1.0 + p.saturation as f32 / 100.0;
     let tab = tone_tab8(p.exposure, c);
@@ -228,45 +233,6 @@ fn clamp_q15(v: i32) -> u16 {
 #[inline]
 fn clamp_q8(v: i32) -> u8 {
     v.clamp(0, 255) as u8
-}
-
-/// 按归一化裁切框裁切 16-bit 图（None = 原样返回拷贝）。
-/// 像素坐标：x1/y1 下取整、x2/y2 上取整（保证覆盖用户框选的完整区域），夹紧到图边界。
-pub fn apply_crop16(img: &Rgb16Image, crop: Option<BBox>) -> Rgb16Image {
-    match crop {
-        Some(b) => crop_16(img, b),
-        None => img.clone(),
-    }
-}
-
-/// 按归一化裁切框裁切 8-bit 图
-pub fn apply_crop8(img: &RgbImage, crop: Option<BBox>) -> RgbImage {
-    match crop {
-        Some(b) => crop_8(img, b),
-        None => img.clone(),
-    }
-}
-
-/// 16-bit 裁切：归一化框 → 像素范围（含边界夹紧与空框守卫）
-fn crop_16(img: &Rgb16Image, b: BBox) -> Rgb16Image {
-    let (x0, y0, cw, ch) = crop_pixel_range(img.width(), img.height(), b);
-    imageops::crop_imm(img, x0, y0, cw, ch).to_image()
-}
-
-/// 8-bit 裁切
-fn crop_8(img: &RgbImage, b: BBox) -> RgbImage {
-    let (x0, y0, cw, ch) = crop_pixel_range(img.width(), img.height(), b);
-    imageops::crop_imm(img, x0, y0, cw, ch).to_image()
-}
-
-/// 归一化框 → 像素范围（下取整起点、上取整终点、边界夹紧、空框守卫 ≥1）
-fn crop_pixel_range(w: u32, h: u32, b: BBox) -> (u32, u32, u32, u32) {
-    let (w_f, h_f) = (w.max(1) as f32, h.max(1) as f32);
-    let x0 = ((b.x1 * w_f).floor() as u32).min(w.saturating_sub(1));
-    let y0 = ((b.y1 * h_f).floor() as u32).min(h.saturating_sub(1));
-    let x1 = ((b.x2 * w_f).ceil() as u32).clamp(x0 + 1, w);
-    let y1 = ((b.y2 * h_f).ceil() as u32).clamp(y0 + 1, h);
-    (x0, y0, (x1 - x0).max(1), (y1 - y0).max(1))
 }
 
 #[cfg(test)]
@@ -359,37 +325,6 @@ mod tests {
         let out8 = apply_tone8(&img8, &p);
         let v = out8.get_pixel(0, 0)[0];
         assert!(v > 128 && v < 255, "8-bit 中灰 +1EV 应提亮且不截断：{v}");
-    }
-
-    /// 裁切：归一化框 (0.25, 0.25, 0.75, 0.75) 于 8×8 图 → 中心 4×4 区域
-    #[test]
-    fn test_crop_normalized_box() {
-        let img = Rgb16Image::from_fn(8, 8, |x, y| image::Rgb([x as u16, y as u16, 0]));
-        let b = BBox::new(0.25, 0.25, 0.75, 0.75);
-        let out = apply_crop16(&img, Some(b));
-        assert_eq!(out.dimensions(), (4, 4));
-        // 左上角像素应为原 (2,2)（0.25×8 = 2）
-        assert_eq!(out.get_pixel(0, 0)[0], 2);
-        assert_eq!(out.get_pixel(0, 0)[1], 2);
-    }
-
-    /// 裁切 None：原样拷贝
-    #[test]
-    fn test_crop_none_identity() {
-        let img = Rgb16Image::from_fn(8, 8, |x, y| image::Rgb([x as u16, y as u16, 0]));
-        let out = apply_crop16(&img, None);
-        assert_eq!(out.dimensions(), img.dimensions());
-        assert_eq!(out.get_pixel(7, 7), img.get_pixel(7, 7));
-    }
-
-    /// 裁切越界框：夹紧不 panic
-    #[test]
-    fn test_crop_out_of_bounds_clamps() {
-        let img = Rgb16Image::from_fn(8, 8, |x, y| image::Rgb([x as u16, y as u16, 0]));
-        let b = BBox::new(0.9, 0.9, 1.5, 1.5); // BBox::new 会夹紧 0-1
-        let out = apply_crop16(&img, Some(b));
-        assert!(out.width() >= 1 && out.height() >= 1);
-        assert!(out.width() <= 8 && out.height() <= 8);
     }
 
     /// 性能基准（ADR 0007 预算抽查）：1600px 16-bit 显示源 tone 变换应 < 30ms（debug 宽松阈值）。

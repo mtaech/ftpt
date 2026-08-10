@@ -4,16 +4,17 @@
 //! ```text
 //! focus 变化 → refresh_adjustments_sync（同步点查参数，失效旧渲染/显示源）
 //! 渲染路径 → ensure_adjust_ready（构建显示源：RAW 1600px 16-bit 派生 / JPEG 1600px 8-bit）
-//! slider   → set_adjustment（持久化 + 重算 tone，只认最新参数版本）
+//! slider   → set_adjustment_live（内存更新 + 重算，持久化 350ms 去抖一次）
+//! 重置     → set_adjustment（立即持久化 + 重算 tone，只认最新参数版本）
 //! 导出     → export_adjusted（rfd 选目录 → worker 烘焙，状态栏提示）
 //! ```
 //!
 //! 性能约束（第一优先级）：tone 重算在 1600px 显示源上做（<8ms/帧，实时拖动），
 //! 参数变更绝不触发重新解码——显示源只解码/派生一次，之后只重算像素变换。
 
-use std::path::PathBuf;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use gpui::*;
 use photo_domain::{AdjustParams, ImageFormat as DomainFormat, SourceFile};
@@ -24,6 +25,32 @@ use super::app::RootView;
 
 /// 调整显示源长边像素（与预览一致：tone 在此分辨率重算，保证实时）
 const ADJUST_DISPLAY_SIZE: u32 = super::app::RootView::PREVIEW_LOAD_SIZE;
+
+/// RAW 16-bit 调整母版 LRU 缓存（容量 2，键 = primary_path）。
+/// 每次切图构建显示源都需解码母版（200-500ms/张），切走再切回应命中缓存跳过解码；
+/// 显示源（adjust_display16）随焦点淘汰，母版保留在此缓存。应用仅一个 RootView 实例，
+/// 用全局静态承载（构建任务在 worker 线程执行，缓存需跨任务共享）。
+static RAW16_MASTER_CACHE: Mutex<Vec<(PathBuf, Arc<Rgb16Image>)>> = Mutex::new(Vec::new());
+/// 母版缓存上限（张）：16-bit half_size 母版 ≈ 40MB/张，保留最近 2 张
+const RAW16_CACHE_LIMIT: usize = 2;
+
+/// 取 RAW 16-bit 母版：LRU 命中直接返回，未命中解码后入缓存并淘汰最旧。
+/// 解码被取消（切图令牌）时不入缓存。返回的 Arc 与缓存共享同一份不可变数据。
+fn raw16_master_cached(path: &Path, cancel: Option<&AtomicBool>) -> Option<Arc<Rgb16Image>> {
+    {
+        let mut cache = RAW16_MASTER_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(pos) = cache.iter().position(|(p, _)| p == path) {
+            let (_, img) = cache.remove(pos);
+            cache.insert(0, (path.to_path_buf(), img.clone()));
+            return Some(img);
+        }
+    }
+    let master = Arc::new(photo_engine::thumbnail::decode_raw_preview16(path, cancel).ok()?);
+    let mut cache = RAW16_MASTER_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache.insert(0, (path.to_path_buf(), master.clone()));
+    cache.truncate(RAW16_CACHE_LIMIT);
+    Some(master)
+}
 
 /// 调整显示源（构建任务返回类型：RAW 为 16-bit 派生，JPEG 为 8-bit）
 enum AdjustSource {
@@ -55,12 +82,17 @@ impl RootView {
             // 参数已在内存（可能含未持久化的 slider 值）
             return;
         }
-        let params = self
+        let mut params = self
             .folder_db
             .as_ref()
             .and_then(|db| db.get_adjustments(&self.rel_path_of(&meta.primary_path)).ok())
             .flatten()
             .unwrap_or_default();
+        // 防御 DB 坏值：Q15 定点饱和要求 saturation∈[-100,100]，钳制后再入内存
+        // （UI 显示与后续持久化均用钳制值，引擎侧 From 转换另有兜底钳制）
+        params.exposure = params.exposure.clamp(-2.0, 2.0);
+        params.contrast = params.contrast.clamp(-100, 100);
+        params.saturation = params.saturation.clamp(-100, 100);
         self.current_adjust = params;
         self.adjust_params_capture = Some(ci);
         // 焦点图变化：调整渲染与显示源全部失效（由渲染路径 ensure_adjust_ready 重建）
@@ -123,22 +155,21 @@ impl RootView {
                     return None;
                 }
                 if is_raw {
-                    // 16-bit 母版（half_size）→ 缩到显示尺寸（16-bit 保持精度）
-                    let master = photo_engine::thumbnail::decode_raw_preview16(&path, Some(&cancel))
-                        .ok()?;
+                    // 16-bit 母版（half_size，LRU 缓存命中免重解码）→ 缩到显示尺寸（16-bit 保持精度）
+                    let master = raw16_master_cached(&path, Some(&cancel))?;
                     let (w, h) = master.dimensions();
                     let scale = (ADJUST_DISPLAY_SIZE as f32 / w.max(h) as f32).min(1.0);
                     if scale < 1.0 {
                         let nw = (w as f32 * scale).round().max(1.0) as u32;
                         let nh = (h as f32 * scale).round().max(1.0) as u32;
                         Some(AdjustSource::Rgb16(Arc::new(image::imageops::resize(
-                            &master,
+                            master.as_ref(),
                             nw,
                             nh,
                             image::imageops::FilterType::Triangle,
                         ))))
                     } else {
-                        Some(AdjustSource::Rgb16(Arc::new(master)))
+                        Some(AdjustSource::Rgb16(master))
                     }
                 } else {
                     // JPEG/常规图：磁盘缓存字节（与预览同源）→ 8-bit RGB
@@ -176,8 +207,8 @@ impl RootView {
         );
     }
 
-    /// slider/重置/裁切变化：更新参数 → 持久化（异步）→ 重算 tone。
-    /// 连续拖动时每帧调用，参数相等则跳过。
+    /// 离散变更（重置按钮/重置全部）：更新参数 → 立即持久化（异步）→ 重算 tone。
+    /// slider 拖动请用 set_adjustment_live（去抖持久化，见下）。
     /// **必须无条件 notify**：显示源未就绪时 recompute 提前返回（不重算），
     /// 但参数已更新——不 notify 则画面/数值文本不刷新，拖动观感为"无反应"。
     pub fn set_adjustment(&mut self, params: AdjustParams, cx: &mut Context<Self>) {
@@ -186,22 +217,71 @@ impl RootView {
         }
         self.current_adjust = params;
         cx.notify();
-        // 持久化（批量池异步，单条 UPSERT 廉价；拖动中不阻塞 UI）
+        self.persist_adjust_now(cx);
+        self.recompute_adjust_render(cx);
+    }
+
+    /// slider 拖动中的实时更新（每帧调用）：只更新内存参数 + 重算显示，
+    /// **不逐帧 UPSERT**——持久化去抖：每次变化重排 350ms 定时器，停止拖动后无新变化才写一次最终值。
+    /// 过期定时器触发时校验参数/焦点未变才写（避免旧值覆盖新值、防切图串行）。
+    pub fn set_adjustment_live(&mut self, params: AdjustParams, cx: &mut Context<Self>) {
+        if self.current_adjust == params {
+            return;
+        }
+        self.current_adjust = params;
+        cx.notify();
+        // 去抖持久化：捕获参数快照与参数归属 capture（防切图串写）；
+        // 触发时快照仍为当前值/当前图才写入（写入目标 rel 由 persist_adjust_now 现算）
+        if self.get_focused_capture().is_some() {
+            let params_snapshot = params;
+            let params_ci = self.adjust_params_capture;
+            let vh = cx.entity().downgrade();
+            cx.spawn(move |_: WeakEntity<RootView>, cx: &mut AsyncApp| {
+                let mut cx = cx.clone();
+                async move {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(350))
+                        .await;
+                    let Some(view) = vh.upgrade() else { return };
+                    let _ = cx.update_entity(&view, move |this, cx| {
+                        // 期间参数又变（更新的定时器负责写最终值）或焦点已切走 → 跳过
+                        if this.current_adjust != params_snapshot
+                            || this.adjust_params_capture != params_ci
+                        {
+                            return;
+                        }
+                        this.persist_adjust_now(cx);
+                    });
+                }
+            })
+            .detach();
+        }
+        self.recompute_adjust_render(cx);
+    }
+
+    /// 将当前参数持久化到当前焦点图（批量池异步执行；失败仅记日志，不打断交互）。
+    fn persist_adjust_now(&mut self, cx: &mut Context<Self>) {
         let Some(meta) = self.get_focused_capture().map(|m| m.primary_path.clone()) else {
             return;
         };
         let rel = self.rel_path_of(&meta);
+        let rel_log = rel.clone();
         let db = self.folder_db.clone();
-        let params_db = params;
+        let params = self.current_adjust;
         self.worker.spawn(
             cx,
-            move || -> Result<(), photo_engine::folder_db::FolderDbError> {
-                let Some(db) = db else { return Ok(()) };
-                db.put_adjustments(&rel, &params_db)
+            move || -> bool {
+                let Some(db) = db else { return true };
+                match db.put_adjustments(&rel, &params) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::error!("调整参数持久化失败 {rel_log}: {e}");
+                        false
+                    }
+                }
             },
-            |_, _: Result<(), _>, _| {},
+            move |_, _persisted: bool, _| {},
         );
-        self.recompute_adjust_render(cx);
     }
 
     /// 按当前参数重算调整渲染（tone 在显示源上，1600px <8ms；只认最新版本）。
@@ -209,7 +289,7 @@ impl RootView {
     /// **每次调用都取消旧任务 + 新令牌重算**：slider 快速拖动时旧任务在 worker 闭包
     /// 开头检查令牌快速退出（不堆积），版本号保证只认最新——不设 loading 闸门，
     /// 否则拖动中/Release 的最终值会因旧任务未完成被跳过。
-    /// pub(crate)：slider Release 事件（app.rs 订阅）确保拖动结束的最终值渲染。
+    /// pub(crate)：拖动结束的最终值由最后一次 set_adjustment_live 的重算渲染（无独立 Release 事件）。
     pub(crate) fn recompute_adjust_render(&mut self, cx: &mut Context<Self>) {
         if self.current_adjust.is_neutral() {
             self.adjust_render = None;
@@ -235,7 +315,6 @@ impl RootView {
                 if cancel.load(Ordering::Relaxed) {
                     return None;
                 }
-                // 预览显示全图（裁切框由叠加层绘制，导出时才真正裁切）
                 if let Some(d16) = &display16 {
                     Some(rgb16_to_render_image(&apply_tone16(d16, &tone)))
                 } else if let Some(d8) = &display8 {
@@ -311,160 +390,6 @@ impl RootView {
                 cx.notify();
             },
         );
-    }
-
-    // ── 裁切交互（ADR 0007：调整视图内框选/移动/手柄调整；拖动中只更新 draft，mouse_up 才提交）──
-    // 性能约束：事件处理只更新状态（crop_draft 等），不触发 set_adjustment；
-    // 提交（含持久化 + 重算 tone）统一在 mouse_up，避免拖动中反复持久化/重算。
-
-    /// 调整视图鼠标按下：Shift → 开始框选裁切；非 Shift → 命中检测
-    /// （手柄 8px 邻域 → crop_resize；框内含 6px 边缘 → crop_move；未命中 → 由调用方回退平移）。
-    pub(crate) fn adjust_mouse_down(&mut self, x: f32, y: f32, shift: bool, cx: &mut Context<Self>) {
-        if shift {
-            // 框选新裁切（替换旧框；过小取消时保留原框）
-            self.crop_draw = Some((x, y, x, y));
-            self.crop_draft = None;
-            cx.notify();
-            return;
-        }
-        // 命中检测基于当前显示框（draft 优先，与叠加层一致）
-        let Some(bbox) = self.crop_draft.or(self.current_adjust.crop) else {
-            return; // 无框 → 平移
-        };
-        let (Some((nx, ny)), Some((dw, dh))) = (self.window_pos_to_image_norm(x, y), self.preview_disp_size()) else {
-            return;
-        };
-        if dw <= 0. || dh <= 0. {
-            return;
-        }
-        // 1) 手柄命中（8px 邻域，半宽 4px；与叠加层 8px 手柄一致，索引约定见 crop_resize 字段）
-        const HANDLE_HIT: f32 = 4.0;
-        let (x1, y1, x2, y2) = (bbox.x1, bbox.y1, bbox.x2, bbox.y2);
-        let mid_x = (x1 + x2) / 2.;
-        let mid_y = (y1 + y2) / 2.;
-        let centers = [
-            (x1, y1), (mid_x, y1), (x2, y1), (x2, mid_y),
-            (x2, y2), (mid_x, y2), (x1, y2), (x1, mid_y),
-        ];
-        for (idx, (hx, hy)) in centers.iter().enumerate() {
-            if (nx - hx).abs() * dw <= HANDLE_HIT && (ny - hy).abs() * dh <= HANDLE_HIT {
-                self.crop_resize = Some((idx, bbox));
-                cx.notify();
-                return;
-            }
-        }
-        // 2) 框内（含 6px 边缘）→ 移动
-        let mx = 6. / dw;
-        let my = 6. / dh;
-        if nx >= x1 - mx && nx <= x2 + mx && ny >= y1 - my && ny <= y2 + my {
-            self.crop_move = Some((x, y, bbox));
-            cx.notify();
-        }
-        // 3) 未命中 → 调用方回退平移
-    }
-
-    /// 调整视图鼠标移动：框选/手柄/移动各自更新 crop_draft（不动 current_adjust）。
-    pub(crate) fn adjust_mouse_move(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
-        // 框选中：更新角点并实时换算归一化 draft
-        if let Some((sx, sy, _, _)) = self.crop_draw {
-            self.crop_draw = Some((sx, sy, x, y));
-            if let (Some((ax1, ay1)), Some((ax2, ay2))) = (
-                self.window_pos_to_image_norm(sx, sy),
-                self.window_pos_to_image_norm(x, y),
-            ) {
-                // 反向拖拽归一化；出界由 BBox::new 钳制到 [0,1]（与 submit_box_draw 同模式）
-                self.crop_draft = Some(photo_domain::BBox::new(
-                    ax1.min(ax2), ay1.min(ay2), ax1.max(ax2), ay1.max(ay2),
-                ));
-            }
-            cx.notify();
-            return;
-        }
-        // 手柄调整：对边不动，最小 5% 尺寸，夹紧 0-1
-        if let Some((idx, orig)) = self.crop_resize {
-            if let Some((nx, ny)) = self.window_pos_to_image_norm(x, y) {
-                self.crop_draft = Some(Self::resize_crop(idx, orig, nx, ny));
-            }
-            cx.notify();
-            return;
-        }
-        // 平移框：按归一化位移移动，保持尺寸，夹紧 0-1
-        if let Some((sx, sy, orig)) = self.crop_move {
-            if let (Some((snx, sny)), Some((nx, ny))) = (
-                self.window_pos_to_image_norm(sx, sy),
-                self.window_pos_to_image_norm(x, y),
-            ) {
-                let w = orig.x2 - orig.x1;
-                let h = orig.y2 - orig.y1;
-                let x1 = (orig.x1 + (nx - snx)).clamp(0., 1. - w);
-                let y1 = (orig.y1 + (ny - sny)).clamp(0., 1. - h);
-                self.crop_draft = Some(photo_domain::BBox::new(x1, y1, x1 + w, y1 + h));
-            }
-            cx.notify();
-            return;
-        }
-        // 无裁切交互 → 平移（沿用 preview_drag 语义）
-        if let Some((sx, sy, spx, spy)) = self.preview_drag {
-            self.preview_pan = (spx + (x - sx), spy + (y - sy));
-            self.clamp_preview_pan();
-            cx.notify();
-        }
-    }
-
-    /// 按手柄索引更新裁切框：对边不动，最小 5% 尺寸，夹紧 0-1。
-    fn resize_crop(idx: usize, orig: photo_domain::BBox, nx: f32, ny: f32) -> photo_domain::BBox {
-        const MIN: f32 = 0.05;
-        let (mut x1, mut y1, mut x2, mut y2) = (orig.x1, orig.y1, orig.x2, orig.y2);
-        match idx {
-            0 => { x1 = nx.min(x2 - MIN); y1 = ny.min(y2 - MIN); } // 左上
-            1 => { y1 = ny.min(y2 - MIN); }                        // 上中
-            2 => { x2 = nx.max(x1 + MIN); y1 = ny.min(y2 - MIN); } // 右上
-            3 => { x2 = nx.max(x1 + MIN); }                        // 右中
-            4 => { x2 = nx.max(x1 + MIN); y2 = ny.max(y1 + MIN); } // 右下
-            5 => { y2 = ny.max(y1 + MIN); }                        // 下中
-            6 => { x1 = nx.min(x2 - MIN); y2 = ny.max(y1 + MIN); } // 左下
-            7 => { x1 = nx.min(x2 - MIN); }                        // 左中
-            _ => {}
-        }
-        photo_domain::BBox::new(x1, y1, x2, y2)
-    }
-
-    /// 调整视图鼠标抬起：框选/移动/手柄结束 → set_adjustment 提交（框选过小取消），清空交互状态。
-    pub(crate) fn adjust_mouse_up(&mut self, cx: &mut Context<Self>) {
-        if self.crop_draw.is_some() {
-            // 框选结束：窗口坐标 → 归一化 BBox；任一方向 < 5% 视为取消（保持原 crop）
-            let committed = self.crop_draw.take().and_then(|(x1, y1, x2, y2)| {
-                let (Some((ax1, ay1)), Some((ax2, ay2))) = (
-                    self.window_pos_to_image_norm(x1, y1),
-                    self.window_pos_to_image_norm(x2, y2),
-                ) else {
-                    return None;
-                };
-                let bbox = photo_domain::BBox::new(
-                    ax1.min(ax2), ay1.min(ay2), ax1.max(ax2), ay1.max(ay2),
-                );
-                (bbox.x2 - bbox.x1 >= 0.05 && bbox.y2 - bbox.y1 >= 0.05).then_some(bbox)
-            });
-            self.crop_draft = None;
-            if let Some(bbox) = committed {
-                let mut params = self.current_adjust;
-                params.crop = Some(bbox);
-                self.set_adjustment(params, cx);
-            }
-            cx.notify();
-            return;
-        }
-        if self.crop_move.is_some() || self.crop_resize.is_some() {
-            let draft = self.crop_draft.take();
-            self.crop_move = None;
-            self.crop_resize = None;
-            if let Some(bbox) = draft {
-                let mut params = self.current_adjust;
-                params.crop = Some(bbox);
-                self.set_adjustment(params, cx);
-            }
-            cx.notify();
-        }
     }
 
     /// 主显示文件相对文件夹根的正斜杠路径（folder_db 调整表键，与识别表同规则）
