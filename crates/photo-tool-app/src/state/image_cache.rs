@@ -8,6 +8,15 @@ use gpui::*;
 use super::app::{RootView, ViewMode};
 use crate::state::preview_math::{clamp_pan_axis, pan_after_cursor_zoom};
 
+// 网格缩略图 LRU 淘汰顺序（文件局部 thread_local，而非 RootView 字段）：
+// 应用单窗口（main.rs 仅一次 open_window）且插入/淘汰全在主线程发生，可安全共享，
+// 避免为加字段改动 app.rs 结构体。扫描换代时 thumbnail_data 会被清空/remap，
+// 队列中的陈旧索引在淘汰时按缺失键跳过，不影响正确性。
+thread_local! {
+    static THUMBNAIL_ORDER: std::cell::RefCell<std::collections::VecDeque<usize>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+}
+
 // 预览/全分辨率图缓存与缩放数学方法（自 state/app.rs 拆出，纯移动，无逻辑改动）
 
 /// 将 JPEG/常规图字节解码为可直接绘制的 RenderImage（worker 线程执行）。
@@ -106,6 +115,9 @@ impl RootView {
     const PREVIEW_CACHE_LIMIT: usize = 20;
     /// 全分辨率图缓存上限（张）：单张 GPU 纹理可达百 MB，只保留当前与相邻
     const FULLRES_CACHE_LIMIT: usize = 2;
+    /// 网格缩略图缓存上限（张）：单张 440px RGBA RenderImage ≈ 0.5MB + GPU 纹理，
+    /// 无上限时浏览万张可驻留数 GB；达上限后按 LRU 淘汰（与 preview/fullres 同机制）
+    const THUMBNAIL_CACHE_LIMIT: usize = 512;
     /// 预览图长边像素（磁盘缓存键的一部分）
     pub const PREVIEW_LOAD_SIZE: u32 = 1600;
     /// 预览预取半径：焦点前后各预取几张
@@ -129,6 +141,38 @@ impl RootView {
         while self.fullres_order.len() > Self::FULLRES_CACHE_LIMIT {
             if let Some(oldest) = self.fullres_order.pop_front() {
                 self.fullres_data.remove(&oldest);
+            }
+        }
+    }
+
+    /// 插入网格缩略图并维护 LRU 序（上限 THUMBNAIL_CACHE_LIMIT）。
+    /// 淘汰只删 thumbnail_data 不动 grid_loading 哨兵（哨兵在加载 on_done 已移除，
+    /// 被淘汰项下次 ensure_thumbnail_loaded 的 contains_key 为 false，可正常重新加载）。
+    fn insert_thumbnail(&mut self, idx: usize, image: Arc<RenderImage>) {
+        self.thumbnail_data.insert(idx, image);
+        THUMBNAIL_ORDER.with(|q| {
+            let mut q = q.borrow_mut();
+            q.retain(|&i| i != idx);
+            q.push_back(idx);
+            while q.len() > Self::THUMBNAIL_CACHE_LIMIT {
+                if let Some(oldest) = q.pop_front() {
+                    self.thumbnail_data.remove(&oldest);
+                }
+            }
+        });
+        // 兜底：扫描 remap 换索引后队列与 map 失步（map 含队列外键，队列淘汰打不到），
+        // 移除队列外键（无 LRU 序，复用概率最低），保证 map 恒 ≤ 上限
+        if self.thumbnail_data.len() > Self::THUMBNAIL_CACHE_LIMIT {
+            let queued: HashSet<usize> =
+                THUMBNAIL_ORDER.with(|q| q.borrow().iter().copied().collect());
+            let stale: Vec<usize> = self
+                .thumbnail_data
+                .keys()
+                .copied()
+                .filter(|k| !queued.contains(k))
+                .collect();
+            for k in stale {
+                self.thumbnail_data.remove(&k);
             }
         }
     }
@@ -294,12 +338,15 @@ impl RootView {
                             .and_then(|b| decode_render_image_scaled(&b, true, u32::MAX))
                             .map(Arc::new)
                     } else {
-                        // 放大：half_size 母版（已缓存则秒读）按显示目标 DCT 派生
+                        // 放大：直接命中/生成磁盘派生缓存（std@target 键）——
+                        // get_or_generate 内部优先命中已落盘的派生缩略图（小文件读），
+                        // 未命中才读 6-20MB 母版 DCT 派生并写盘；跨缩放阶梯往返
+                        // 不再重复读母版 + 全解码 + 内存 Lanczos
                         cache
-                            .get_or_generate(&source, u32::MAX, None)
+                            .get_or_generate(&source, target, None)
                             .map_err(|e| tracing::warn!("全分辨率 RAW 预览生成失败: {e}"))
                             .ok()
-                            .and_then(|b| decode_render_image_scaled(&b, true, target))
+                            .and_then(|b| decode_render_image_scaled(&b, true, u32::MAX))
                             .map(Arc::new)
                     }
                 } else {
@@ -488,8 +535,11 @@ impl RootView {
 
         if is_raw {
             // RAW 缩略图 = 内嵌 JPEG（~50ms 提取 + 落盘，足够缩略图使用）
-            // 解码在 worker 完成（RenderImage 到达即绘制，UI 线程零解码）
+            // 解码在 worker 完成（RenderImage 到达即绘制，UI 线程零解码）；
+            // 占位插入后由 spawn_thumbnail_upgrade 在批量池升级为母版清晰版
             let source_work = source.clone();
+            let source_up = source.clone();
+            let cache_up = cache.clone();
             self.worker.spawn_fast(
                 cx,
                 move || {
@@ -505,9 +555,11 @@ impl RootView {
                     }
                     this.grid_loading.remove(&capture_idx);
                     if let Some(render) = result {
-                        this.thumbnail_data.insert(capture_idx, render);
+                        this.insert_thumbnail(capture_idx, render);
                         tracing::info!("缩略图 on_done 插入: idx={capture_idx}");
                         cx.notify();
+                        // 内嵌占位已显示 → 批量池后台升级为母版清晰版（不抢交互资源）
+                        this.spawn_thumbnail_upgrade(capture_idx, &source_up, &cache_up, generation, cx);
                     }
                 },
             );
@@ -537,13 +589,59 @@ impl RootView {
                     }
                     this.grid_loading.remove(&capture_idx);
                     if let Some(render) = result {
-                        this.thumbnail_data.insert(capture_idx, render);
+                        this.insert_thumbnail(capture_idx, render);
                         tracing::info!("缩略图 on_done 插入: idx={capture_idx}");
                         cx.notify();
                     }
                 },
             );
         }
+    }
+
+    /// RAW 缩略图母版升级（两阶段第二步，见 ensure_thumbnail_loaded 注释）：
+    /// 内嵌占位入缓存后调用。母版（std@u32::MAX 键）已在磁盘时，从母版派生清晰版
+    /// 覆盖写回 std@size 键（与内嵌占位同键，见 thumbnail.rs get_or_generate_embedded
+    /// 注释），on_done 用清晰版替换内存占位；母版缺失则静默跳过（预览时会生成母版，
+    /// 届时 get_or_generate 派生命中，无需此处）。走批量池（worker.spawn），不抢交互资源。
+    /// grid_loading 在此刻已被内嵌 on_done 移除，复用为升级去重哨兵；
+    /// 升级期间 ensure_thumbnail_loaded 因 contains_key 已早退，不会重复入队。
+    fn spawn_thumbnail_upgrade(
+        &mut self,
+        capture_idx: usize,
+        source: &photo_domain::SourceFile,
+        cache: &photo_engine::thumbnail::ThumbnailCache,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.grid_loading.insert(capture_idx) {
+            return; // 已有升级任务在跑
+        }
+        let source = source.clone();
+        let cache = cache.clone();
+        let thumb_size = self.config.thumbnail_size * 2;
+        self.worker.spawn(
+            cx,
+            move || {
+                // 母版不存在返回 None（跳过升级）；存在则派生并覆盖写回派生键
+                cache
+                    .upgrade_embedded_from_master(&source, thumb_size)
+                    .ok()
+                    .flatten()
+                    .and_then(|b| decode_render_image_scaled(&b, true, u32::MAX))
+                    .map(Arc::new)
+            },
+            move |this, result, cx| {
+                this.grid_loading.remove(&capture_idx);
+                if generation != this.scan_generation {
+                    return;
+                }
+                if let Some(render) = result {
+                    this.insert_thumbnail(capture_idx, render);
+                    tracing::info!("缩略图母版升级替换: idx={capture_idx}");
+                    cx.notify();
+                }
+            },
+        );
     }
 
     /// 预加载前 N 张缩略图（扫描后）：统一走 ensure_thumbnail_loaded——

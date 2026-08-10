@@ -39,17 +39,27 @@ impl ThumbnailCache {
     /// 获取或生成缩略图，返回 JPEG 字节。
     /// `cancel` 为合作式取消令牌：Some 时每次慢操作前检查，已取消则返回 `Cancelled` 错误。
     ///
-    /// RAW 走母版缓存：完整解码（half_size）结果按 `u32::MAX` 键存一份，
-    /// 任意 size 请求从母版 DCT 降采样派生（毫秒级，不落盘）——同一文件不再按尺寸重复解码。
+    /// RAW 走「派生缩略图优先命中 → 母版兜底派生」：std@size 键可能已是内嵌占位/
+    /// 母版升级/历史派生写好的小文件（~40KB），命中即返回，跳过 6MB 母版 IO；
+    /// 未命中才读母版（half_size 完整解码，按 `u32::MAX` 键落盘）并 DCT 派生落盘。
+    /// 同一文件不再按尺寸重复完整解码。
     pub fn get_or_generate(
         &self,
         source: &SourceFile,
         size: u32,
         cancel: Option<&AtomicBool>,
     ) -> Result<Vec<u8>, ThumbnailError> {
-        // RAW：母版缓存 + 派生（派生结果也落盘：缩略图小文件热命中，
-        // 避免每次从 6MB 母版重新 DCT——拖动网格时吞吐差异明显）
+        // RAW：派生缩略图先查（440px ~40KB vs 母版 6-20MB）——滚动网格命中即返回，
+        // 不再每次读母版。内嵌占位/母版升级/历史派生都写 std@size 键（见
+        // get_or_generate_embedded 注释），同键互斥覆盖，命中即最新版
         if matches!(source.format, ImageFormat::Raw(_)) {
+            if size != u32::MAX {
+                let thumb_key = self.cache_key(source, size, "std");
+                let thumb_path = self.cache_dir.join(&thumb_key);
+                if thumb_path.exists() {
+                    return Ok(std::fs::read(&thumb_path)?);
+                }
+            }
             // 读母版前检查取消（跳过 6MB IO）
             if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
                 return Err(ThumbnailError::Cancelled);
@@ -73,9 +83,6 @@ impl ThumbnailCache {
             // 派生缩略图落盘（440px JPEG ~40KB）：命中即读小文件，无需重新派生
             let thumb_key = self.cache_key(source, size, "std");
             let thumb_path = self.cache_dir.join(&thumb_key);
-            if thumb_path.exists() {
-                return Ok(std::fs::read(&thumb_path)?);
-            }
             let bytes = resize_jpeg(&master, size)?;
             std::fs::write(&thumb_path, &bytes)?;
             return Ok(bytes);
@@ -121,6 +128,27 @@ impl ThumbnailCache {
         std::fs::write(&cache_path, &bytes)?;
         tracing::info!("RAW 缩略图生成(内嵌提取): {} ({:?})", source.path.display(), start.elapsed());
         Ok(bytes)
+    }
+
+    /// RAW 缩略图母版升级：内嵌占位显示后调用。half_size 母版（std@u32::MAX 键）已在
+    /// 磁盘时，从母版 DCT 派生清晰版并**覆盖写回 std@size 键**（与 get_or_generate_embedded
+    /// 共用键——内嵌占位与清晰版同键互斥覆盖，之后 get_or_generate/get_or_generate_embedded
+    /// 命中即最新版）；母版尚未生成（该 RAW 从未预览/放大过）返回 `Ok(None)`，跳过升级。
+    pub fn upgrade_embedded_from_master(
+        &self,
+        source: &SourceFile,
+        size: u32,
+    ) -> Result<Option<Vec<u8>>, ThumbnailError> {
+        let master_key = self.cache_key(source, u32::MAX, "std");
+        let master_path = self.cache_dir.join(&master_key);
+        if !master_path.exists() {
+            return Ok(None);
+        }
+        let master = std::fs::read(&master_path)?;
+        let bytes = resize_jpeg(&master, size)?;
+        let thumb_key = self.cache_key(source, size, "std");
+        std::fs::write(self.cache_dir.join(&thumb_key), &bytes)?;
+        Ok(Some(bytes))
     }
 
     /// RAW 全尺寸母版（1:1 像素级查看）：AHD 全尺寸解码，独立于 half_size 母版缓存。
@@ -196,78 +224,6 @@ impl ThumbnailCache {
         decode_jpeg_scaled_reader(std::io::BufReader::new(file), size)
     }
 
-    /// 获取缓存总大小（字节）
-    pub fn cache_size_bytes(&self) -> Result<u64, std::io::Error> {
-        let mut total = 0u64;
-        for entry in std::fs::read_dir(&self.cache_dir)? {
-            let entry = entry?;
-            if entry.file_type()?.is_file() {
-                total += entry.metadata()?.len();
-            }
-        }
-        Ok(total)
-    }
-
-    /// 清理过期缓存：按 mtime 删除最旧文件直到满足 max_size_bytes
-    pub fn prune(&self, max_size_bytes: u64) -> Result<(), std::io::Error> {
-        let mut files: Vec<_> = std::fs::read_dir(&self.cache_dir)?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-            .collect();
-
-        files.sort_by_key(|e| {
-            e.metadata()
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-        });
-
-        let mut total_size: u64 = files
-            .iter()
-            .filter_map(|f| f.metadata().ok())
-            .map(|m| m.len())
-            .sum();
-
-        for file in &files {
-            if total_size <= max_size_bytes {
-                break;
-            }
-            if let Ok(meta) = file.metadata() {
-                let size = meta.len();
-                if std::fs::remove_file(file.path()).is_ok() {
-                    total_size = total_size.saturating_sub(size);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// 获取缓存统计信息：(文件数, 总字节数)
-    pub fn stats(&self) -> Result<(usize, u64), std::io::Error> {
-        let files: Vec<_> = std::fs::read_dir(&self.cache_dir)?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-            .collect();
-
-        let count = files.len();
-        let total_size = files
-            .iter()
-            .filter_map(|f| f.metadata().ok())
-            .map(|m| m.len())
-            .sum();
-        Ok((count, total_size))
-    }
-
-    /// 清除所有缓存
-    pub fn clear(&self) -> Result<(), std::io::Error> {
-        for entry in std::fs::read_dir(&self.cache_dir)? {
-            let entry = entry?;
-            if entry.file_type()?.is_file() {
-                std::fs::remove_file(entry.path())?;
-            }
-        }
-        Ok(())
-}
 }
 
 
@@ -619,55 +575,6 @@ mod tests {
             large.len(),
             "different sizes should differ in byte count"
         );
-    }
-
-    #[test]
-    fn test_cache_stats_and_clear() {
-        let cache_dir = TempDir::new().unwrap();
-        let img_dir = TempDir::new().unwrap();
-        let img_path = img_dir.path().join("test.jpg");
-        create_test_jpeg(&img_path).unwrap();
-
-        let cache = ThumbnailCache::new(cache_dir.path().to_path_buf());
-        let source = SourceFile {
-            path: img_path,
-            format: ImageFormat::Jpeg,
-            file_size: None,
-        };
-
-        let _ = cache.get_or_generate(&source, 64, None).unwrap();
-        let (count, _size) = cache.stats().unwrap();
-        assert_eq!(count, 1, "should have 1 cached file");
-
-        cache.clear().unwrap();
-        let (count_after, _) = cache.stats().unwrap();
-        assert_eq!(count_after, 0, "clear should remove all cached files");
-    }
-
-    #[test]
-    fn test_prune_removes_oldest() {
-        let cache_dir = TempDir::new().unwrap();
-        let img_dir = TempDir::new().unwrap();
-
-        let cache = ThumbnailCache::new(cache_dir.path().to_path_buf());
-
-        for i in 0..2 {
-            let img_path = img_dir.path().join(format!("test{}.jpg", i));
-            create_test_jpeg(&img_path).unwrap();
-            let source = SourceFile {
-                path: img_path,
-                format: ImageFormat::Jpeg,
-                    file_size: None,
-            };
-            let _ = cache.get_or_generate(&source, 64, None).unwrap();
-        }
-
-        let (count_before, total_size) = cache.stats().unwrap();
-        assert_eq!(count_before, 2);
-
-        cache.prune(total_size / 2).unwrap();
-        let (count_after, _) = cache.stats().unwrap();
-        assert!(count_after < count_before, "prune should reduce file count");
     }
 
     #[test]
