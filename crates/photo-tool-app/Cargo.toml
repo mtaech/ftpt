@@ -28,7 +28,6 @@ parking_lot.workspace = true
 rayon.workspace = true
 rfd.workspace = true
 rust-embed.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
 tracing-log.workspace = true
 tracing-appender.workspace = true

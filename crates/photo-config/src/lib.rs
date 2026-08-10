@@ -38,7 +38,7 @@ pub struct AppConfig {
     #[serde(default = "default_right_panel_width")]
     pub right_panel_width: u32,
     pub font_family: String,
-    /// 批量识别线程数（1-4）。低配设备减小，高配设备加大。默认 2。
+    /// 批量识别线程数（1-4）。低配设备减小，高配设备加大。默认 4（8 核以上 CPU）。
     #[serde(default = "default_recognition_threads")]
     pub recognition_thread_count: u32,
 }
@@ -52,7 +52,7 @@ fn default_font_family() -> String {
 }
 
 fn default_recognition_threads() -> u32 {
-    2
+    4
 }
 
 impl Default for AppConfig {
@@ -139,7 +139,7 @@ pub fn load_config(path: &Path) -> Result<AppConfig, ConfigError> {
             }
             Err(e) => {
                 // 旧 TOML 损坏时不静默迁移成全默认 PT.db：保留原文件，仅记日志
-                eprintln!("[photo-config] PT.toml 解析失败，跳过迁移（沿用默认配置）: {e}");
+                tracing::warn!("PT.toml 解析失败，跳过迁移（沿用默认配置）: {e}");
             }
         }
     }

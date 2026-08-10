@@ -63,33 +63,15 @@ pub struct ThemeColors {
 //  Elevation
 // ═══════════════════════════════════════════════════════════════
 
+/// 模态层投影（设置卡片等悬浮面板使用）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum ElevationIndex {
-    Background,
-    Surface,
-    ElevatedSurface,
     ModalSurface,
 }
 
 impl ElevationIndex {
     pub fn shadow(self) -> Vec<BoxShadow> {
         match self {
-            ElevationIndex::Background => vec![],
-            ElevationIndex::Surface => vec![BoxShadow {
-                color: hsla(0., 0., 0., 0.06),
-                offset: Point { x: px(0.), y: px(1.) },
-                blur_radius: px(2.),
-                spread_radius: px(0.),
-                inset: false,
-            }],
-            ElevationIndex::ElevatedSurface => vec![BoxShadow {
-                color: hsla(0., 0., 0., 0.08),
-                offset: Point { x: px(0.), y: px(4.) },
-                blur_radius: px(12.),
-                spread_radius: px(-1.),
-                inset: false,
-            }],
             ElevationIndex::ModalSurface => vec![BoxShadow {
                 color: hsla(0., 0., 0., 0.10),
                 offset: Point { x: px(0.), y: px(8.) },
@@ -359,12 +341,9 @@ mod tests {
 
     #[test]
     fn test_elevation_shadow_sizes() {
-        assert!(ElevationIndex::Background.shadow().is_empty());
-        assert!(!ElevationIndex::Surface.shadow().is_empty());
-        assert!(!ElevationIndex::ModalSurface.shadow().is_empty());
-        let s = ElevationIndex::Surface.shadow()[0].blur_radius;
-        let m = ElevationIndex::ModalSurface.shadow()[0].blur_radius;
-        assert!(m > s);
+        let s = ElevationIndex::ModalSurface.shadow();
+        assert!(!s.is_empty());
+        assert!(s[0].blur_radius > px(0.));
     }
 
     #[test]

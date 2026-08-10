@@ -28,7 +28,6 @@ jpeg-decoder = "0.3"
 oneshot = "0.1"
 ort = { version = "=2.0.0-rc.12", features = ["directml"] }
 parking_lot = "0.12"
-quick-xml = { version = "0.37", features = ["serialize"] }
 rawlib = { path = "crates/rawlib" }
 rayon = "1"
 regex-lite = "0.1"

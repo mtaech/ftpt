@@ -5035,6 +5035,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "toml 0.8.23",
+ "tracing",
 ]
 
 [[package]]
@@ -5055,18 +5056,15 @@ dependencies = [
  "kamadak-exif",
  "parking_lot",
  "photo-domain",
- "quick-xml 0.37.5",
  "rawlib",
  "rusqlite",
  "rusqlite_migration",
- "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
  "trash",
  "walkdir",
- "zune-core 0.5.1",
  "zune-jpeg 0.5.15",
 ]
 
@@ -5080,8 +5078,6 @@ dependencies = [
  "photo-domain",
  "photo-engine",
  "rusqlite",
- "serde",
- "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
@@ -5108,7 +5104,6 @@ dependencies = [
  "rayon",
  "rfd",
  "rust-embed",
- "thiserror 2.0.18",
  "tracing",
  "tracing-appender",
  "tracing-log",
@@ -5432,16 +5427,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eff6510e86862b57b210fd8cbe8ed3f0d7d600b9c2863cd4549a2e033c66e956"
 dependencies = [
  "memchr",
-]
-
-[[package]]
-name = "quick-xml"
-version = "0.37.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "331e97a1af0bf59823e6eadffe373d7b27f485be8748f71471c662c1f269b7fb"
-dependencies = [
- "memchr",
- "serde",
 ]
 
 [[package]]
@@ -8963,7 +8948,7 @@ checksum = "ee4c580d8205abb0a5cf4eb7e927bd664e425b6c3263f9c5310583da96970cf6"
 dependencies = [
  "bitflags 1.3.2",
  "libc",
- "quick-xml 0.30.0",
+ "quick-xml",
  "x11",
 ]
 

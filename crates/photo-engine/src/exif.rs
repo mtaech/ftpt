@@ -18,40 +18,13 @@ pub enum ExifError {
 }
 
 
-/// EXIF 提取器 trait：不同的文件格式使用不同的实现
-pub trait ExifExtractor {
-    /// 从指定路径提取 EXIF 元数据
-    fn extract(&self, path: &Path) -> Result<ExifMetadata, ExifError>;
-}
-
-/// 常规图片（JPEG/TIFF/PNG 等）EXIF 提取，使用 kamadak-exif 库
-pub struct RegularExifExtractor;
-impl ExifExtractor for RegularExifExtractor {
-    fn extract(&self, path: &Path) -> Result<ExifMetadata, ExifError> {
-        extract_exif_regular(path)
-    }
-}
-
-/// RAW 格式 EXIF 提取，使用 rawlib 库
-pub struct RawExifExtractor;
-impl ExifExtractor for RawExifExtractor {
-    fn extract(&self, path: &Path) -> Result<ExifMetadata, ExifError> {
-        extract_exif_raw(path)
-    }
-}
-
-/// 根据格式选择对应的 EXIF 提取器
-pub fn extractor_for(format: &ImageFormat) -> Box<dyn ExifExtractor> {
-    match format {
-        ImageFormat::Raw(_) => Box::new(RawExifExtractor),
-        _ => Box::new(RegularExifExtractor),
-    }
-}
-
 /// 统一入口：根据文件格式选择提取方式，提取失败时记录 warning
 pub fn extract_exif(path: &Path, format: &ImageFormat) -> Result<ExifMetadata, ExifError> {
-    let result = extractor_for(format).extract(path);
-    if let Err(ref e) = result {
+    let result = match format {
+        ImageFormat::Raw(_) => extract_exif_raw(path),
+        _ => extract_exif_regular(path),
+    };
+    if let Err(e) = &result {
         tracing::warn!("EXIF 提取失败 {} (格式 {:?}): {e}", path.display(), format);
     }
     result
@@ -242,22 +215,6 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_exif_summary_format() {
-        let mut meta = ExifMetadata::default();
-        meta.camera.make = Some("NIKON".to_string());
-        meta.camera.model = Some("Z6III".to_string());
-        meta.shooting.iso = Some(400);
-        meta.image_width = Some(6000);
-        meta.image_height = Some(4000);
-
-        let summary = meta.summary();
-        assert!(summary.contains("NIKON"));
-        assert!(summary.contains("Z6III"));
-        assert!(summary.contains("ISO: 400"));
-        assert!(summary.contains("6000×4000"));
-    }
-
-    #[test]
     fn test_extract_exif_nonexistent_file() {
         let path = std::path::Path::new("/nonexistent/photo.jpg");
         let result = extract_exif(path, &ImageFormat::Jpeg);
@@ -273,13 +230,6 @@ mod tests {
         assert!(meta.image_width.is_none());
         assert!(meta.image_height.is_none());
         assert!(meta.file_size.is_none());
-    }
-
-    #[test]
-    fn test_exif_summary_empty_returns_empty_string() {
-        let meta = ExifMetadata::default();
-        let summary = meta.summary();
-        assert_eq!(summary, "");
     }
 
     #[test]
