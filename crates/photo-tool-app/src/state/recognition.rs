@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::*;
@@ -28,6 +29,43 @@ struct BatchProgress {
 }
 
 impl RootView {
+    /// 构建识别用 Recognizer（模型目录 = exe 同级 models/ + data/pica_ref.db）。
+    /// DirectML 初始化 ~2-5s，属一次性成本：单张路径缓存复用，批量路径每线程建一份。
+    fn build_recognizer() -> Result<photo_recognize::Recognizer, String> {
+        let exe_dir = std::env::current_exe()
+            .map_err(|e| format!("获取 exe 路径失败: {e}"))?
+            .parent()
+            .ok_or_else(|| "无法确定 exe 目录".to_string())?
+            .to_path_buf();
+        let models_dir = exe_dir.join("models");
+        let catalog_db = exe_dir.join("data").join("pica_ref.db");
+        photo_recognize::Recognizer::new(&models_dir, &catalog_db)
+            .map_err(|e| format!("加载识别模型失败: {e}"))
+    }
+
+    /// 后台预热单张识别 Recognizer：应用启动即加载模型（DirectML 初始化 ~2-5s），
+    /// 首次点击「识别此照片」不再等待模型加载。
+    pub(crate) fn warmup_single_recognizer(&mut self, cx: &mut Context<Self>) {
+        if self.single_recognizer.is_some() {
+            return;
+        }
+        self.worker.spawn(
+            cx,
+            // 包成 Option：满足 worker.spawn 的 R: Default 约束（Recognizer 无 Default 实现），
+            // panic 兜底值为 None，走下方「预热失败」分支，不影响正常路径语义
+            || Self::build_recognizer().ok(),
+            move |this, result, cx| {
+                if let Some(rec) = result {
+                    this.single_recognizer = Some(rec);
+                    tracing::info!("单张识别 Recognizer 预热完成");
+                } else {
+                    tracing::warn!("单张识别 Recognizer 预热失败（首次识别时再试）");
+                }
+                cx.notify();
+            },
+        );
+    }
+
     /// 从 folder_db 刷新焦点图片的识别记录
     pub(crate) fn refresh_focused_recognition(&mut self) {
         self.focused_recognition = None;
@@ -41,6 +79,110 @@ impl RootView {
                 self.focused_recognition = Some(rec);
             }
         }
+    }
+
+    /// 懒加载全量鸟种名录（手动修正下拉数据源，首次展开修正时调用）。
+    /// 名录库在 exe 同级 data/pica_ref.db（与 Recognizer 同路径约定）。
+    pub(crate) fn ensure_correction_species(&mut self, cx: &mut Context<Self>) {
+        if !self.correction_birds.is_empty() {
+            return;
+        }
+        let Ok(exe_dir) = std::env::current_exe() else { return };
+        let Some(exe_dir) = exe_dir.parent() else { return };
+        let catalog_db = exe_dir.join("data").join("pica_ref.db");
+        match photo_recognize::list_all_species(&catalog_db) {
+            Ok(list) => {
+                let mut names: Vec<String> = list.iter().map(|b| b.cn_name.clone()).collect();
+                names.sort();
+                self.correction_birds = list;
+                self.correction_options = names;
+                self.correction_select_dirty = true;
+            }
+            Err(e) => {
+                tracing::warn!("名录加载失败（修正功能不可用）: {e}");
+                self.show_toast(format!("加载名录失败: {e}"), cx);
+            }
+        }
+    }
+
+    /// 重建手动修正鸟种下拉（创建需要 Window，由 info_panel render 按 dirty 标记驱动）。
+    pub fn rebuild_correction_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.correction_options.is_empty() {
+            return;
+        }
+        let options = self.correction_options.clone();
+        let entity = cx.new(|cx| {
+            gpui_component::combobox::ComboboxState::new(
+                gpui_component::select::SearchableVec::new(options),
+                vec![],
+                window,
+                cx,
+            )
+            .multiple(false)
+            .searchable(true)
+        });
+        cx.subscribe(&entity, |view, _state, event, cx| {
+            if let gpui_component::combobox::ComboboxEvent::Change(values) = event {
+                if let Some(name) = values.first().cloned() {
+                    view.correct_bird_by_name(&name, cx);
+                }
+            }
+        })
+        .detach();
+        self.correction_select = Some(entity);
+        self.correction_select_dirty = false;
+    }
+
+    /// 手动修正鸟种：按中文名查名录 → 构造 Confirmed Recognition（保留原框/眼数据）→ 持久化。
+    /// 人工指定即为权威结论：状态 Confirmed、置信度 100%（区别于模型置信度）。
+    pub(crate) fn correct_bird_by_name(&mut self, name: &str, cx: &mut Context<Self>) {
+        let Some(bird) = self
+            .correction_birds
+            .iter()
+            .find(|b| b.cn_name == name)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(meta) = self.get_focused_capture() else { return };
+        let capture_index = meta.index;
+        let (Some(db), Some(dir)) = (self.folder_db.as_ref(), self.dir_path.as_ref()) else {
+            return;
+        };
+        let primary = std::path::Path::new(&meta.primary_path);
+        let rel = match primary.strip_prefix(dir) {
+            Ok(p) => p.to_string_lossy().replace('\\', "/"),
+            Err(_) => return,
+        };
+
+        // 保留原识别框/眼锐度，只改鸟种与状态
+        let prev = self.focused_recognition.clone();
+        let rec = photo_domain::Recognition {
+            status: photo_domain::RecognitionStatus::Confirmed,
+            bird: Some(bird.clone()),
+            class_index: prev.as_ref().and_then(|r| r.class_index),
+            confidence: Some(100.0),
+            bbox: prev.as_ref().and_then(|r| r.bbox),
+            eye_sharpness: prev.as_ref().and_then(|r| r.eye_sharpness),
+            eye_bbox: prev.as_ref().and_then(|r| r.eye_bbox),
+            candidates: vec![],
+            failure_stage: photo_domain::RecognitionFailureStage::None,
+            recognized_at: chrono::Utc::now().to_rfc3339(),
+        };
+        if let Err(e) = db.upsert_recognition(&rel, &rec) {
+            tracing::error!("手动修正写入失败 {}: {e}", rel);
+            self.show_toast(format!("修正写入失败: {e}"), cx);
+            return;
+        }
+        if let Some(m) = self.captures.iter_mut().find(|m| m.index == capture_index) {
+            m.enrich_with_recognition(&rec);
+        }
+        self.correction_open = false;
+        self.refresh_focused_recognition();
+        self.refresh_bird_options();
+        self.apply_filter_and_sort();
+        cx.notify();
+        self.show_toast(format!("已手动标记为 {}", bird.cn_name), cx);
     }
 
     /// 从 CaptureMeta 构建 Capture（供识别管线使用）
@@ -92,33 +234,49 @@ impl RootView {
             return;
         };
 
+        // 缩略图优先输入：识别前取 .pt/thumbs 派生图字节（JPEG DCT 毫秒级 / RAW
+        // 母版派生），worker 闭包内解码，省全图 image::open（24MP 100-300ms/张）
+        let thumb_source = capture.source_files[capture.primary_index].clone();
+        let cache = self.thumbnail_cache.clone();
+
         self.recognizing_single = Some(capture_idx);
         self.recognize_stage = Some("检测中".into());
         cx.notify();
 
+        // 复用缓存 Recognizer（预热或上次归还），用完归还；None 则现场构建（构建结果也归还）
+        let cached = self.single_recognizer.take();
+
         self.worker.spawn(
             cx,
             move || {
-                // 工作线程侧懒加载 Recognizer
-                let rec_result = (|| -> Result<photo_domain::Recognition, String> {
-                    let exe_dir = std::env::current_exe()
-                        .map_err(|e| format!("获取 exe 路径失败: {e}"))?
-                        .parent()
-                        .ok_or_else(|| "无法确定 exe 目录".to_string())?
-                        .to_path_buf();
-                    let models_dir = exe_dir.join("models");
-                    let catalog_db = exe_dir.join("data").join("pica_ref.db");
-                    let mut recognizer = photo_recognize::Recognizer::new(&models_dir, &catalog_db)
-                        .map_err(|e| format!("加载识别模型失败: {e}"))?;
-                    tracing::info!("单张识别开始，推理后端: {}", recognizer.backend());
-                    recognizer.recognize(&capture, None)
-                        .map_err(|e| format!("识别失败: {e}"))
-                })();
-                (rec_result, rel_path_clone, capture_idx, dir)
+                // 工作线程侧：优先复用缓存 Recognizer，否则现场构建；构建结果随结果归还
+                let mut recognizer = match cached {
+                    Some(r) => r,
+                    None => match Self::build_recognizer() {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return (Some(Err(e)), rel_path_clone, capture_idx, dir, None);
+                        }
+                    },
+                };
+                tracing::info!("单张识别开始，推理后端: {}", recognizer.backend());
+                let thumb_bytes = cache
+                    .as_ref()
+                    .and_then(|c| c.get_or_generate(&thumb_source, 2048, None).ok());
+                let res = recognizer
+                    .recognize_with_thumbnail(&capture, thumb_bytes.as_deref(), None)
+                    .map_err(|e| format!("识别失败: {e}"));
+                // 结果包成 Option<Result<Recognition, String>>：满足 worker.spawn 的 R: Default
+                // 约束（Result 无 Default，panic 时整个元组兜底为 None），on_done 只复位哨兵、不写库
+                (Some(res), rel_path_clone, capture_idx, dir, Some(recognizer))
             },
-            move |this, (result, rel, idx, _scan_dir), cx| {
+            move |this, (result, rel, idx, _scan_dir, recognizer), cx| {
+                // 归还缓存 Recognizer（下次单张识别直接复用，省 DirectML 初始化）
+                if let Some(rec) = recognizer {
+                    this.single_recognizer = Some(rec);
+                }
                 match result {
-                    Ok(rec) => {
+                    Some(Ok(rec)) => {
                         // upsert 到 FolderDb
                         if let Some(ref db) = this.folder_db {
                             if let Err(e) = db.upsert_recognition(&rel, &rec) {
@@ -154,7 +312,15 @@ impl RootView {
                         }
                         tracing::info!("单张识别完成: {} 状态={:?}", rel, rec.status);
                     }
-                    Err(e) => {
+                    None => {
+                        // worker 闭包 panic 兜底（R::default()）：只复位哨兵，不写库
+                        tracing::error!("单张识别任务异常中断（worker panic）");
+                        this.recognizing_single = None;
+                        this.recognize_stage = None;
+                        this.show_toast("识别任务异常中断", cx);
+                        cx.notify();
+                    }
+                    Some(Err(e)) => {
                         tracing::error!("识别错误 {}: {e}", rel);
                         this.recognizing_single = None;
                         this.recognize_stage = None;
@@ -248,36 +414,49 @@ impl RootView {
             return;
         };
 
+        // 缩略图优先输入（同 recognize_single）
+        let thumb_source = capture.source_files[capture.primary_index].clone();
+        let cache = self.thumbnail_cache.clone();
+
         self.recognizing_single = Some(capture_idx);
         self.recognize_stage = Some("分类中".into());
         cx.notify();
 
+        // 复用缓存 Recognizer（与单张识别共用），用完归还
+        let cached = self.single_recognizer.take();
+
         self.worker.spawn(
             cx,
             move || {
-                // 工作线程侧懒加载 Recognizer（与单张识别同路径）
-                let rec_result = (|| -> Result<photo_domain::Recognition, String> {
-                    let exe_dir = std::env::current_exe()
-                        .map_err(|e| format!("获取 exe 路径失败: {e}"))?
-                        .parent()
-                        .ok_or_else(|| "无法确定 exe 目录".to_string())?
-                        .to_path_buf();
-                    let models_dir = exe_dir.join("models");
-                    let catalog_db = exe_dir.join("data").join("pica_ref.db");
-                    let mut recognizer =
-                        photo_recognize::Recognizer::new(&models_dir, &catalog_db)
-                            .map_err(|e| format!("加载识别模型失败: {e}"))?;
-                    tracing::info!("手动框选识别开始，推理后端: {}", recognizer.backend());
-                    recognizer
-                        .recognize_region(&capture, bbox, None)
-                        .map_err(|e| format!("识别失败: {e}"))
-                })();
-                (rec_result, rel_path_clone, capture_idx, dir)
+                // 工作线程侧：优先复用缓存 Recognizer，否则现场构建；构建结果随结果归还
+                let mut recognizer = match cached {
+                    Some(r) => r,
+                    None => match Self::build_recognizer() {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return (Some(Err(e)), rel_path_clone, capture_idx, dir, None);
+                        }
+                    },
+                };
+                tracing::info!("手动框选识别开始，推理后端: {}", recognizer.backend());
+                let thumb_bytes = cache
+                    .as_ref()
+                    .and_then(|c| c.get_or_generate(&thumb_source, 2048, None).ok());
+                let res = recognizer
+                    .recognize_region_with_thumbnail(&capture, bbox, thumb_bytes.as_deref(), None)
+                    .map_err(|e| format!("识别失败: {e}"));
+                // 结果包成 Option<Result<Recognition, String>>：满足 worker.spawn 的 R: Default
+                // 约束（Result 无 Default，panic 时整个元组兜底为 None），on_done 只复位哨兵、不写库
+                (Some(res), rel_path_clone, capture_idx, dir, Some(recognizer))
             },
-            move |this, (result, rel, idx, _scan_dir), cx| {
+            move |this, (result, rel, idx, _scan_dir, recognizer), cx| {
+                // 归还缓存 Recognizer（下次识别直接复用，省 DirectML 初始化）
+                if let Some(rec) = recognizer {
+                    this.single_recognizer = Some(rec);
+                }
                 this.pending_region = None;
                 match result {
-                    Ok(rec) => {
+                    Some(Ok(rec)) => {
                         // upsert 到 FolderDb（覆盖旧识别行）
                         if let Some(db) = &this.folder_db {
                             if let Err(e) = db.upsert_recognition(&rel, &rec) {
@@ -321,7 +500,15 @@ impl RootView {
                         }
                         tracing::info!("手动框选识别完成: {} 状态={:?}", rel, rec.status);
                     }
-                    Err(e) => {
+                    None => {
+                        // worker 闭包 panic 兜底（R::default()）：只复位哨兵，不写库
+                        tracing::error!("手动框选识别任务异常中断（worker panic）");
+                        this.recognizing_single = None;
+                        this.recognize_stage = None;
+                        this.show_toast("识别任务异常中断", cx);
+                        cx.notify();
+                    }
+                    Some(Err(e)) => {
                         tracing::error!("手动框选识别错误 {}: {e}", rel);
                         this.recognizing_single = None;
                         this.recognize_stage = None;
@@ -381,6 +568,15 @@ impl RootView {
         let progress_work = progress.clone();
         let progress_done = progress.clone();
 
+        // B2：批量开始时的代际快照。重扫（scan_generation 变化）后旧索引对新 captures
+        // 无意义，所有回填入口先校验，不匹配直接丢弃防张冠李戴
+        let generation = self.scan_generation;
+        // B3①：folder_db 句柄（Arc<Mutex<Connection>>，Send）移入 worker，
+        // 识别完成即写库，UI 线程不再逐张做 SQLite 写
+        let folder_db = self.folder_db.clone();
+        // 缩略图优先输入：批量识别前取 .pt/thumbs 派生图字节，省每张全图解码
+        let cache = self.thumbnail_cache.clone();
+
         let n_threads = (self.config.recognition_thread_count as usize).min(total).max(1);
 
         self.worker.spawn(
@@ -411,8 +607,10 @@ impl RootView {
                     // 以引用形式供 move 闭包捕获，避免 FnMut 中移出外层变量
                     let cancel = &cancel;
                     let dir = &dir;
+                    let cache = &cache;
                     let progress_work = &progress_work;
                     let started_counter = &started_counter;
+                    let db_work = &folder_db;
                     let handles: Vec<_> = targets
                         .chunks(chunk_size)
                         .map(|chunk| {
@@ -435,8 +633,16 @@ impl RootView {
                                     *progress_work.current.lock() = rel.clone();
                                     let started = std::time::Instant::now();
 
+                                    // 缩略图优先输入：命中 .pt/thumbs 派生图（JPEG DCT
+                                    // 毫秒级 / RAW 母版派生），省每张全图 image::open；
+                                    // 取消令牌顺带跳过慢 IO
+                                    let thumb_bytes = cache.as_ref().and_then(|c| {
+                                        c.get_or_generate(primary, 2048, Some(cancel)).ok()
+                                    });
                                     let rec_result = match &mut recognizer {
-                                        Ok(rec) => rec.recognize(cap, None).map_err(|e| format!("识别失败: {e}")),
+                                        Ok(rec) => rec
+                                            .recognize_with_thumbnail(cap, thumb_bytes.as_deref(), None)
+                                            .map_err(|e| format!("识别失败: {e}")),
                                         Err(e) => Err(e.clone()),
                                     };
 
@@ -458,6 +664,16 @@ impl RootView {
                                     // 慢照片告警：正常 2-4s/张，超 10s 说明该文件解码或推理异常
                                     if elapsed.as_secs() >= 10 {
                                         tracing::warn!("批量识别 [{}/{}] {} 耗时 {:.1?}，异常缓慢", n, total, rel, elapsed);
+                                    }
+
+                                    // B3①：识别完成即写库（工作线程侧）。DB 按 rel 路径键控，
+                                    // 与 UI 代际无关，重扫后仍有效；UI 线程不再做 SQLite 写
+                                    if let Ok(rec) = &rec_result {
+                                        if let Some(db) = db_work.as_ref() {
+                                            if let Err(e) = db.upsert_recognition(&rel, rec) {
+                                                tracing::error!("写入识别结果失败 {}: {e}", rel);
+                                            }
+                                        }
                                     }
 
                                     // 逐张推入共享队列：UI 轮询 drain 后网格即时刻入，
@@ -484,7 +700,7 @@ impl RootView {
             move |this, (), cx| {
                 // 轮询可能尚未 drain 最后几张，on_done 先兜底清队列（锁内 take，不会重复应用）
                 let remaining = std::mem::take(&mut *progress_done.results.lock());
-                this.apply_recognition_results(remaining);
+                this.apply_recognition_results(remaining, generation);
 
                 let done = progress_done.done.load(Ordering::Relaxed);
                 let confirmed = progress_done.confirmed.load(Ordering::Relaxed);
@@ -534,13 +750,14 @@ impl RootView {
                             progress.unrecognized.load(Ordering::Relaxed),
                             progress.needs_review.load(Ordering::Relaxed),
                         );
-                        // drain 已完成结果：逐张刻到网格（db upsert + CaptureMeta enrich）
+                        // drain 已完成结果：逐张刻到网格（DB 写入已在工作线程完成，此处仅 enrich 内存）
                         let drained = std::mem::take(&mut *progress.results.lock());
                         if !drained.is_empty() {
-                            this.apply_recognition_results(drained);
+                            this.apply_recognition_results(drained, generation);
                             this.refresh_focused_recognition();
                             this.refresh_bird_options();
-                            this.apply_filter_and_sort();
+                            // B3③ 重排去抖：轮询期只回填内存，批末 on_done 统一一次
+                            // apply_filter_and_sort，避免 640 张批中每 200ms 全量重排
                         }
                         cx.notify();
                         true
@@ -554,19 +771,35 @@ impl RootView {
         .detach();
     }
 
-    /// 应用一批批量识别结果：upsert folder_db + enrich CaptureMeta。
+    /// 应用一批批量识别结果：仅 enrich CaptureMeta（DB 写入已在工作线程完成）。
     /// 轮询 drain 与 on_done 兜底共用；状态计数由工作线程侧原子量维护，此处不累加。
-    pub(crate) fn apply_recognition_results(&mut self, results: Vec<BatchResult>) {
+    ///
+    /// `generation` 为批量开始时的代际快照：重扫（scan_generation 变化）后旧索引
+    /// 对新 captures 无意义，不匹配直接丢弃，防结果张冠李戴。
+    pub(crate) fn apply_recognition_results(&mut self, results: Vec<BatchResult>, generation: u64) {
+        if generation != self.scan_generation {
+            tracing::warn!(
+                "批量识别回填代际不匹配（{} != {}），丢弃 {} 条结果",
+                generation,
+                self.scan_generation,
+                results.len()
+            );
+            return;
+        }
+        // B3②：预建 capture index → 位置 映射，替代逐条 iter_mut().find() 的 O(N) 查找
+        let pos_by_index: HashMap<usize, usize> = self
+            .captures
+            .iter()
+            .enumerate()
+            .map(|(pos, m)| (m.index, pos))
+            .collect();
         for (capture_idx, rel, rec_result) in &results {
             match rec_result {
                 Ok(rec) => {
-                    if let Some(db) = &self.folder_db {
-                        if let Err(e) = db.upsert_recognition(rel, rec) {
-                            tracing::error!("写入识别结果失败 {}: {e}", rel);
+                    if let Some(&pos) = pos_by_index.get(capture_idx) {
+                        if let Some(meta) = self.captures.get_mut(pos) {
+                            meta.enrich_with_recognition(rec);
                         }
-                    }
-                    if let Some(meta) = self.captures.iter_mut().find(|m| m.index == *capture_idx) {
-                        meta.enrich_with_recognition(rec);
                     }
                 }
                 Err(e) => {

@@ -72,19 +72,8 @@ pub fn run_classification(
     );
 
     // ---- 3. ImageNet 标准化（pica bird_model_classifier.dart:128-141） ----
-    let plane_size = CLASSIFY_INPUT_SIZE * CLASSIFY_INPUT_SIZE;
-    let total = 3 * plane_size;
-    let mut input_data = Vec::with_capacity(total);
-
-    for c in 0..3 {
-        for y in 0..CLASSIFY_INPUT_SIZE {
-            for x in 0..CLASSIFY_INPUT_SIZE {
-                let pixel = resized.get_pixel(x as u32, y as u32);
-                let normalized = (pixel[c] as f32 / 255.0 - MEAN[c]) / STD[c];
-                input_data.push(normalized);
-            }
-        }
-    }
+    // 单遍遍历 as_raw() 像素按通道分散写（替代三重循环 get_pixel 边界检查）
+    let input_data = build_input_data(&resized);
 
     // ---- 4. 推理（pica bird_model_classifier.dart:51-57） ----
     let tensor = Tensor::<f32>::from_array((
@@ -92,8 +81,14 @@ pub fn run_classification(
         input_data.into_boxed_slice(),
     ))?;
 
+    // 模型异常防护：无输出时返回系统错误而非裸索引 panic
     let outputs = session.run(ort::inputs![tensor])?;
-    let output = &outputs[0];
+    // 模型异常防护：无输出时返回系统错误而非裸索引 panic
+    let output = if outputs.len() == 0 {
+        return Err(RecognizeError::ModelLoad("分类模型推理无输出".into()));
+    } else {
+        &outputs[0]
+    };
 
     let (_shape, flat) = output.try_extract_tensor::<f32>()?;
     if flat.is_empty() {
@@ -143,6 +138,33 @@ pub fn run_classification(
         confidence: top_confidence,
         top_candidates,
     })
+}
+
+/// 224×224 ImageNet 标准化 NCHW 预处理。
+///
+/// 单遍遍历 `as_raw()` 像素按通道分散写，替代三重循环 `get_pixel`
+/// （224²×3 ≈ 15 万次带边界检查的逐像素取值，同像素取 3 遍 RGB）。
+/// Rgb8 源零拷贝借用；其他色型经 `to_rgb8` 转换（与旧 `get_pixel` 语义一致）。
+fn build_input_data(resized: &DynamicImage) -> Vec<f32> {
+    let plane_size = CLASSIFY_INPUT_SIZE * CLASSIFY_INPUT_SIZE;
+    let mut input_data = vec![0.0f32; 3 * plane_size];
+    match resized.as_rgb8() {
+        Some(rgb) => fill_nchw_imagenet(rgb.as_raw(), &mut input_data, plane_size),
+        None => {
+            let rgb = resized.to_rgb8();
+            fill_nchw_imagenet(rgb.as_raw(), &mut input_data, plane_size);
+        }
+    }
+    input_data
+}
+
+/// RGB8 字节切片 → NCHW 通道分散写（ImageNet 标准化）。
+fn fill_nchw_imagenet(raw: &[u8], out: &mut [f32], plane_size: usize) {
+    for (i, px) in raw.chunks_exact(3).enumerate() {
+        out[i] = (px[0] as f32 / 255.0 - MEAN[0]) / STD[0];
+        out[plane_size + i] = (px[1] as f32 / 255.0 - MEAN[1]) / STD[1];
+        out[2 * plane_size + i] = (px[2] as f32 / 255.0 - MEAN[2]) / STD[2];
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -59,8 +59,38 @@ pub fn detect_eye(
     img: &DynamicImage,
     bird_bbox: BBox,
 ) -> Result<Option<BBox>, RecognizeError> {
+    detect_eye_impl(session, img, None, bird_bbox)
+}
+
+/// 复用检测阶段已完成的 640×640 CatmullRom 缩放（输入为
+/// [`crate::detect::resize_to_yolo_input`] 的结果）。
+///
+/// 当 eye 模型输入恰为 640×640（或动态维度按 640 兜底）时直接复用，
+/// 避免对同一张图做第二次全图缩放；模型输入为其他尺寸时自动回退内部
+/// 按模型尺寸缩放（行为与 [`detect_eye`] 完全一致）。
+pub(crate) fn detect_eye_shared(
+    session: &mut Session,
+    img: &DynamicImage,
+    shared_640: &DynamicImage,
+    bird_bbox: BBox,
+) -> Result<Option<BBox>, RecognizeError> {
+    detect_eye_impl(session, img, Some(shared_640), bird_bbox)
+}
+
+/// 眼检测共用实现。`shared_640` 为检测阶段的 640×640 缩放（可选复用）。
+fn detect_eye_impl(
+    session: &mut Session,
+    img: &DynamicImage,
+    shared_640: Option<&DynamicImage>,
+    bird_bbox: BBox,
+) -> Result<Option<BBox>, RecognizeError> {
     // ---- 从 session 元数据读取模型输入尺寸（不硬编码） ----
-    let input_shape = session.inputs()[0]
+    // 模型异常防护：无输入时返回系统错误而非裸索引 panic
+    let input = session
+        .inputs()
+        .first()
+        .ok_or_else(|| RecognizeError::ModelLoad("eye.onnx 模型无输入".into()))?;
+    let input_shape = input
         .dtype()
         .tensor_shape()
         .ok_or_else(|| RecognizeError::ModelLoad("eye.onnx 输入非张量类型".into()))?;
@@ -80,32 +110,34 @@ pub fn detect_eye(
     // ---- 预处理：整图 resize 至模型输入尺寸 + RGB/255 归一化 ----
     // 不裁剪鸟框：模型训练集为整幅鸟图，裁剪会破坏空间先验并放大幻觉点置信度。
     let (full_w, full_h) = img.dimensions();
-    let resized = img.resize_exact(
-        input_w as u32, input_h as u32,
-        image::imageops::FilterType::CatmullRom,
-    );
-
-    let plane_size = input_w * input_h;
-    let total = 3 * plane_size;
-    let mut input_data = Vec::with_capacity(total);
-
-    for c in 0..3 {
-        for y in 0..input_h {
-            for x in 0..input_w {
-                let pixel = resized.get_pixel(x as u32, y as u32);
-                let val = pixel[c] as f32 / 255.0;
-                input_data.push(val);
-            }
-        }
-    }
+    // 模型输入恰为 640×640 时复用检测阶段的共享缩放（同一 CatmullRom 插值，结果一致）
+    let input_data = if let Some(shared) = shared_640
+        && input_w == 640
+        && input_h == 640
+    {
+        build_input_data(shared, input_w, input_h)
+    } else {
+        let resized = img.resize_exact(
+            input_w as u32,
+            input_h as u32,
+            image::imageops::FilterType::CatmullRom,
+        );
+        build_input_data(&resized, input_w, input_h)
+    };
 
     // ---- 推理 ----
     let tensor = Tensor::<f32>::from_array(
         ([1usize, 3, input_h, input_w], input_data.into_boxed_slice()),
     )?;
 
+    // 模型异常防护：无输出时返回系统错误而非裸索引 panic
     let outputs = session.run(ort::inputs![tensor])?;
-    let output = &outputs[0];
+    // 模型异常防护：无输出时返回系统错误而非裸索引 panic
+    let output = if outputs.len() == 0 {
+        return Err(RecognizeError::ModelLoad("eye.onnx 模型推理无输出".into()));
+    } else {
+        &outputs[0]
+    };
 
     // ---- 解析输出 ----
     // eye.onnx 是 YOLO26 系端到端姿态头（NMS-free），输出 [1, 300, 12]，
@@ -132,6 +164,32 @@ pub fn detect_eye(
         ((kx + half_px) / fw).clamp(0.0, 1.0),
         ((ky + half_px) / fh).clamp(0.0, 1.0),
     )))
+}
+
+/// RGB/255 归一化 NCHW 预处理（输入尺寸由模型元数据决定）。
+///
+/// 单遍遍历 `as_raw()` 像素按通道分散写，替代三重循环 `get_pixel`。
+/// Rgb8 源零拷贝借用；其他色型经 `to_rgb8` 转换（与旧 `get_pixel` 语义一致）。
+fn build_input_data(resized: &DynamicImage, input_w: usize, input_h: usize) -> Vec<f32> {
+    let plane_size = input_w * input_h;
+    let mut input_data = vec![0.0f32; 3 * plane_size];
+    match resized.as_rgb8() {
+        Some(rgb) => fill_nchw(rgb.as_raw(), &mut input_data, plane_size),
+        None => {
+            let rgb = resized.to_rgb8();
+            fill_nchw(rgb.as_raw(), &mut input_data, plane_size);
+        }
+    }
+    input_data
+}
+
+/// RGB8 字节切片 → NCHW 通道分散写（RGB/255 归一化）。
+fn fill_nchw(raw: &[u8], out: &mut [f32], plane_size: usize) {
+    for (i, px) in raw.chunks_exact(3).enumerate() {
+        out[i] = px[0] as f32 / 255.0;
+        out[plane_size + i] = px[1] as f32 / 255.0;
+        out[2 * plane_size + i] = px[2] as f32 / 255.0;
+    }
 }
 
 /// 双槽一致性选点：左/右眼关键点各自取全图最优（置信度最高），

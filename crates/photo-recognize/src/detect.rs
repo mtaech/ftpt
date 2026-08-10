@@ -3,7 +3,7 @@
 //!
 //! 所有常数对应 Dart `onnx_detection_service.dart`。
 
-use image::{DynamicImage, GenericImageView};
+use image::DynamicImage;
 use ort::session::Session;
 use ort::value::Tensor;
 
@@ -26,44 +26,29 @@ pub struct DetectionResult {
     pub raw_score: f32,
 }
 
-/// 运行 YOLO 检测。
+/// 640×640 CatmullRom 缩放（检测模型输入）。
 ///
-/// 输入全分辨率图像，输出最高分鸟体检测框，无有效检测返回 `None`。
-///
-/// # 参数
-/// - `session`: ONNX session（YOLO 模型）
-/// - `img`: 全分辨率解码图像
-///
-/// # 返回
-/// - `Ok(Some(result))` 检测成功
-/// - `Ok(None)` 无有效检测（对应 pica 的 `detectPrimaryBird` → `null`）
-/// - `Err(...)` 模型/推理系统故障
-pub fn run_yolo_detection(
-    session: &mut Session,
-    img: &DynamicImage,
-) -> Result<Option<DetectionResult>, RecognizeError> {
-    // ---- 预处理 ----
-    // 缩放至 640×640 三次插值（pica onnx_detection_service.dart:71-76）
-    let resized = img.resize_exact(
+/// 与眼检测共享：管线在 [`crate::pipeline`] 层调用本函数一次，把结果同时
+/// 喂给检测与眼模型，避免对同一张图做第二次全图缩放。
+pub(crate) fn resize_to_yolo_input(img: &DynamicImage) -> DynamicImage {
+    img.resize_exact(
         YOLO_INPUT_SIZE as u32,
         YOLO_INPUT_SIZE as u32,
         image::imageops::FilterType::CatmullRom,
-    );
+    )
+}
 
-    let plane_size = YOLO_INPUT_SIZE * YOLO_INPUT_SIZE;
-    let total = 3 * plane_size;
-    let mut input_data = Vec::with_capacity(total);
-
+/// 使用已完成缩放的 640×640 图运行检测（管线共享缩放结果时调用）。
+///
+/// 输入为 [`resize_to_yolo_input`] 的输出；返回语义与 YOLO 检测一致：
+/// `Ok(Some(result))` 检测成功，`Ok(None)` 无有效检测，`Err(...)` 系统故障。
+pub(crate) fn run_yolo_detection_resized(
+    session: &mut Session,
+    resized: &DynamicImage,
+) -> Result<Option<DetectionResult>, RecognizeError> {
+    // ---- 预处理 ----
     // NCHW 布局：RGB/255 归一化（pica onnx_detection_service.dart:78-88）
-    for c in 0..3 {
-        for y in 0..YOLO_INPUT_SIZE {
-            for x in 0..YOLO_INPUT_SIZE {
-                let pixel = resized.get_pixel(x as u32, y as u32);
-                let val = pixel[c] as f32 / 255.0;
-                input_data.push(val);
-            }
-        }
-    }
+    let input_data = build_input_data(resized);
 
     // ---- 推理 ----
     let tensor = Tensor::<f32>::from_array((
@@ -72,8 +57,14 @@ pub fn run_yolo_detection(
     ))?;
 
     // 与 pica 行为一致：只取第一个输出（pica onnx_detection_service.dart:92-97）
+    // 模型异常防护：无输出时返回系统错误而非裸索引 panic
     let outputs = session.run(ort::inputs![tensor])?;
-    let output = &outputs[0];
+    // 模型异常防护：无输出时返回系统错误而非裸索引 panic
+    let output = if outputs.len() == 0 {
+        return Err(RecognizeError::ModelLoad("YOLO 模型推理无输出".into()));
+    } else {
+        &outputs[0]
+    };
 
     // ---- 后处理 ----
     // 输出格式：[x1, y1, x2, y2, score, classId, ...] 步长 6（pica onnx_detection_service.dart:103-110）
@@ -121,6 +112,33 @@ pub fn run_yolo_detection(
     }
 
     Ok(best)
+}
+
+/// 640×640 RGB/255 归一化 NCHW 预处理。
+///
+/// 单遍遍历 `as_raw()` 像素按通道分散写，替代三重循环 `get_pixel`
+/// （640²×3 ≈ 1.2M 次带边界检查的逐像素取值，同像素取 3 遍 RGB）。
+/// Rgb8 源零拷贝借用；其他色型经 `to_rgb8` 转换（与旧 `get_pixel` 语义一致）。
+fn build_input_data(resized: &DynamicImage) -> Vec<f32> {
+    let plane_size = YOLO_INPUT_SIZE * YOLO_INPUT_SIZE;
+    let mut input_data = vec![0.0f32; 3 * plane_size];
+    match resized.as_rgb8() {
+        Some(rgb) => fill_nchw(rgb.as_raw(), &mut input_data, plane_size),
+        None => {
+            let rgb = resized.to_rgb8();
+            fill_nchw(rgb.as_raw(), &mut input_data, plane_size);
+        }
+    }
+    input_data
+}
+
+/// RGB8 字节切片 → NCHW 通道分散写（RGB/255 归一化）。
+fn fill_nchw(raw: &[u8], out: &mut [f32], plane_size: usize) {
+    for (i, px) in raw.chunks_exact(3).enumerate() {
+        out[i] = px[0] as f32 / 255.0;
+        out[plane_size + i] = px[1] as f32 / 255.0;
+        out[2 * plane_size + i] = px[2] as f32 / 255.0;
+    }
 }
 
 // ---------------------------------------------------------------------------
