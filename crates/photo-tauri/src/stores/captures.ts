@@ -96,9 +96,9 @@ export const useCapturesStore = defineStore('captures', {
       }
     },
 
-    /** 全量重拉（扫描完成/EXIF 回填/失败回滚共用） */
+    /** 全量重拉（扫描完成/EXIF 回填/失败回滚共用）。浅拷贝强制触发：mock 原地变更同一引用时不触发 pinia */
     async reload() {
-      this.items = await getCaptures()
+      this.items = [...(await getCaptures())]
     },
 
     /** 重扫当前目录（F5）：无目录时 no-op；哨兵复位语义同 openDirectory */

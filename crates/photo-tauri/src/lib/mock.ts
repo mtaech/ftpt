@@ -3,6 +3,7 @@
 import type {
   AdjustParams,
   AppConfig,
+  BatchOpItem,
   BatchOpOptions,
   BatchOpPreview,
   BatchOpResult,
@@ -10,10 +11,14 @@ import type {
   CaptureMeta,
   ColorLabel,
   Flag,
-  ImageFormat,
+  Recognition,
 } from './bindings'
+import { formatToString } from './filter'
 
 export const MOCK_DIR = 'E:/Mock/Birds'
+
+/** 与 tauri-specta Result 模式命令同形状的返回（生成物 resolve 联合而不是 reject） */
+type MockResult<T> = { status: 'ok'; data: T } | { status: 'error'; error: string }
 
 type Handler = (payload: unknown) => void
 const listeners = new Map<string, Set<Handler>>()
@@ -131,17 +136,20 @@ export const mockCommands = {
     return captures
   },
 
-  async setRating(paths: string[], rating: number): Promise<void> {
+  async setRating(paths: string[], rating: number): Promise<MockResult<null>> {
     const names = ['None', 'One', 'Two', 'Three', 'Four', 'Five'] as const
     for (const c of captures) if (paths.includes(c.primaryPath)) c.rating = names[rating] ?? 'None'
+    return { status: 'ok', data: null }
   },
 
-  async setFlag(paths: string[], flag: Flag | null): Promise<void> {
+  async setFlag(paths: string[], flag: Flag | null): Promise<MockResult<null>> {
     for (const c of captures) if (paths.includes(c.primaryPath)) c.flag = flag
+    return { status: 'ok', data: null }
   },
 
-  async setColorLabel(paths: string[], label: ColorLabel | null): Promise<void> {
+  async setColorLabel(paths: string[], label: ColorLabel | null): Promise<MockResult<null>> {
     for (const c of captures) if (paths.includes(c.primaryPath)) c.colorLabel = label ?? 'None'
+    return { status: 'ok', data: null }
   },
 
   // ── Phase 2/3 mock：内存态 + 模拟事件流 ──────────────
@@ -158,10 +166,13 @@ export const mockCommands = {
   async listRecent(): Promise<string[]> {
     return [...recent]
   },
-  async listBirdSpecies(): Promise<string[]> {
-    return ['北红尾鸲', '斑嘴鸭', '白鹭', '苍鹭', '翠鸟', '红嘴蓝鹊', '麻雀', '山斑鸠']
+  async listBirdSpecies(): Promise<MockResult<string[]>> {
+    return {
+      status: 'ok',
+      data: ['北红尾鸲', '斑嘴鸭', '白鹭', '苍鹭', '翠鸟', '红嘴蓝鹊', '麻雀', '山斑鸠'],
+    }
   },
-  async recognizeCaptures(paths: string[]): Promise<void> {
+  async recognizeCaptures(paths: string[]): Promise<MockResult<null>> {
     const total = paths.length
     let done = 0
     for (const path of paths) {
@@ -176,56 +187,137 @@ export const mockCommands = {
       }
     }
     mockEmit('recognize:done', { total, confirmed: total, needsReview: 0, unrecognized: 0, failed: 0 })
+    return { status: 'ok', data: null }
   },
   async cancelRecognition(): Promise<void> {},
-  async batchOpPreview(op: BatchOpType, options: BatchOpOptions): Promise<BatchOpPreview> {
-    const items = captures
-      .filter((c) => options.formats.length === 0 || options.formats.includes(c.primaryFormat as ImageFormat))
-      .slice(0, 3)
-      .map((c) => ({
-        path: c.primaryPath,
-        targetPath: options.targetDir ? `${options.targetDir}/${c.baseName}` : null,
-      }))
-    return { op, count: items.length, items, siblingCount: 0 }
+  async batchOpPreview(op: BatchOpType, options: BatchOpOptions): Promise<MockResult<BatchOpPreview>> {
+    const items = mockBatchPreviewItems(op, options)
+    const siblingCount = options.syncSiblings ? items.length : 0
+    return { status: 'ok', data: { op, count: items.length, items, siblingCount } }
   },
-  async batchOpExecute(_op: BatchOpType, options: BatchOpOptions): Promise<BatchOpResult> {
-    const { count } = await this.batchOpPreview(_op, options)
+  async batchOpExecute(op: BatchOpType, options: BatchOpOptions): Promise<MockResult<BatchOpResult>> {
+    const items = mockBatchPreviewItems(op, options)
+    const count = items.length
     for (let done = 1; done <= count; done++) {
       await sleep(50)
-      mockEmit('batch:progress', { done, total: count, currentPath: `${options.targetDir ?? ''}/item-${done}` })
+      mockEmit('batch:progress', { done, total: count, currentPath: items[done - 1].path })
+    }
+    if (op === 'Delete') {
+      captures = captures.filter((c) => !items.some((it) => it.path === c.primaryPath))
+      mockEmit('scan:done', { total: captures.length, directory: MOCK_DIR })
     }
     mockEmit('batch:done', { success: count, failed: 0 })
-    return { success: count, failed: 0, failures: [] }
+    return { status: 'ok', data: { success: count, failed: 0, failures: [] } }
   },
   async getAdjustments(path: string): Promise<AdjustParams> {
     return adjustments.get(path) ?? { exposure: 0, contrast: 0, saturation: 0 }
   },
-  async setAdjustments(path: string, params: AdjustParams): Promise<void> {
+  async setAdjustments(path: string, params: AdjustParams): Promise<MockResult<null>> {
     adjustments.set(path, params)
+    return { status: 'ok', data: null }
   },
   async getAppConfig(): Promise<AppConfig> {
+    return { ...appConfig, favoriteDirs: [...favorites], recentDirectories: [...recent] }
+  },
+
+  // ── Phase 3 mock ───────────────────────────────────
+
+  async getRecognition(path: string): Promise<MockResult<Recognition | null>> {
+    const c = captures.find((x) => x.primaryPath === path)
+    if (!c || !c.recognitionStatus) return { status: 'ok', data: null }
     return {
-      thumbnailSize: 220,
-      favoriteDirs: [...favorites],
-      lastDirectory: MOCK_DIR,
-      recentDirectories: [...recent],
-      theme: 'Light',
-      leftPanelWidth: 180,
-      rightPanelVisible: true,
-      rightPanelWidth: 200,
-      fontFamily: 'Segoe UI',
-      recognitionThreadCount: 2,
+      status: 'ok',
+      data: {
+        status: c.recognitionStatus,
+        bird: c.birdName ? { birdId: 1, cnName: c.birdName, latinName: 'Mockus birdus' } : null,
+        classIndex: 0,
+        confidence: c.birdConfidence ?? null,
+        bbox: c.birdBbox ?? null,
+        eyeSharpness: 0.72,
+        eyeBbox: c.birdBbox ?? null,
+        candidates: [],
+        failureStage: 'None',
+        recognizedAt: new Date().toISOString(),
+      },
     }
+  },
+  async correctBird(path: string, birdName: string): Promise<MockResult<null>> {
+    const c = captures.find((x) => x.primaryPath === path)
+    if (c) {
+      c.recognitionStatus = 'Confirmed'
+      c.birdName = birdName
+      c.birdConfidence = 1
+    }
+    return { status: 'ok', data: null }
+  },
+  async deleteCaptures(paths: string[]): Promise<MockResult<null>> {
+    captures = captures.filter((c) => !paths.includes(c.primaryPath))
+    // 与后端 delete_captures 语义一致：删除后 emit scan:done 驱动前端重扫
+    mockEmit('scan:done', { total: captures.length, directory: MOCK_DIR })
+    return { status: 'ok', data: null }
+  },
+  async exportAdjusted(path: string, outputDir: string | null): Promise<MockResult<string>> {
+    return { status: 'ok', data: `${outputDir ?? ''}/${path.split(/[\\\\/]/).pop()}_adjusted.jpg` }
+  },
+  async listSystemFonts(): Promise<MockResult<string[]>> {
+    return {
+      status: 'ok',
+      data: ['Segoe UI', 'Microsoft YaHei UI', 'Cascadia Mono', 'JetBrains Mono', 'Consolas'],
+    }
+  },
+  async setAppConfig(config: AppConfig): Promise<MockResult<null>> {
+    appConfig = config
+    return { status: 'ok', data: null }
   },
 }
 
-/** mock 内部状态（收藏/最近/调整参数） */
+/** mock 内部状态（收藏/最近/调整参数/配置） */
 let favorites: string[] = []
 let recent: string[] = [MOCK_DIR]
 const adjustments = new Map<string, AdjustParams>()
+let appConfig: AppConfig = {
+  thumbnailSize: 220,
+  favoriteDirs: [],
+  lastDirectory: MOCK_DIR,
+  recentDirectories: [MOCK_DIR],
+  theme: 'Light',
+  leftPanelWidth: 180,
+  rightPanelVisible: true,
+  rightPanelWidth: 200,
+  fontFamily: 'Segoe UI',
+  recognitionThreadCount: 2,
+}
 
 function sleep(ms: number): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>()
   setTimeout(resolve, ms)
   return promise
+}
+
+/**
+ * mock 批量操作匹配：格式小写归一比较（mock primaryFormat 为小写 'jpeg'/'raw'，
+ * ImageFormat 为大写枚举；真实后端 Display 为大写，前端归一后语义等价）。
+ * syncSiblings=true 时额外带出同 stem 兄弟文件（模拟 expand_with_siblings）。
+ */
+function mockBatchPreviewItems(op: BatchOpType, options: BatchOpOptions): BatchOpItem[] {
+  const fmtOk = (c: CaptureMeta) =>
+    options.formats.length === 0 ||
+    options.formats.some((f) => formatToString(f).toLowerCase() === c.primaryFormat.toLowerCase())
+  const base = captures.filter((c) => fmtOk(c)).slice(0, 3)
+  let items = base.map((c) => ({
+    path: c.primaryPath,
+    targetPath: op === 'Delete' ? null : options.targetDir ? `${options.targetDir}/${c.baseName}` : null,
+  }))
+  if (options.syncSiblings && base.length > 0) {
+    const stem = base[0].baseName.replace(/\.[^.]+$/, '')
+    const siblings = captures
+      .filter((c) => c.baseName.startsWith(stem) && !items.some((it) => it.path === c.primaryPath))
+      .slice(0, 2)
+      .map((c) => ({
+        path: c.primaryPath,
+        targetPath: op === 'Delete' ? null : options.targetDir ? `${options.targetDir}/${c.baseName}` : null,
+      }))
+    items = [...items, ...siblings]
+  }
+  return items
 }

@@ -10,30 +10,43 @@ import {
   GalleryVerticalEndIcon,
   ImageIcon,
   LayoutGridIcon,
+  ListChecksIcon,
   ScanSearchIcon,
+  SettingsIcon,
 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import PhotoGrid from '@/components/PhotoGrid.vue'
 import PhotoPreview from '@/components/PhotoPreview.vue'
 import FilterBar from '@/components/FilterBar.vue'
 import Sidebar from '@/components/Sidebar.vue'
+import BatchOpsPanel from '@/components/BatchOpsPanel.vue'
 import InfoPanel from '@/components/InfoPanel.vue'
 import RightRail from '@/components/RightRail.vue'
 import StatusBar from '@/components/StatusBar.vue'
+import ContextMenu from '@/components/ContextMenu.vue'
+import SettingsModal from '@/components/SettingsModal.vue'
 import { useCapturesStore } from '@/stores/captures'
 import { useSelectionStore } from '@/stores/selection'
 import { usePreviewStore } from '@/stores/preview'
+import { useRecognitionStore } from '@/stores/recognition'
+import { useConfigStore } from '@/stores/config'
 import { installKeymap, type KeymapHandlers } from '@/keymap'
-import { getAppConfig } from '@/lib/ipc'
+import { deleteCaptures } from '@/lib/ipc'
 
 const captures = useCapturesStore()
 const selection = useSelectionStore()
 const preview = usePreviewStore()
+const recognition = useRecognitionStore()
+const configStore = useConfigStore()
 
 /** 左栏可见（对齐 GPUI sidebar_visible，运行时状态，默认可见） */
 const sidebarVisible = ref(true)
+/** 批量操作面板可见（顶栏按钮切换；独立面板，默认隐藏） */
+const batchPanelVisible = ref(false)
 /** 右栏可见（对齐 GPUI config.right_panel_visible，初始值跟随后端配置，默认可见） */
 const rightPanelVisible = ref(true)
+/** 设置弹窗开关（顶栏齿轮按钮打开、Esc 分支关闭，v-model 传给 SettingsModal） */
+const settingsOpen = ref(false)
 
 function toggleLeftPanel() {
   sidebarVisible.value = !sidebarVisible.value
@@ -44,8 +57,7 @@ function toggleRightPanel() {
 
 /**
  * 键位 → 动作分发表：键位解析（焦点隔离/Ctrl 修饰键/键名）全在 keymap.ts，
- * 此处只把 action 名接到真实 store 调用。Phase 3 项（识别/删除）
- * 暂以 console.debug 占位，接线时替换为对应 store/命令。
+ * 此处只把 action 名接到真实 store 调用（识别/删除已接 recognition store 与 ipc）。
  */
 const keymapHandlers: KeymapHandlers = {
   // 评分：1–5 评分，0 清除
@@ -64,10 +76,10 @@ const keymapHandlers: KeymapHandlers = {
   flagPick: () => void captures.applyFlag(selection.selectedPaths, 'Pick'),
   flagReject: () => void captures.applyFlag(selection.selectedPaths, 'Reject'),
   flagNone: () => void captures.applyFlag(selection.selectedPaths, null),
-  // 识别：Phase 3 接线（recognition store + recognize_captures）
-  recognize: () => console.debug('[keymap] recognize：Phase 3 接线'),
-  recognizeUnrecognized: () => console.debug('[keymap] recognizeUnrecognized：Phase 3 接线'),
-  recognizeAll: () => console.debug('[keymap] recognizeAll：Phase 3 接线'),
+  // 识别：B 单张/所选（多选时批量）、Ctrl+B 全部未识别、Ctrl+Shift+B 重新识别全部
+  recognize: () => void recognition.recognize(selection.selectedPaths),
+  recognizeUnrecognized: () => recognition.recognizeUnrecognized(),
+  recognizeAll: () => recognition.recognizeAll(),
   // 预览：V 检测框开关
   toggleBbox: () => preview.toggleBbox(),
   // 视图：G 网格/预览切换（无选中时先选首项再进预览，保留原逻辑）
@@ -83,13 +95,27 @@ const keymapHandlers: KeymapHandlers = {
   next: () => selection.move(1),
   first: () => selection.moveTo(0),
   last: () => selection.moveTo(captures.count - 1),
-  // 删除：Phase 3 接线（batch_op_delete + 全量重扫）
-  delete: () => console.debug('[keymap] delete：Phase 3 接线'),
+  // 删除：Delete 单张/所选进回收站，无确认（对齐 GPUI layout.rs Delete 键）。
+  // 后端 delete_captures 删除后 emit scan:done，captures store 自动 reload，这里不重复拉取
+  delete: () => {
+    const paths = selection.selectedPaths
+    if (paths.length === 0) return
+    void deleteCaptures(paths)
+  },
   // 选择：Ctrl+A 全选 / Ctrl+D 取消选择
   selectAll: () => selection.selectAll(),
   deselectAll: () => selection.clear(),
-  // Esc：框选待确认时先清 pendingBox（不关预览），否则预览态退出预览
+  // Esc：优先级对齐 GPUI layout.rs escape 分支（settings > 批量识别取消 > 框选清除 > 预览退出）
   closePreview: () => {
+    // settings 分支：设置弹窗打开时 Esc 优先关闭（对齐 GPUI：settings > 批量识别取消 > 框选清除 > 预览退出）
+    if (settingsOpen.value) {
+      settingsOpen.value = false
+      return
+    }
+    if (recognition.running) {
+      void recognition.cancel()
+      return
+    }
     if (preview.pendingBox) {
       preview.setPendingBox(null)
       return
@@ -108,18 +134,11 @@ let disposeKeymap: (() => void) | null = null
 
 onMounted(async () => {
   captures.init()
+  recognition.init()
   disposeKeymap = installKeymap(keymapHandlers)
-  // 主题/字体/右栏可见性跟随后端配置（GPUI 版默认 Light；index.html 不再写死 dark）
-  try {
-    const cfg = await getAppConfig()
-    document.documentElement.classList.toggle('dark', cfg.theme === 'Dark')
-    if (cfg.fontFamily) {
-      document.documentElement.style.setProperty('--font-family-app', cfg.fontFamily)
-    }
-    rightPanelVisible.value = cfg.rightPanelVisible
-  } catch {
-    // mock 模式/后端未就绪：保持默认（light、右栏可见）
-  }
+  // 主题/字体/右栏可见性跟随后端配置（config store 集中处理 DOM 应用；GPUI 版默认 Light）
+  await configStore.load()
+  rightPanelVisible.value = configStore.config.rightPanelVisible ?? true
 })
 onUnmounted(() => {
   disposeKeymap?.()
@@ -150,6 +169,16 @@ function toPreview() {
         <FolderOpenIcon data-icon="inline-start" />
         打开目录
       </Button>
+      <!-- 批量操作面板开关（BatchOpsUi 区域） -->
+      <Button
+        size="sm"
+        variant="ghost"
+        :class="{ 'bg-accent text-accent-foreground': batchPanelVisible }"
+        @click="batchPanelVisible = !batchPanelVisible"
+      >
+        <ListChecksIcon data-icon="inline-start" />
+        批量操作
+      </Button>
       <span v-if="captures.directory" class="truncate text-sm" :title="captures.directory">
         {{ dirName(captures.directory) }}
       </span>
@@ -178,6 +207,17 @@ function toPreview() {
           />
         </div>
       </div>
+      <!-- 设置入口（齿轮按钮，吸顶栏最右；对齐 GPUI rail 设置按钮，入口放顶栏右侧） -->
+      <Button
+        size="icon-sm"
+        variant="ghost"
+        class="ml-auto"
+        title="设置"
+        aria-label="设置"
+        @click="settingsOpen = true"
+      >
+        <SettingsIcon />
+      </Button>
     </header>
 
     <!-- 主区三栏：左 rail | 左栏 | 内容区 | 右栏 | 右 rail（对齐 GPUI layout.rs h_resizable） -->
@@ -211,13 +251,22 @@ function toPreview() {
         >
           <ImageIcon class="size-4" />
         </Button>
-        <Button size="icon-sm" variant="ghost" title="识别（Phase 3 接入）" disabled>
+        <Button
+          size="icon-sm"
+          variant="ghost"
+          title="识别所选 (B)"
+          :disabled="recognition.running || captures.count === 0"
+          @click="recognition.recognize(selection.selectedPaths)"
+        >
           <ScanSearchIcon class="size-4" />
         </Button>
       </nav>
 
       <!-- 左栏（可拖宽；Ctrl+[ 隐藏/显示） -->
       <Sidebar v-show="sidebarVisible" />
+
+      <!-- 批量操作面板（BatchOpsUi 区域；顶栏按钮切换） -->
+      <BatchOpsPanel v-show="batchPanelVisible" />
 
       <!-- 内容区：筛选栏（仅 grid + 有目录）+ 空态/网格/预览 -->
       <main class="flex min-w-0 flex-1 flex-col">
@@ -255,5 +304,9 @@ function toPreview() {
 
     <!-- 底部状态栏 24px -->
     <StatusBar />
+    <!-- 全局右键菜单层（单一实例，store 驱动显隐；Teleport 到 body，z 高于一切浮层） -->
+    <ContextMenu />
+    <!-- 设置弹窗（Teleport 到 body；齿轮按钮打开、Esc/×/遮罩关闭） -->
+    <SettingsModal v-model:open="settingsOpen" />
   </div>
 </template>

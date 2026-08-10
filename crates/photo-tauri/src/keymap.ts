@@ -49,7 +49,7 @@ export type KeymapAction =
 /** 动作分发表：调用方把 action 名接到真实 store 调用上（Phase 3 项可先 no-op） */
 export type KeymapHandlers = Partial<Record<KeymapAction, () => void>>
 
-interface KeyBinding {
+export interface KeyBinding {
   /** e.key 规范化后的键名（见 normalizeKey） */
   key: string
   /** true=必须按 Ctrl；false=必须不按 Ctrl；缺省=不要求（对齐 GPUI 的 _ 通配） */
@@ -64,7 +64,7 @@ interface KeyBinding {
  * 注意 GPUI 的方向键为扁平 ±1 移动（display_order 下标），4 列网格下
  * 跨行是自然发生的，不做行内钳制——见 prev/next 的 App.vue 实现。
  */
-const BINDINGS: readonly KeyBinding[] = [
+export const BINDINGS: readonly KeyBinding[] = [
   // 评分：1–5 评分，0 清除
   { key: '1', ctrl: false, action: 'rate1' },
   { key: '2', ctrl: false, action: 'rate2' },

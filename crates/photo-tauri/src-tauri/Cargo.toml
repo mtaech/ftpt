@@ -25,6 +25,10 @@ photo-domain = { path = "../../photo-domain", features = ["specta"] }
 photo-engine = { path = "../../photo-engine" }
 photo-recognize = { path = "../../photo-recognize" }
 photo-config = { path = "../../photo-config", features = ["specta"] }
+# 系统字体枚举（设置面板字体下拉）：workspace 已 pin zed-industries/font-kit fork
+font-kit.workspace = true
+# 手动修正鸟种的时间戳（与 photo-recognize 同源）
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true

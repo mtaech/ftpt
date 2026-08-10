@@ -17,7 +17,7 @@ use tauri_plugin_dialog::DialogExt;
 use photo_config::AppConfig;
 use photo_domain::{
     AdjustParams, CaptureMeta, ColorLabel, FilterCriteria, Flag, ImageFormat, Rating,
-    RecognitionStatus, SourceFile,
+    Recognition, RecognitionFailureStage, RecognitionStatus, SourceFile,
 };
 use photo_engine::folder_db::{FileEntry, FolderDb};
 use photo_engine::thumbnail::ThumbnailCache;
@@ -905,6 +905,310 @@ fn get_app_config(state: State<'_, Mutex<AppState>>) -> AppConfig {
 }
 
 // ============================================================================
+// Phase 3 commands：识别读取 / 手动修正 / 单张删除 / 调整导出 / 字体 / 设置
+// ============================================================================
+
+/// 读取单张完整识别结果（InfoPanel 识别 tab）。
+/// 按完整路径查 folder_db recognition 表（与 get_adjustments 同键约定：正斜杠 rel）；
+/// 无记录 / 未打开目录 / 路径越界一律返回 None（前端据此显示「未识别」）。
+#[tauri::command]
+#[specta::specta]
+fn get_recognition(
+    state: State<'_, Mutex<AppState>>,
+    path: String,
+) -> Result<Option<Recognition>, String> {
+    let st = state.lock().expect("AppState 锁中毒");
+    let Some(db) = st.folder_db.as_ref() else {
+        return Ok(None);
+    };
+    let Some(dir) = st.current_dir.as_ref() else {
+        return Ok(None);
+    };
+    let Some(rel) = rel_path_of(dir, &path) else {
+        return Ok(None);
+    };
+    db.get_recognition(&rel).map_err(|e| e.to_string())
+}
+
+/// 手动修正鸟种（对齐 GPUI correct_bird_by_name）：名录库按中文名匹配 → 构造
+/// Confirmed Recognition（人工指定即权威结论：置信度 100%，保留原检测框/眼锐度/
+/// 眼框数据）→ 写 recognition 表 → 同步内存 CaptureMeta（bird_name/confidence/
+/// status）→ emit thumb:ready 供前端刷新网格识别 chip。
+#[tauri::command]
+#[specta::specta]
+fn correct_bird(
+    app: AppHandle,
+    state: State<'_, Mutex<AppState>>,
+    path: String,
+    bird_name: String,
+) -> Result<(), String> {
+    // 名录库查找（exe 同级 data/pica_ref.db，与 list_bird_species 同路径约定）
+    let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    else {
+        return Err("无法确定 exe 目录".to_string());
+    };
+    let catalog_db = exe_dir.join("data").join("pica_ref.db");
+    let bird = photo_recognize::list_all_species(&catalog_db)
+        .map_err(|e| format!("加载名录失败: {e}"))?
+        .into_iter()
+        .find(|b| b.cn_name == bird_name)
+        .ok_or_else(|| format!("名录中不存在鸟种: {bird_name}"))?;
+
+    // 克隆句柄后释放锁：SQLite 读写不持 AppState 锁
+    let (db, dir) = {
+        let st = state.lock().expect("AppState 锁中毒");
+        (
+            st.folder_db.clone().ok_or("尚未打开目录")?,
+            st.current_dir.clone().ok_or("尚未打开目录")?,
+        )
+    };
+    let rel = rel_path_of(&dir, &path).ok_or("路径不在当前目录内")?;
+
+    // 保留原检测框/眼数据，只改鸟种与状态（照 GPUI correct_bird_by_name）
+    let prev = db.get_recognition(&rel).map_err(|e| e.to_string())?;
+    let rec = Recognition {
+        status: RecognitionStatus::Confirmed,
+        bird: Some(bird),
+        class_index: prev.as_ref().and_then(|r| r.class_index),
+        confidence: Some(100.0),
+        bbox: prev.as_ref().and_then(|r| r.bbox),
+        eye_sharpness: prev.as_ref().and_then(|r| r.eye_sharpness),
+        eye_bbox: prev.as_ref().and_then(|r| r.eye_bbox),
+        candidates: vec![],
+        failure_stage: RecognitionFailureStage::None,
+        recognized_at: chrono::Utc::now().to_rfc3339(),
+    };
+    db.upsert_recognition(&rel, &rec).map_err(|e| e.to_string())?;
+
+    // 同步内存 CaptureMeta
+    {
+        let mut st = state.lock().expect("AppState 锁中毒");
+        if let Some(meta) = st.captures.iter_mut().find(|m| m.primary_path == path) {
+            meta.enrich_with_recognition(&rec);
+        }
+    }
+    // emit thumb:ready：前端按事件刷新网格识别 chip
+    let _ = app.emit("thumb:ready", ThumbReady { path });
+    Ok(())
+}
+
+/// 单张/多张删除（回收站，无确认——对齐 GPUI Delete 键语义）。
+/// 与 batch_op_execute 的 Delete 分支同编排：重扫源目录取完整 Capture（ops 层
+/// delete_capture 需要 source_files 才能操作同名兄弟文件）→ 逐个删除 → 仅删除
+/// 成功者同步 sidecar 三表（识别/调整/评分色标旗标行，防孤儿行）→ 从内存
+/// captures 移除并重索引 → scan_generation 换代（在途 EXIF/缩略图任务按代数
+/// 丢弃，防张冠李戴）→ emit scan:done {total, directory}，前端 store 据此自动
+/// reload()。任一失败不中止整体（与批量语义一致）；全部失败才返回 Err。
+#[tauri::command]
+#[specta::specta]
+async fn delete_captures(
+    app: AppHandle,
+    state: State<'_, Mutex<AppState>>,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    // 换代 + 快照目录/DB 句柄（克隆后释放锁，文件 IO 不持 AppState 锁）
+    let (dir, db) = {
+        let mut st = state.lock().expect("AppState 锁中毒");
+        st.scan_generation += 1;
+        (
+            st.current_dir.clone().ok_or("尚未打开目录")?,
+            st.folder_db.clone(),
+        )
+    };
+    let target: HashSet<String> = paths.into_iter().collect();
+    let app_work = app.clone();
+    let dir_str = dir.to_string_lossy().to_string();
+
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<u32, String> {
+        // 1. 重扫源目录取完整 Capture（同 batch_op_execute）
+        let caps = scanner::scan_directory(&dir, &FilterCriteria::default(), None)
+            .map_err(|e| format!("扫描失败: {e}"))?;
+        // 2. 删除命中的 capture（回收站）；失败只记日志，成功才进 sidecar 同步
+        let mut deleted: Vec<(String, Option<String>)> = Vec::new(); // (主路径, rel)
+        let mut errors: Vec<String> = Vec::new();
+        for cap in &caps {
+            let primary = &cap.source_files[cap.primary_index];
+            let primary_str = primary.path.to_string_lossy().to_string();
+            if !target.contains(&primary_str) {
+                continue;
+            }
+            match photo_engine::ops::delete_capture(cap) {
+                Ok(()) => {
+                    let rel = primary
+                        .path
+                        .strip_prefix(&dir)
+                        .ok()
+                        .map(|r| r.to_string_lossy().replace('\\', "/"));
+                    deleted.push((primary_str, rel));
+                }
+                Err(e) => errors.push(format!("{primary_str}: {e}")),
+            }
+        }
+        if deleted.is_empty() {
+            return Err(if errors.is_empty() {
+                "没有找到要删除的照片".to_string()
+            } else {
+                format!("删除失败: {}", errors.join("；"))
+            });
+        }
+        // 3. sidecar 三表同步（仅删除成功者；识别/调整按 rel 键，xmp 按完整路径键）
+        if let Some(db) = &db {
+            let rels: Vec<String> = deleted.iter().filter_map(|(_, rel)| rel.clone()).collect();
+            let full_paths: Vec<String> = deleted.iter().map(|(p, _)| p.clone()).collect();
+            if let Err(e) = photo_engine::ops::sync_delete_recognitions(db, &rels) {
+                tracing::error!("删除识别行失败: {e}");
+            }
+            if let Err(e) = photo_engine::ops::sync_delete_adjustments(db, &rels) {
+                tracing::error!("删除调整行失败: {e}");
+            }
+            if let Err(e) = photo_engine::ops::sync_delete_xmp(db, &full_paths) {
+                tracing::error!("删除评分/色标/旗标行失败: {e}");
+            }
+        }
+        // 4. 从内存 captures 移除 + 重索引（照 GPUI delete_selected）
+        {
+            let st = app_work.state::<Mutex<AppState>>();
+            let mut st = st.lock().expect("AppState 锁中毒");
+            let deleted_primaries: HashSet<&str> =
+                deleted.iter().map(|(p, _)| p.as_str()).collect();
+            st.captures.retain(|m| !deleted_primaries.contains(m.primary_path.as_str()));
+            for (i, meta) in st.captures.iter_mut().enumerate() {
+                meta.index = i;
+            }
+        }
+        // 部分失败不中止整体：日志记录，总数只计成功者
+        if !errors.is_empty() {
+            tracing::warn!("部分删除失败: {}", errors.join("；"));
+        }
+        Ok(deleted.len() as u32)
+    })
+    .await
+    .map_err(|e| format!("删除任务中断: {e}"))??;
+
+    // 5. emit scan:done：前端 store 据此结束哨兵并 reload() 全量
+    let _ = app.emit(
+        "scan:done",
+        ScanDone {
+            total: result,
+            directory: dir_str,
+        },
+    );
+    Ok(())
+}
+
+/// 导出调整结果（全尺寸烘焙，ADR 0007）：engine adjustments 渲染 + convert 保存
+/// JPEG。命名 `{stem}_adjusted.jpg`，已存在自动追加 `_1/_2` 序号（不覆盖原文件，
+/// 照 GPUI export_adjusted）。output_dir = None 时导出到源文件所在目录。RAW
+/// 全尺寸 16-bit 解码约 3-5s，spawn_blocking 异步执行。返回最终输出路径（前端
+/// 状态栏展示）。导出是一次性烘焙，不改动内存 CaptureMeta（无对应字段）。
+#[tauri::command]
+#[specta::specta]
+async fn export_adjusted(
+    state: State<'_, Mutex<AppState>>,
+    path: String,
+    output_dir: Option<String>,
+) -> Result<String, String> {
+    // 锁内快照：源文件信息 + 调整参数 + 目标目录（克隆后释放锁，烘焙不持锁）
+    let (source, params, out_dir) = {
+        let st = state.lock().expect("AppState 锁中毒");
+        let db = st.folder_db.clone().ok_or("尚未打开目录")?;
+        let dir = st.current_dir.clone().ok_or("尚未打开目录")?;
+        let rel = rel_path_of(&dir, &path).ok_or("路径不在当前目录内")?;
+        let params = db
+            .get_adjustments(&rel)
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+        let meta = st
+            .captures
+            .iter()
+            .find(|m| m.primary_path == path)
+            .ok_or("找不到该照片")?;
+        let source = SourceFile {
+            path: PathBuf::from(&meta.primary_path),
+            format: ImageFormat::from_extension(
+                Path::new(&meta.primary_path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or(""),
+            )
+            .unwrap_or(ImageFormat::Jpeg),
+            file_size: meta.file_size,
+        };
+        let out_dir = match output_dir {
+            Some(d) if !d.trim().is_empty() => PathBuf::from(d),
+            _ => PathBuf::from(&meta.primary_path)
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
+        };
+        (source, params, out_dir)
+    };
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let stem = source
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "photo".to_string());
+        // 防覆盖：已存在则追加 _1/_2 序号（照 GPUI export_adjusted）
+        let mut out = out_dir.join(format!("{stem}_adjusted.jpg"));
+        let mut n = 1;
+        while out.exists() {
+            out = out_dir.join(format!("{stem}_adjusted_{n}.jpg"));
+            n += 1;
+        }
+        photo_engine::convert::export_adjusted(&source, &params, &out)
+            .map(|p| p.to_string_lossy().to_string())
+            .map_err(|e| format!("导出失败: {e}"))
+    })
+    .await
+    .map_err(|e| format!("导出任务中断: {e}"))?
+}
+
+/// 系统字体枚举（设置面板字体下拉数据源）。
+/// zed-font-kit（font-kit 的 zed fork，workspace 已 pin）：Windows 走 DirectWrite
+/// 系统字体集合（SystemSource::new() 无失败路径）；family 名排序后返回。
+#[tauri::command]
+#[specta::specta]
+fn list_system_fonts() -> Result<Vec<String>, String> {
+    let source = font_kit::source::SystemSource::new();
+    let mut families = source
+        .all_families()
+        .map_err(|e| format!("枚举系统字体失败: {e}"))?;
+    families.sort();
+    Ok(families)
+}
+
+/// 更新并保存配置（设置面板）：钳制校验后替换 st.config + save_config。
+/// 钳制范围：leftPanelWidth 200–480、rightPanelWidth 200–480、
+/// recognitionThreadCount 1–4、thumbnailSize 64–1024（网格 cell = 尺寸 + 56，
+/// 越界值钳到合理区间，与 GPUI 设置语义一致，非法输入不报错）。
+#[tauri::command]
+#[specta::specta]
+fn set_app_config(state: State<'_, Mutex<AppState>>, config: AppConfig) -> Result<(), String> {
+    let mut st = state.lock().expect("AppState 锁中毒");
+    st.config = AppConfig {
+        thumbnail_size: config.thumbnail_size.clamp(64, 1024),
+        favorite_dirs: config.favorite_dirs,
+        last_directory: config.last_directory,
+        recent_directories: config.recent_directories,
+        theme: config.theme,
+        left_panel_width: config.left_panel_width.clamp(200, 480),
+        right_panel_visible: config.right_panel_visible,
+        right_panel_width: config.right_panel_width.clamp(200, 480),
+        font_family: config.font_family,
+        recognition_thread_count: config.recognition_thread_count.clamp(1, 4),
+    };
+    save_config(&st);
+    Ok(())
+}
+
+// ============================================================================
 // 扫描编排（照 state/scan.rs 移植）
 // ============================================================================
 
@@ -1318,8 +1622,8 @@ fn ptimg_handler(
 // 启动
 // ============================================================================
 
-/// 构建 specta Builder（commands + 事件负载类型），run 与导出测试共用
-fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
+/// 构建 specta Builder（commands + 事件负载类型），run 与导出 bin 共用
+pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     tauri_specta::Builder::<tauri::Wry>::new()
         .commands(tauri_specta::collect_commands![
             pick_directory,
@@ -1340,6 +1644,12 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             get_adjustments,
             set_adjustments,
             get_app_config,
+            get_recognition,
+            correct_bird,
+            delete_captures,
+            export_adjusted,
+            list_system_fonts,
+            set_app_config,
         ])
         // 事件走 app.emit 明文通道（契约事件名含冒号，非 specta Event 命名），
         // 负载类型在此登记以便导出到 bindings.ts 供前端 listen 使用

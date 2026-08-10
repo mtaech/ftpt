@@ -3,11 +3,13 @@
 // 信息 tab：Hero/EXIF/评分/色标/旗标/识别六卡片，数据来自选中拍摄（selection.selected，
 // 主选中项优先锚点）；调整 tab：曝光/对比度/饱和度 slider，拖动 350ms 去抖持久化。
 // 宽度自持：左缘把手可拖拽，localStorage('ftpt.rightPanelWidth') 持久化，钳制 200–480。
-import { computed, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useStorage } from '@vueuse/core'
 import {
   GalleryVerticalEndIcon,
+  InfoIcon,
   PanelRightCloseIcon,
+  PencilIcon,
   RotateCcwIcon,
   ScanSearchIcon,
   XIcon,
@@ -16,9 +18,19 @@ import { Button } from '@/components/ui/button'
 import { useCapturesStore } from '@/stores/captures'
 import { useSelectionStore } from '@/stores/selection'
 import { usePreviewStore } from '@/stores/preview'
-import { getAdjustments, ptimgUrl, setAdjustments } from '@/lib/ipc'
+import { useRecognitionStore } from '@/stores/recognition'
+import { useFilterStore } from '@/stores/filter'
+import { correctBird, getAdjustments, getRecognition, ptimgUrl, setAdjustments } from '@/lib/ipc'
 import { displayName, formatBadgeLabel, formatBytes, ratingToNumber } from '@/lib/format'
-import type { AdjustParams, CaptureMeta, ColorLabel, Flag, RecognitionStatus } from '@/lib/bindings'
+import type {
+  AdjustParams,
+  CaptureMeta,
+  ColorLabel,
+  Flag,
+  Recognition,
+  RecognitionFailureStage,
+  RecognitionStatus,
+} from '@/lib/bindings'
 
 defineProps<{
   /** 右侧面板是否可见（关闭按钮与父级 v-show 保持一致） */
@@ -31,6 +43,8 @@ const emit = defineEmits<{ toggle: [] }>()
 const captures = useCapturesStore()
 const selection = useSelectionStore()
 const preview = usePreviewStore()
+const recognition = useRecognitionStore()
+const filter = useFilterStore()
 
 /** 主选中拍摄（锚点优先；无选中/越界为 null） */
 const focused = computed<CaptureMeta | null>(() => selection.selected)
@@ -93,11 +107,20 @@ const FLAG_OPTIONS: { label: string; flag: Flag | null }[] = [
   { label: '无', flag: null },
 ]
 
-// ── 识别：三层状态 chip + 置信度 ──
+// ── 识别：状态 chip + 完整结果（getRecognition）+ 修正鸟种下拉 ──
 const STATUS_META: Record<RecognitionStatus, { label: string; cls: string }> = {
   Confirmed: { label: '已识别', cls: 'text-label-green bg-label-green/10 border-label-green/30' },
   NeedsReview: { label: '待复核', cls: 'text-label-yellow bg-label-yellow/10 border-label-yellow/30' },
   Unrecognized: { label: '未检测到鸟类', cls: 'text-muted-foreground bg-muted border-border' },
+}
+
+/** 失败阶段中文提示（对齐 domain.rs RecognitionFailureStage::user_message） */
+const FAILURE_STAGE_TEXT: Record<RecognitionFailureStage, string> = {
+  None: '',
+  Detection: '检测异常',
+  Classification: '分类异常',
+  Mapping: '名录映射失败',
+  Assets: '源图不可用',
 }
 
 /** 置信度归一化：mock 为 0–1 小数、真实后端 0–100，统一到 0–100 */
@@ -114,13 +137,137 @@ function confBarCls(conf: number): string {
   return 'bg-label-blue'
 }
 
-/** 识别动作占位（Phase 3 接线：recognize_captures / 检测框叠加） */
+// ── 完整识别结果：聚焦图有识别记录时 getRecognition 拉取（眼锐度/失败阶段/候选仅完整结果有）──
+const fullRecognition = ref<Recognition | null>(null)
+/** 加载序号：切图后旧请求结果直接丢弃（防异步回填串图，同调整参数模式） */
+let recLoadSeq = 0
+
+function loadRecognition(path: string) {
+  const seq = ++recLoadSeq
+  void getRecognition(path)
+    .then((r) => {
+      if (seq !== recLoadSeq || focusedPath.value !== path) return
+      fullRecognition.value = r
+    })
+    .catch(() => {
+      if (seq !== recLoadSeq) return
+      fullRecognition.value = null
+    })
+}
+
+// 切图：清空旧结果；有识别记录则重拉
+watch(
+  focusedPath,
+  (path) => {
+    fullRecognition.value = null
+    if (!path || !focused.value?.recognitionStatus) return
+    loadRecognition(path)
+  },
+  { immediate: true },
+)
+// 识别状态变化（识别完成回填后）：同图重拉完整结果
+watch(
+  () => focused.value?.recognitionStatus,
+  (status) => {
+    const path = focusedPath.value
+    if (!path) return
+    if (!status) {
+      fullRecognition.value = null
+      return
+    }
+    loadRecognition(path)
+  },
+)
+// 识别完成（recognize:done 摘要）后重拉完整结果：mock 模式 captures 原地变更、
+// reload 同引用不触发 status watcher，这里以摘要为显式信号补一次（seq 守卫去重）
+watch(
+  () => recognition.summary,
+  (s) => {
+    const path = focusedPath.value
+    if (!path || !s || !focused.value?.recognitionStatus) return
+    loadRecognition(path)
+  },
+)
+
+/** 展示用鸟名：完整结果优先（名录正式名），回退 CaptureMeta 摘要 */
+const displayBirdName = computed(() => fullRecognition.value?.bird?.cnName ?? focused.value?.birdName ?? null)
+/** 展示用置信度（完整结果优先；mock 0–1 / 后端 0–100 由 confPercent 归一） */
+const displayConfidence = computed<number | null>(() => {
+  const r = fullRecognition.value
+  if (r?.confidence != null) return r.confidence
+  return focused.value?.birdConfidence ?? null
+})
+/** 置信度数字色：>=80 绿 / >=50 黄 / <50 蓝（对齐 GPUI confidence_color） */
+const confTextCls = computed(() => confBarCls(displayConfidence.value ?? 0))
+/** 待复核失败阶段中文提示（None 为空串，不显示） */
+const failureText = computed(() => FAILURE_STAGE_TEXT[fullRecognition.value?.failureStage ?? 'None'] ?? '')
+/** 待复核最接近候选（candidates 中第一个 bird 非空项，对齐 GPUI render_recognition_content） */
+const bestCandidate = computed<{ name: string; confidence: number } | null>(() => {
+  const r = fullRecognition.value
+  if (!r) return null
+  for (const c of r.candidates) {
+    if (c.bird) return { name: c.bird.cnName, confidence: confPercent(c.confidence) }
+  }
+  return null
+})
+
+/** 眼锐度 tooltip：评分公式（对齐 GPUI eye_sharpness_row 悬浮说明） */
+const EYE_SHARPNESS_TIP =
+  '眼区域清晰度评分：0.5·ln(1+拉普拉斯方差) + 0.3·ln(1+梯度幅值均值) + 0.2·ln(1+边缘密度)；仅保证单调性，越高越锐利，权重待样片标定'
+
+/** 重新识别当前图（识别进行中由 recognition store 守卫拒绝并发） */
 function onRecognize() {
-  console.debug('[InfoPanel] 重新识别：Phase 3 接线')
+  const path = focusedPath.value
+  if (path) void recognition.recognize([path])
 }
+
+/** 检测框开关（V 键同一入口） */
 function onToggleBbox() {
-  console.debug('[InfoPanel] 检测框开关：Phase 3 接线', { bboxVisible: preview.bboxVisible })
+  preview.toggleBbox()
 }
+
+// ── 修正鸟种下拉：展开 → 名录全量 + 搜索过滤，选即 correctBird（对齐 GPUI correction_open）──
+const correctOpen = ref(false)
+const correctSearch = ref('')
+const correctBoxEl = ref<HTMLElement | null>(null)
+
+/** 候选 = 名录全量（复用 filter store speciesOptions），按搜索词过滤 */
+const correctOptions = computed(() => {
+  const all = filter.speciesOptions
+  const q = correctSearch.value.trim().toLowerCase()
+  return q ? all.filter((n) => n.toLowerCase().includes(q)) : all
+})
+
+function toggleCorrect() {
+  correctOpen.value = !correctOpen.value
+  correctSearch.value = ''
+  // 名录未加载时补齐（InfoPanel 与 FilterBar 独立挂载，不依赖其 watcher）
+  if (correctOpen.value && filter.speciesOptions.length === 0) void filter.loadSpecies()
+}
+
+/** 选择即修正：correctBird 写识别表 → 重拉完整结果 + 全量刷新网格摘要 */
+async function onCorrectSelect(name: string) {
+  correctOpen.value = false
+  correctSearch.value = ''
+  const path = focusedPath.value
+  if (!path) return
+  try {
+    await correctBird(path, name)
+    loadRecognition(path)
+    void captures.reload()
+  } catch (e) {
+    console.error('鸟种修正失败', e)
+  }
+}
+
+/** 点击下拉外部关闭（对齐 FilterBar 鸟种下拉模式） */
+function onDocMouseDown(e: MouseEvent) {
+  if (correctOpen.value && correctBoxEl.value && !correctBoxEl.value.contains(e.target as Node)) {
+    correctOpen.value = false
+  }
+}
+onMounted(() => document.addEventListener('mousedown', onDocMouseDown))
+onUnmounted(() => document.removeEventListener('mousedown', onDocMouseDown))
 
 // ══════════════════ 调整 tab ══════════════════
 
@@ -456,7 +603,7 @@ function valueCls(v: number): string {
           <div v-else class="text-xs text-muted-foreground">未选择图片</div>
         </div>
 
-        <!-- ── 识别卡：五态 chip + 重新识别/检测框按钮（Phase 3 占位）── -->
+        <!-- ── 识别卡：状态 chip + 完整结果（getRecognition）+ 重新识别/检测框/修正鸟种 ── -->
         <div class="flex flex-col gap-2 rounded-md border border-border bg-card p-3">
           <span class="text-xs font-medium text-muted-foreground">识别</span>
           <!-- 未选择图片 -->
@@ -467,6 +614,13 @@ function valueCls(v: number): string {
               识别此照片
             </Button>
           </div>
+          <!-- 识别进行中（对齐 GPUI busy 分支：隐藏结果内容） -->
+          <div v-else-if="recognition.running" class="flex flex-col gap-2">
+            <div class="flex items-center gap-1.5 text-xs text-primary">
+              <ScanSearchIcon class="size-3.5 animate-pulse" />
+              识别中…
+            </div>
+          </div>
           <!-- 未识别（无记录） -->
           <div v-else-if="!focused.recognitionStatus" class="flex flex-col gap-2">
             <div class="text-xs text-muted-foreground">尚未识别</div>
@@ -475,11 +629,9 @@ function valueCls(v: number): string {
               识别此照片 (b)
             </Button>
           </div>
-          <!-- 有识别记录 -->
+          <!-- 有识别记录：完整结果渲染 -->
           <template v-else>
-            <div
-              class="flex items-center justify-between gap-2"
-            >
+            <div class="flex items-center justify-between gap-2">
               <span
                 class="rounded-sm border px-2 py-0.5 text-[11px] select-none"
                 :class="STATUS_META[focused.recognitionStatus].cls"
@@ -487,33 +639,41 @@ function valueCls(v: number): string {
                 {{ STATUS_META[focused.recognitionStatus].label }}
               </span>
               <span
-                v-if="focused.recognitionStatus === 'Confirmed' && focused.birdConfidence !== null"
+                v-if="confPercent(displayConfidence) > 0"
                 class="font-mono-num text-[15px] font-semibold"
-                :class="{
-                  'text-label-green': confPercent(focused.birdConfidence) >= 80,
-                  'text-label-yellow': confPercent(focused.birdConfidence) >= 50 && confPercent(focused.birdConfidence) < 80,
-                  'text-label-blue': confPercent(focused.birdConfidence) < 50,
-                }"
+                :class="confTextCls"
               >
-                {{ confPercent(focused.birdConfidence).toFixed(1) }}%
+                {{ confPercent(displayConfidence).toFixed(1) }}%
               </span>
             </div>
             <!-- 已确认：鸟名 + 置信度条 -->
             <template v-if="focused.recognitionStatus === 'Confirmed'">
-              <div v-if="focused.birdName" class="truncate text-xs font-medium text-primary">
-                {{ focused.birdName }}
+              <div v-if="displayBirdName" class="truncate text-xs font-medium text-primary">
+                {{ displayBirdName }}
               </div>
-              <div v-if="focused.birdConfidence !== null" class="h-1 w-full overflow-hidden rounded-full bg-muted">
+              <div v-if="displayConfidence !== null" class="h-1 w-full overflow-hidden rounded-full bg-muted">
                 <div
                   class="h-full rounded-full transition-[width]"
-                  :class="confBarCls(focused.birdConfidence)"
-                  :style="{ width: `${confPercent(focused.birdConfidence)}%` }"
+                  :class="confBarCls(displayConfidence)"
+                  :style="{ width: `${confPercent(displayConfidence)}%` }"
                 />
               </div>
             </template>
-            <!-- 待复核：提示文案 -->
-            <div v-if="focused.recognitionStatus === 'NeedsReview'" class="text-xs text-muted-foreground">
-              识别结果需人工复核
+            <!-- 待复核：失败阶段中文提示 + 最接近候选 -->
+            <template v-if="focused.recognitionStatus === 'NeedsReview'">
+              <div v-if="failureText" class="text-xs text-label-yellow">{{ failureText }}</div>
+              <div v-if="bestCandidate" class="text-xs text-muted-foreground">
+                最接近：{{ bestCandidate.name }} {{ bestCandidate.confidence.toFixed(1) }}%
+              </div>
+            </template>
+            <!-- 眼锐度行（完整结果才有；info 图标悬浮显示评分公式） -->
+            <div
+              v-if="fullRecognition?.eyeSharpness != null"
+              class="flex items-center gap-1 text-xs text-muted-foreground"
+              :title="EYE_SHARPNESS_TIP"
+            >
+              <span class="font-mono-num">眼锐度 {{ fullRecognition.eyeSharpness.toFixed(2) }}</span>
+              <InfoIcon class="size-3 shrink-0 text-muted-foreground/70" />
             </div>
             <!-- 动作行：重新识别 + 检测框 -->
             <div class="flex justify-end gap-1">
@@ -524,6 +684,40 @@ function valueCls(v: number): string {
               <Button size="sm" variant="ghost" @click="onToggleBbox">
                 {{ preview.bboxVisible ? '隐藏检测框' : '显示检测框' }}
               </Button>
+            </div>
+            <!-- 修正鸟种：展开 → 搜索下拉（名录全量，选即修正，对齐 GPUI correction_open） -->
+            <div ref="correctBoxEl" class="relative">
+              <Button size="sm" variant="ghost" class="w-full justify-start" @click="toggleCorrect">
+                <PencilIcon data-icon="inline-start" />
+                {{ correctOpen ? '收起修正' : '修正鸟种…' }}
+              </Button>
+              <!-- 向上展开：识别卡位于面板底部，向下会被滚动容器裁切 -->
+              <div
+                v-if="correctOpen"
+                class="absolute right-0 bottom-full z-20 mb-1 w-full overflow-hidden rounded-md border border-border bg-popover shadow-md"
+              >
+                <input
+                  v-model="correctSearch"
+                  type="text"
+                  class="w-full border-b border-border bg-transparent px-2 py-1.5 text-xs outline-none placeholder:text-muted-foreground"
+                  placeholder="搜索鸟种…"
+                  @click.stop
+                />
+                <div class="max-h-40 overflow-y-auto">
+                  <button
+                    v-for="n in correctOptions"
+                    :key="n"
+                    type="button"
+                    class="block w-full cursor-pointer truncate px-2 py-1 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                    @click="onCorrectSelect(n)"
+                  >
+                    {{ n }}
+                  </button>
+                  <div v-if="correctOptions.length === 0" class="px-2 py-1 text-xs text-muted-foreground">
+                    无匹配鸟种
+                  </div>
+                </div>
+              </div>
             </div>
           </template>
         </div>
@@ -557,8 +751,8 @@ function valueCls(v: number): string {
                 aria-label="曝光"
                 @input="onSliderInput('exposure', $event)"
               />
-              <span class="w-16 shrink-0 text-right font-mono-num text-xs" :class="valueCls(adj.exposure)">
-                {{ fmtExposure(adj.exposure) }}
+              <span class="w-16 shrink-0 text-right font-mono-num text-xs" :class="valueCls(adj.exposure ?? 0)">
+                {{ fmtExposure(adj.exposure ?? 0) }}
               </span>
               <button
                 v-if="adj.exposure !== 0"
@@ -583,8 +777,8 @@ function valueCls(v: number): string {
                 aria-label="对比度"
                 @input="onSliderInput('contrast', $event)"
               />
-              <span class="w-16 shrink-0 text-right font-mono-num text-xs" :class="valueCls(adj.contrast)">
-                {{ fmtSigned(adj.contrast) }}
+              <span class="w-16 shrink-0 text-right font-mono-num text-xs" :class="valueCls(adj.contrast ?? 0)">
+                {{ fmtSigned(adj.contrast ?? 0) }}
               </span>
               <button
                 v-if="adj.contrast !== 0"
@@ -609,8 +803,8 @@ function valueCls(v: number): string {
                 aria-label="饱和度"
                 @input="onSliderInput('saturation', $event)"
               />
-              <span class="w-16 shrink-0 text-right font-mono-num text-xs" :class="valueCls(adj.saturation)">
-                {{ fmtSigned(adj.saturation) }}
+              <span class="w-16 shrink-0 text-right font-mono-num text-xs" :class="valueCls(adj.saturation ?? 0)">
+                {{ fmtSigned(adj.saturation ?? 0) }}
               </span>
               <button
                 v-if="adj.saturation !== 0"

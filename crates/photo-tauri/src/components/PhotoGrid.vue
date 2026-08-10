@@ -9,6 +9,8 @@ import { useCapturesStore } from '@/stores/captures'
 import { useFilterStore } from '@/stores/filter'
 import { useSelectionStore } from '@/stores/selection'
 import { usePreviewStore } from '@/stores/preview'
+import { useContextMenuStore, captureMenuItems } from '@/stores/contextMenu'
+import { useConfigStore } from '@/stores/config'
 import { ptimgUrl } from '@/lib/ipc'
 import {
   displayName,
@@ -23,12 +25,14 @@ const captures = useCapturesStore()
 const filter = useFilterStore()
 const selection = useSelectionStore()
 const preview = usePreviewStore()
+const contextMenu = useContextMenuStore()
+const config = useConfigStore()
 
-/** 网格布局常量：4 列、行高约 240px、行距 gap-1.5（6px）、容器内边距 6px */
+/** 网格布局常量：4 列；行高跟随后端配置 thumbnailSize（cell = thumbnailSize + 56，对齐 GPUI grid.rs cell_size），行距 gap-1.5（6px）、容器内边距 6px */
 const COLS = 4
-const ROW_HEIGHT = 240
+const ROW_HEIGHT = computed(() => config.rowHeight)
 const ROW_GAP = 6
-const ROW_STEP = ROW_HEIGHT + ROW_GAP
+const ROW_STEP = computed(() => ROW_HEIGHT.value + ROW_GAP)
 const PAD = 6
 /** 可见行窗口的缓冲行数（拖动滚动条时即将进入视口的行提前就绪） */
 const BUFFER_ROWS = 2
@@ -52,15 +56,15 @@ const displayIndices = computed(() => filter.filteredIndices)
 const rowCount = computed(() => Math.ceil(displayIndices.value.length / COLS))
 /** 撑出滚动高度的占位容器（rows 绝对定位在其中） */
 const spacerH = computed(() =>
-  rowCount.value === 0 ? 0 : PAD * 2 + rowCount.value * ROW_STEP - ROW_GAP,
+  rowCount.value === 0 ? 0 : PAD * 2 + rowCount.value * ROW_STEP.value - ROW_GAP,
 )
 
 /** 可见行窗口：可见行 ± 2 行缓冲，钳制到 [0, rowCount) */
 const visibleRowList = computed(() => {
   const rows = rowCount.value
   if (rows === 0) return []
-  const first = Math.max(0, Math.floor(scrollTop.value / ROW_STEP) - BUFFER_ROWS)
-  const last = Math.min(rows, Math.ceil((scrollTop.value + viewportH.value) / ROW_STEP) + BUFFER_ROWS)
+  const first = Math.max(0, Math.floor(scrollTop.value / ROW_STEP.value) - BUFFER_ROWS)
+  const last = Math.min(rows, Math.ceil((scrollTop.value + viewportH.value) / ROW_STEP.value) + BUFFER_ROWS)
   const out: number[] = []
   for (let r = first; r < last; r++) out.push(r)
   return out
@@ -130,6 +134,25 @@ function onCellDblClick(i: number) {
   preview.openPreview()
 }
 
+/**
+ * 右键菜单：先聚焦到被点项（不在多选中则独占选中、已在多选中保持多选，
+ * 对齐 GPUI focus_for_context_menu），再弹出图片菜单（动作作用于选中集）。
+ */
+function onCellContextMenu(i: number, e: MouseEvent) {
+  if (!selection.isSelected(i)) selection.select(i)
+  contextMenu.openMenu(
+    captureMenuItems({
+      meta: captures.items[i] ?? null,
+      inPreview: false,
+      selectedCount: selection.selectedIndices.length,
+      paths: selection.selectedPaths,
+      onToggleView: () => preview.openPreview(),
+    }),
+    e.clientX,
+    e.clientY,
+  )
+}
+
 // 方向键移动选中后滚动到可见区。虚拟化下目标 cell 可能尚未渲染，
 // 不依赖 scrollIntoView，直接按显示位（filteredIndices 中的位置）计算目标 scrollTop。
 // 原生 scroll 事件在部分环境（无头/隐藏页）对程序化滚动不可靠，故同步写 scrollTop ref。
@@ -142,8 +165,8 @@ watch(
     // 选中项不在显示序中（被筛选掉）时不滚动
     const pos = displayIndices.value.indexOf(i)
     if (pos < 0) return
-    const rowTop = PAD + Math.floor(pos / COLS) * ROW_STEP
-    const rowBottom = rowTop + ROW_HEIGHT
+    const rowTop = PAD + Math.floor(pos / COLS) * ROW_STEP.value
+    const rowBottom = rowTop + ROW_HEIGHT.value
     let target = el.scrollTop
     if (rowTop < el.scrollTop) {
       target = rowTop
@@ -157,8 +180,8 @@ watch(
   },
 )
 
-// 内容行数变化（筛选/重扫）导致滚动位置越界时收敛（同步 ref，见上注释）
-watch(rowCount, () => {
+// 内容行数/行高变化（筛选/重扫/设置缩略图尺寸）导致滚动位置越界时收敛（同步 ref，见上注释）
+watch([rowCount, ROW_STEP], () => {
   const el = scrollEl.value
   if (!el) return
   const max = Math.max(0, spacerH.value - el.clientHeight)
@@ -201,9 +224,10 @@ watch(rowCount, () => {
           :data-grid-cell="i"
           class="group relative flex cursor-pointer flex-col overflow-hidden rounded-md border bg-card select-none"
           :class="cellClass(i)"
-          style="content-visibility: auto; contain-intrinsic-size: auto 240px"
+          :style="{ contentVisibility: 'auto', containIntrinsicSize: 'auto ' + ROW_HEIGHT + 'px' }"
           @click="onCellClick(i, $event)"
           @dblclick="onCellDblClick(i)"
+          @contextmenu.prevent="onCellContextMenu(i, $event)"
         >
           <!-- 缩略图区（占满剩余高度，作为徽标/旗标定位容器） -->
           <div class="relative min-h-0 flex-1 overflow-hidden bg-muted">

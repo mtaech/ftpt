@@ -74,27 +74,29 @@ crates/photo-tauri/           # 新前端根（npm + tauri 项目）
 - [ ] **出口验收**：浏览/标记/筛选/预览全流程 parity 对照附录 A §1-§11 逐项打勾（wave 3 前做）
 - [ ] 虚拟网格：固定 4 列、行级虚拟化、可见 ±2 行预取、cell 全套徽标（格式/旗标/星级/鸟种状态/色标条/OTHER）、单击/Ctrl/Shift 选择语义（anchor 逻辑移植 metadata.rs）、双击进预览
 - [ ] keybinding 层：复刻 layout.rs 全部 24 组键位（含 1-5/0/6-9/P/X/U/B/Ctrl+B/Ctrl+Shift+B/V/G/方向键/Home/End/Delete/Ctrl+A/Ctrl+D/Esc/F5/Ctrl+[ / Ctrl+]），焦点上下文隔离（输入框内不触发）
-- [ ] 预览：滚轮以光标为中心缩放（×1.25 步进）、拖拽平移、缩放栏（−/%/+/1:1/检测框开关）、加载浮层、filmstrip（点击跳转/焦点高亮/横滚预取）、检测框+眼角标叠加（V 键同步）
-- [ ] Shift+拖拽框选识别（<8px 忽略、实时 accent 框、pending 框）
-- [ ] 筛选栏：折叠 chips + 排序下拉 + 鸟种多选搜索（shadcn-vue Combobox）+ 评分≥N + 旗标/识别/格式 chips + 清除全部；**补齐**日期筛选控件与色标筛选入口（Q9）
-- **出口**：浏览/标记/筛选/预览全流程 parity；全部快捷键可用（对照附录 A §1 逐键验证）
+- [x] 预览：滚轮以光标为中心缩放（×1.25 步进）、拖拽平移、缩放栏（−/%/+/1:1/检测框开关）、加载浮层、filmstrip（点击跳转/焦点高亮/横滚预取）、检测框叠加（V 键同步；眼角标叠加因 CaptureMeta 无 eye 字段，信息面板经 get_recognition 展示眼锐度）
+- [x] Shift+拖拽框选识别（<8px 忽略、实时 accent 框、pending 框，Esc/再拖清除；识别调用 Phase 3 已接）
+- [x] 筛选栏：折叠 chips + 排序下拉 + 鸟种多选搜索 + 评分≥N + 旗标/识别/格式 chips + 清除全部；**补齐**日期筛选控件与色标筛选入口（Q9）
+- [ ] **出口**：浏览/标记/筛选/预览全流程 parity；全部快捷键可用（对照附录 A §1 逐键验证）——功能全部真机验证通过，附录 A 逐项打勾待 wave 3 收尾记录
 
 ### Phase 3 — 识别与操作（约 6–8 天）
 
-- [ ] 识别 UI 全家桶：单张（B/按钮/右键）、多选、批量未识别（Ctrl+B）、重新识别全部（Ctrl+Shift+B + 确认框）、修正鸟种名录搜索下拉（Confirmed/100%/保留框眼数据）、状态栏进度（n/m·文件名·统计 + ✕/Esc 取消）、逐张回填
-- [ ] 识别线程数配置生效（1–4）
-- [ ] 批量文件操作两阶段：筛选驱动（无筛选禁用 + 黄字警告）、同步同名开关 + 格式 chips、移动到/复制到（一步式对话框，目标=源拒绝 toast）、删除（红色确认框 + 前 20 条清单 + 同名同步计数警告）、进度条 + 进度弹窗 + 结果明细（成功 N/失败 M）、移动/删除后全量重扫
-- [ ] 上下文菜单两套：capture_menu（网格/预览变体）+ folder_menu（收藏/移除）
-- [ ] 信息面板全 tab：hero/识别（状态 chip/置信度条/眼锐度+公式 tooltip）/拍摄信息/评分/色标/旗标 + **调整 tab**（三 slider + 独立重置 + 重置全部 + 导出，Rust 渲染链路）
-- [ ] 侧栏：打开目录、当前目录卡片、收藏/最近打开文件夹卡片 + 右键菜单
-- **出口**：识别与文件操作 parity（对照附录 A §13/§14/§16 逐项）
+> 2026-08-10 wave 3 并行完成（BackendPhase3/RecognizeUi/BatchOpsUi/ContextMenus/SettingsUi/ExportBindings）：17→24 commands、识别/批量/右键/设置全部真机验证（E:\图片\2026-06-28，378 张 RW2，识别落库 confirmed 蓝喉蜂虎 97.9%/99.8%）。
+
+- [x] 识别 UI 全家桶：单张（B/rail 按钮/右键）、多选、批量未识别（Ctrl+B）、重新识别全部（Ctrl+Shift+B；**确认框未做**——直接执行，GPUI 确认语义待补）、修正鸟种名录搜索下拉（Confirmed/100%/保留框眼数据）、状态栏进度（n/m·文件名·统计 + ✕/Esc 取消）、逐张回填（thumb:ready + reload）
+- [x] 识别线程数配置生效（1–4；recognize_captures 读 config.recognition_thread_count；设置弹窗可改）
+- [x] 批量文件操作两阶段：筛选驱动（无筛选禁用 + 黄字警告）、同步同名开关 + 格式 chips、移动到/复制到（一步式对话框，目标=源拒绝 toast）、删除（红色确认框 + 前 20 条清单 + 同名同步计数警告）、进度条 + 进度弹窗 + 结果明细（成功 N/失败 M）、移动/删除后全量重扫
+- [x] 上下文菜单两套：capture_menu（网格/预览变体）+ folder_menu（收藏/移除）
+- [~] 信息面板全 tab：hero/识别（状态 chip/置信度条/眼锐度+公式 tooltip）/拍摄信息/评分/色标/旗标 + **调整 tab**（三 slider + 独立重置 + 重置全部；**导出按钮未接前端**——后端 export_adjusted 命令已就绪，接线待补）
+- [x] 侧栏：打开目录、当前目录卡片、收藏/最近打开文件夹卡片 + 右键菜单
+- **出口**：识别与文件操作 parity（对照附录 A §13/§14/§16）——功能全部真机验证通过，逐项打勾待收尾记录
 
 ### Phase 4 — 收尾与切换（约 4–5 天）
 
-- [ ] 设置弹窗：通用（字体下拉 + 识别线程数 + **缩略图尺寸控件** Q9）、快捷键参考页、关于页
-- [ ] 单删无确认等交互按 Q10 **原样**移植
-- [ ] 打包：Windows NSIS（WebView2 bootstrap + DirectML.dll + models/ + data/ 便携布局）；Linux deb/AppImage（WebKitGTK 依赖声明 + libraw 链接沿用 .cargo/config.toml 方案）
-- [ ] **parity 验收**：双 app 同目录对照，按附录 A 清单逐项打勾（Q1 决策的代价在此兜底——任何性能不达标项此处暴露并返工）
+- [x] 设置弹窗：通用（字体下拉 listSystemFonts + 识别线程数 1–4 + **缩略图尺寸控件** Q9 即时生效）、快捷键参考页、关于页；改动即保存（setAppConfig）；主题/字体即时应用
+- [x] 单删无确认等交互按 Q10 **原样**移植（Delete 键直接回收站删除，无确认框）
+- [~] 打包：**未做**——Windows NSIS（WebView2 bootstrap + DirectML.dll + models/ + data/ 便携布局）需生成 icon + resources 配置；Linux deb/AppImage 需 Linux 环境（本机 Windows，标注为环境限制）
+- [~] **parity 验收**：功能层真机验证全过（浏览/标记/筛选/识别/批量/右键/设置/预览）；附录 A 逐项打勾记录待补；性能（24MP 1:1 + 500 cell 滚动）待正式测量
 - [ ] 删除 `photo-tool-app` crate，更新 AGENTS.md / CONTEXT.md / 本计划标注完成
 - **出口**：验收清单全绿 + 两平台安装包人工冒烟通过
 

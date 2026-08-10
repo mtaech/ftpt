@@ -5,7 +5,6 @@ members = [
     "crates/photo-engine",
     "crates/photo-config",
     "crates/photo-recognize",
-    "crates/photo-tool-app",
     "crates/rawlib",
     "crates/photo-tauri/src-tauri",
 ]

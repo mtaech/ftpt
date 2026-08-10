@@ -6,9 +6,18 @@ import { useStorage } from '@vueuse/core'
 import { ClockIcon, FolderOpenIcon, StarIcon, XIcon } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { useCapturesStore } from '@/stores/captures'
-import { addFavorite, listFavorites, listRecent, removeFavorite } from '@/lib/ipc'
+import { useContextMenuStore, type ContextMenuItem } from '@/stores/contextMenu'
+import {
+  addFavorite,
+  getAppConfig,
+  listFavorites,
+  listRecent,
+  removeFavorite,
+  setAppConfig,
+} from '@/lib/ipc'
 
 const captures = useCapturesStore()
+const contextMenu = useContextMenuStore()
 
 // ── 宽度：可拖拽，localStorage 持久化，范围 200–480（对齐 GPUI 左栏 size_range）──
 const width = useStorage('ftpt.leftPanelWidth', 180)
@@ -53,10 +62,8 @@ const isFav = computed(() =>
   captures.directory ? favorites.value.includes(captures.directory) : false,
 )
 
-/** 收藏当前目录：已收藏则取消，否则添加；失败重拉列表回滚 */
-async function toggleFavorite() {
-  const dir = captures.directory
-  if (!dir) return
+/** 收藏/取消收藏指定目录（按钮与右键菜单共用）；失败重拉列表回滚 */
+async function toggleFavFor(dir: string) {
   try {
     if (favorites.value.includes(dir)) {
       await removeFavorite(dir)
@@ -71,6 +78,13 @@ async function toggleFavorite() {
   }
 }
 
+/** 收藏当前目录（顶部按钮）：已收藏则取消，否则添加 */
+async function toggleFavorite() {
+  const dir = captures.directory
+  if (!dir) return
+  await toggleFavFor(dir)
+}
+
 /** 移除收藏（卡片小按钮 / 右键菜单） */
 async function removeFav(dir: string) {
   try {
@@ -80,6 +94,64 @@ async function removeFav(dir: string) {
     console.error('取消收藏失败，重拉列表', e)
     await loadLists()
   }
+}
+
+/**
+ * 从最近列表移除（右键菜单）。后端无独立 remove_recent 命令（对齐 GPUI
+ * RemoveContextDir 直接改配置），经 getAppConfig/setAppConfig 持久化；
+ * 本地先乐观移除保证列表即时刷新（mock 层 listRecent 不读配置，仅本地生效）。
+ */
+async function removeRecentDir(dir: string) {
+  recents.value = recents.value.filter((r) => r !== dir)
+  try {
+    const cfg = await getAppConfig()
+    await setAppConfig({
+      ...cfg,
+      recentDirectories: (cfg.recentDirectories ?? []).filter((r) => r !== dir),
+    })
+  } catch (e) {
+    console.error('从最近移除失败，重拉列表', e)
+    await loadLists()
+  }
+}
+
+/**
+ * 文件夹卡片右键菜单（对齐 GPUI folder_menu + 打开）：
+ * 打开 / 加入收藏|取消收藏（按当前收藏态切换）/ 从最近移除（该目录在最近列表时显示）。
+ */
+function onFolderContextMenu(dir: string, e: MouseEvent) {
+  const items: ContextMenuItem[] = [
+    { kind: 'item', label: '打开', action: () => void openPath(dir) },
+    {
+      kind: 'item',
+      label: favorites.value.includes(dir) ? '取消收藏' : '加入收藏',
+      action: () => void toggleFavFor(dir),
+    },
+  ]
+  if (recents.value.includes(dir)) {
+    items.push(
+      { kind: 'sep' },
+      { kind: 'item', label: '从最近移除', action: () => void removeRecentDir(dir) },
+    )
+  }
+  contextMenu.openMenu(items, e.clientX, e.clientY)
+}
+
+/** 当前目录卡片右键：收藏切换（对齐顶部「收藏当前目录」按钮语义） */
+function onCurrentDirContextMenu(e: MouseEvent) {
+  const dir = captures.directory
+  if (!dir) return
+  contextMenu.openMenu(
+    [
+      {
+        kind: 'item',
+        label: favorites.value.includes(dir) ? '取消收藏' : '加入收藏',
+        action: () => void toggleFavFor(dir),
+      },
+    ],
+    e.clientX,
+    e.clientY,
+  )
 }
 
 /** 单击收藏/最近卡片：直接打开该目录（复用 captures.openPath） */
@@ -118,8 +190,11 @@ async function openPath(dir: string) {
 
     <!-- 滚动列表区 -->
     <div class="min-h-0 flex-1 overflow-y-auto p-2">
-      <!-- 当前目录卡片：目录名 + 照片计数（对齐 GPUI sidebar 目录行） -->
-      <div class="mb-2 flex items-center gap-1 rounded-md border bg-card px-2 py-1.5">
+      <!-- 当前目录卡片：目录名 + 照片计数（对齐 GPUI sidebar 目录行；右键收藏切换） -->
+      <div
+        class="mb-2 flex items-center gap-1 rounded-md border bg-card px-2 py-1.5"
+        @contextmenu.prevent="onCurrentDirContextMenu($event)"
+      >
         <div class="min-w-0 flex-1">
           <div v-if="captures.directory" class="truncate text-sm" :title="captures.directory">
             {{ dirName(captures.directory) }}
@@ -145,7 +220,7 @@ async function openPath(dir: string) {
         class="group mb-0.5 flex cursor-pointer items-center gap-1 rounded-md border border-transparent px-2 py-1 hover:border-border hover:bg-accent"
         :title="dir"
         @click="openPath(dir)"
-        @contextmenu.prevent="removeFav(dir)"
+        @contextmenu.prevent="onFolderContextMenu(dir, $event)"
       >
         <StarIcon class="size-3 shrink-0 text-primary" />
         <div class="min-w-0 flex-1">
@@ -176,6 +251,7 @@ async function openPath(dir: string) {
         class="group mb-0.5 flex cursor-pointer items-center gap-1 rounded-md border border-transparent px-2 py-1 hover:border-border hover:bg-accent"
         :title="dir"
         @click="openPath(dir)"
+        @contextmenu.prevent="onFolderContextMenu(dir, $event)"
       >
         <FolderOpenIcon class="size-3 shrink-0 text-muted-foreground" />
         <div class="min-w-0 flex-1">

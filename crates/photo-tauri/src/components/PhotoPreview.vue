@@ -9,6 +9,7 @@ import Filmstrip from '@/components/Filmstrip.vue'
 import { useCapturesStore } from '@/stores/captures'
 import { useSelectionStore } from '@/stores/selection'
 import { usePreviewStore } from '@/stores/preview'
+import { useContextMenuStore, captureMenuItems } from '@/stores/contextMenu'
 import { ptimgUrl } from '@/lib/ipc'
 import { displayName } from '@/lib/format'
 import type { BBox } from '@/lib/bindings'
@@ -20,6 +21,7 @@ const PAD = 16
 const captures = useCapturesStore()
 const selection = useSelectionStore()
 const preview = usePreviewStore()
+const contextMenu = useContextMenuStore()
 
 const containerRef = useTemplateRef<HTMLElement>('container')
 /** 扣除内边距后的可用容器尺寸 */
@@ -48,10 +50,11 @@ const drawBox = ref<{ x1: number; y1: number; x2: number; y2: number } | null>(n
 function normRectToPx(b: BBox): { left: number; top: number; width: number; height: number } {
   const [dw, dh] = disp.value
   const [ox, oy] = origin.value
-  const x1 = Math.min(b.x1, b.x2)
-  const y1 = Math.min(b.y1, b.y2)
-  const x2 = Math.max(b.x1, b.x2)
-  const y2 = Math.max(b.y1, b.y2)
+  // specta 对 f32 字段防御性标为 number | null；后端实际恒有值，null 时按 0 兜底
+  const x1 = Math.min(b.x1 ?? 0, b.x2 ?? 0)
+  const y1 = Math.min(b.y1 ?? 0, b.y2 ?? 0)
+  const x2 = Math.max(b.x1 ?? 0, b.x2 ?? 0)
+  const y2 = Math.max(b.y1 ?? 0, b.y2 ?? 0)
   return {
     left: ox + PAD + x1 * dw,
     top: oy + PAD + y1 * dh,
@@ -254,6 +257,31 @@ function zoomStep(direction: 1 | -1) {
   const center: Vec2 = [containerSize.value[0] / 2, containerSize.value[1] / 2]
   preview.zoomBy(direction, containerSize.value, natural.value, center)
 }
+
+/**
+ * 图片区右键菜单（预览变体，对齐 GPUI capture_menu(in_preview=true)）：
+ * 首项返回网格 + 缩放组（以容器中心为锚点，同工具条 zoomStep）。
+ */
+function onImageContextMenu(e: MouseEvent) {
+  const center: Vec2 = [containerSize.value[0] / 2, containerSize.value[1] / 2]
+  contextMenu.openMenu(
+    captureMenuItems({
+      meta: selection.selected,
+      inPreview: true,
+      selectedCount: selection.selectedIndices.length,
+      paths: selection.selectedPaths,
+      onToggleView: () => preview.toggleView(),
+      zoom: {
+        in: () => preview.zoomBy(1, containerSize.value, natural.value, center),
+        out: () => preview.zoomBy(-1, containerSize.value, natural.value, center),
+        fit: () => preview.zoomFit(),
+        actual: () => preview.zoomOneToOne(),
+      },
+    }),
+    e.clientX,
+    e.clientY,
+  )
+}
 </script>
 
 <template>
@@ -268,6 +296,7 @@ function zoomStep(direction: 1 | -1) {
       @pointermove="onPointerMove"
       @pointerup="onPointerUp"
       @pointercancel="onPointerUp"
+      @contextmenu.prevent="onImageContextMenu"
     >
       <!-- 加载中骨架 -->
       <Skeleton v-if="loading" class="absolute rounded-none" :style="{ inset: `${PAD}px` }" />

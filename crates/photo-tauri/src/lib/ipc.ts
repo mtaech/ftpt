@@ -12,6 +12,7 @@ import {
   type CaptureMeta,
   type ColorLabel,
   type Flag,
+  type Recognition,
 } from './bindings'
 import { mockCommands, mockListen, placeholderImage } from './mock'
 
@@ -21,37 +22,84 @@ export const isTauri =
 
 const api = isTauri ? commands : mockCommands
 
+// ── 解包 tauri-specta Result 模式命令 ──────────────────────
+// tauri-specta 默认 ErrorHandlingMode::Result：Result 命令的生成物 resolve
+// 为 { status:'ok', data } | { status:'error', error }，而不是 reject。
+// 这里解包回 Promise<T> + reject 形态，stores 的 try/catch 回滚语义无需改动。
+
+/** 解包 Result<T, E> 命令：error 抛错（保留调用方 reject 契约），ok 返回 data */
+async function unwrap<T>(
+  p: Promise<{ status: 'ok'; data: T } | { status: 'error'; error: unknown }>,
+): Promise<T> {
+  const r = await p
+  if (r.status === 'error') {
+    throw new Error(typeof r.error === 'string' ? r.error : JSON.stringify(r.error))
+  }
+  return r.data
+}
+
+/** 解包 Result<(), E> 命令（Ok 侧生成物为 null）：统一映射为 void */
+async function unwrapVoid<E>(
+  p: Promise<{ status: 'ok'; data: null } | { status: 'error'; error: E }>,
+): Promise<void> {
+  await unwrap(p)
+}
+
 // ── commands（契约 6 个） ─────────────────────────────
 
-export const pickDirectory: () => Promise<string | null> = api.pickDirectory
-export const scanDirectory: (path: string) => Promise<number> = api.scanDirectory
-export const getCaptures: () => Promise<CaptureMeta[]> = api.getCaptures
-export const setRating: (paths: string[], rating: number) => Promise<void> = api.setRating
-export const setFlag: (paths: string[], flag: Flag | null) => Promise<void> = api.setFlag
-export const setColorLabel: (paths: string[], label: ColorLabel | null) => Promise<void> =
-  api.setColorLabel
+export const pickDirectory: () => Promise<string | null> = () => api.pickDirectory()
+export const scanDirectory: (path: string) => Promise<number> = (path) => api.scanDirectory(path)
+export const getCaptures: () => Promise<CaptureMeta[]> = () => api.getCaptures()
+export const setRating: (paths: string[], rating: number) => Promise<void> = (paths, rating) =>
+  unwrapVoid(api.setRating(paths, rating))
+export const setFlag: (paths: string[], flag: Flag | null) => Promise<void> = (paths, flag) =>
+  unwrapVoid(api.setFlag(paths, flag))
+export const setColorLabel: (paths: string[], label: ColorLabel | null) => Promise<void> = (
+  paths,
+  label,
+) => unwrapVoid(api.setColorLabel(paths, label))
 
 // ── Phase 2/3 commands ──────────────────────────────
 
-export const listFavorites: () => Promise<string[]> = api.listFavorites
-export const addFavorite: (path: string) => Promise<void> = api.addFavorite
-export const removeFavorite: (path: string) => Promise<void> = api.removeFavorite
-export const listRecent: () => Promise<string[]> = api.listRecent
-export const listBirdSpecies: () => Promise<string[]> = api.listBirdSpecies
-export const recognizeCaptures: (paths: string[]) => Promise<void> = api.recognizeCaptures
-export const cancelRecognition: () => Promise<void> = api.cancelRecognition
+export const listFavorites: () => Promise<string[]> = () => api.listFavorites()
+export const addFavorite: (path: string) => Promise<void> = (path) => api.addFavorite(path)
+export const removeFavorite: (path: string) => Promise<void> = (path) => api.removeFavorite(path)
+export const listRecent: () => Promise<string[]> = () => api.listRecent()
+export const listBirdSpecies: () => Promise<string[]> = () => unwrap(api.listBirdSpecies())
+export const recognizeCaptures: (paths: string[]) => Promise<void> = (paths) =>
+  unwrapVoid(api.recognizeCaptures(paths))
+export const cancelRecognition: () => Promise<void> = () => api.cancelRecognition()
 export const batchOpPreview: (
   op: BatchOpType,
   options: BatchOpOptions,
-) => Promise<BatchOpPreview> = api.batchOpPreview
+) => Promise<BatchOpPreview> = (op, options) => unwrap(api.batchOpPreview(op, options))
 export const batchOpExecute: (
   op: BatchOpType,
   options: BatchOpOptions,
-) => Promise<BatchOpResult> = api.batchOpExecute
-export const getAdjustments: (path: string) => Promise<AdjustParams> = api.getAdjustments
-export const setAdjustments: (path: string, params: AdjustParams) => Promise<void> =
-  api.setAdjustments
-export const getAppConfig: () => Promise<AppConfig> = api.getAppConfig
+) => Promise<BatchOpResult> = (op, options) => unwrap(api.batchOpExecute(op, options))
+export const getAdjustments: (path: string) => Promise<AdjustParams> = (path) =>
+  api.getAdjustments(path)
+export const setAdjustments: (path: string, params: AdjustParams) => Promise<void> = (
+  path,
+  params,
+) => unwrapVoid(api.setAdjustments(path, params))
+export const getAppConfig: () => Promise<AppConfig> = () => api.getAppConfig()
+
+// ── Phase 3 commands ────────────────────────────────
+
+export const getRecognition: (path: string) => Promise<Recognition | null> = (path) =>
+  unwrap(api.getRecognition(path))
+export const correctBird: (path: string, birdName: string) => Promise<void> = (path, birdName) =>
+  unwrapVoid(api.correctBird(path, birdName))
+export const deleteCaptures: (paths: string[]) => Promise<void> = (paths) =>
+  unwrapVoid(api.deleteCaptures(paths))
+export const exportAdjusted: (path: string, outputDir: string | null) => Promise<string> = (
+  path,
+  outputDir,
+) => unwrap(api.exportAdjusted(path, outputDir))
+export const listSystemFonts: () => Promise<string[]> = () => unwrap(api.listSystemFonts())
+export const setAppConfig: (config: AppConfig) => Promise<void> = (config) =>
+  unwrapVoid(api.setAppConfig(config))
 
 // ── ptimg:// 自定义协议 URL ───────────────────────────
 
