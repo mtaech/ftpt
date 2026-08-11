@@ -4,50 +4,50 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
- * Catppuccin 双主题 → shadcn 语义变量全套映射。
- * 深色 = Mocha（默认，html.dark），亮色 = Latte（:root 预留，Phase 2 接切换）。
- * 取色角色参照 crates/photo-tool-app/src/ui/theme.rs 的 token 分层：
- * background(网格区底色) < card/surface(面板) < muted(元素底) < accent(悬浮)。
+ * 双主题 → shadcn 语义变量全套映射。
+ * 亮色（默认，:root）：专业简洁风格——明亮冷灰底 + 纯白卡片、强线条（高对比边框）、
+ * 弱圆角（--radius 4px）、蓝色主题色。深色 = Catppuccin Mocha（html.dark，设置里切换）。
+ * 取色分层：background(网格区底色) < sidebar(侧栏) < card(卡片/面板，纯白)。
  */
 
-/* ── Latte（亮，预留） ─────────────────────────────── */
+/* ── 亮色（默认）：专业简洁 · 强线条 · 卡片 · 蓝 ────── */
 :root {
-  --background: #e6e9ef; /* mantle */
-  --foreground: #4c4f69; /* text */
-  --card: #eff1f5; /* base */
-  --card-foreground: #4c4f69;
-  --popover: #eff1f5;
-  --popover-foreground: #4c4f69;
-  --primary: #1e66f5; /* blue */
-  --primary-foreground: #eff1f5;
-  --secondary: #ccd0da; /* surface0 */
-  --secondary-foreground: #4c4f69;
-  --muted: #ccd0da;
-  --muted-foreground: #6c6f85; /* subtext0 */
-  --accent: #bcc0cc; /* surface1，悬浮底 */
-  --accent-foreground: #4c4f69;
-  --destructive: #d20f39; /* red */
-  --border: #c4c8d4;
-  --input: #bcc0cc;
-  --ring: #1e66f5;
-  --chart-1: #1e66f5;
-  --chart-2: #179299;
-  --chart-3: #40a02b;
-  --chart-4: #df8e1d;
-  --chart-5: #d20f39;
-  --sidebar: #dce0e8; /* crust */
-  --sidebar-foreground: #4c4f69;
-  --sidebar-primary: #1e66f5;
-  --sidebar-primary-foreground: #eff1f5;
-  --sidebar-accent: #bcc0cc;
-  --sidebar-accent-foreground: #4c4f69;
-  --sidebar-border: #c4c8d4;
-  --sidebar-ring: #1e66f5;
-  /* 高密度取向：圆角收紧 */
-  --radius: 0.375rem;
+  --background: #ebeef3; /* 冷灰画布：衬托纯白卡片与白色 chrome */
+  --foreground: #1e293b; /* slate-800：高对比正文 */
+  --card: #ffffff; /* 纯白卡片 */
+  --card-foreground: #1e293b;
+  --popover: #ffffff;
+  --popover-foreground: #1e293b;
+  --primary: #2563eb; /* blue-600：主题蓝 */
+  --primary-foreground: #ffffff;
+  --secondary: #e8edf4;
+  --secondary-foreground: #1e293b;
+  --muted: #edf1f6;
+  --muted-foreground: #64748b; /* slate-500 */
+  --accent: #e2e9f2; /* 悬浮底 */
+  --accent-foreground: #1e293b;
+  --destructive: #dc2626;
+  --border: #c2cbd8; /* 强线条：亮底下清晰可辨的分隔线 */
+  --input: #b9c3d2;
+  --ring: #2563eb;
+  --chart-1: #2563eb;
+  --chart-2: #0d9488;
+  --chart-3: #16a34a;
+  --chart-4: #d97706;
+  --chart-5: #dc2626;
+  --sidebar: #e9edf3; /* 侧栏：介于底与卡片之间 */
+  --sidebar-foreground: #1e293b;
+  --sidebar-primary: #2563eb;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #dde4ee;
+  --sidebar-accent-foreground: #1e293b;
+  --sidebar-border: #c2cbd8;
+  --sidebar-ring: #2563eb;
+  /* 弱圆角：sm=0 / md=2px / lg=4px / xl=8px */
+  --radius: 0.25rem;
 }
 
-/* ── Mocha（暗，默认） ─────────────────────────────── */
+/* ── Mocha（暗，设置里切换；圆角继承 :root 弱圆角） ────── */
 .dark {
   --background: #181825; /* mantle：网格区最暗一档 */
   --foreground: #cdd6f4; /* text */
@@ -80,6 +80,13 @@
   --sidebar-accent-foreground: #cdd6f4;
   --sidebar-border: #313244;
   --sidebar-ring: #89b4fa;
+  /* 暗色阴影：深黑加重，暗底上才有可见层次 */
+  --shadow-2xs: 0 1px 2px 0 rgb(0 0 0 / 0.40);
+  --shadow-xs: 0 1px 3px 0 rgb(0 0 0 / 0.45), 0 1px 2px -1px rgb(0 0 0 / 0.45);
+  --shadow-sm: 0 2px 6px -1px rgb(0 0 0 / 0.50), 0 1px 3px -1px rgb(0 0 0 / 0.45);
+  --shadow-md: 0 6px 14px -3px rgb(0 0 0 / 0.55), 0 2px 6px -2px rgb(0 0 0 / 0.45);
+  --shadow-lg: 0 14px 30px -6px rgb(0 0 0 / 0.60), 0 4px 10px -4px rgb(0 0 0 / 0.50);
+  --shadow-xl: 0 24px 48px -10px rgb(0 0 0 / 0.65), 0 8px 16px -6px rgb(0 0 0 / 0.55);
 }
 
 /* ── 领域色（评分/色标/旗标，取 theme.rs colors 模块原值） ── */
@@ -92,6 +99,15 @@
   --color-pick: #22c55e;
   --color-reject: #ef4444;
   --color-rating: #e8ab07;
+  /* 全局边框加粗：border/border-x/border-b 等不写宽度时一律 2px（细线条 = 廉价感） */
+  --default-border-width: 2px;
+  /* 抬阴影层级：卡片/按钮/浮层分层更明确（暗色在 .dark 覆盖为深黑版） */
+  --shadow-2xs: 0 1px 2px 0 rgb(15 23 42 / 0.08);
+  --shadow-xs: 0 1px 3px 0 rgb(15 23 42 / 0.10), 0 1px 2px -1px rgb(15 23 42 / 0.10);
+  --shadow-sm: 0 2px 6px -1px rgb(15 23 42 / 0.12), 0 1px 3px -1px rgb(15 23 42 / 0.10);
+  --shadow-md: 0 6px 14px -3px rgb(15 23 42 / 0.16), 0 2px 6px -2px rgb(15 23 42 / 0.10);
+  --shadow-lg: 0 14px 30px -6px rgb(15 23 42 / 0.20), 0 4px 10px -4px rgb(15 23 42 / 0.12);
+  --shadow-xl: 0 24px 48px -10px rgb(15 23 42 / 0.26), 0 8px 16px -6px rgb(15 23 42 / 0.14);
 }
 
 @theme inline {
@@ -136,17 +152,58 @@
   * {
     @apply border-border;
   }
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    /* 全局界面缩放基准：Tailwind 工具类全 rem，调这里等比放大整体 UI（默认 16 → 18 = +12.5%） */
+    font-size: 18px;
+  }
   body {
     @apply bg-background text-foreground;
     font-family: var(--font-family-app), 'Segoe UI', system-ui, -apple-system, sans-serif;
+    /* 原生应用手感：UI 文本不可选中、箭头光标、无点按高亮 */
+    user-select: none;
+    cursor: default;
+    -webkit-tap-highlight-color: transparent;
   }
-  /* 数字场景统一等宽（EXIF/文件大小/计数），对齐 theme.rs MONO_FONT_FAMILY */
-  .font-mono-num {
-    font-family: 'Cascadia Mono', 'JetBrains Mono', ui-monospace, monospace;
+  /* 可编辑区域恢复文本行为 */
+  input,
+  textarea,
+  [contenteditable='true'] {
+    user-select: text;
   }
+  input:not([type='checkbox']):not([type='radio']):not([type='range']),
+  textarea {
+    cursor: text;
+  }
+  /* 控件用原生箭头光标（非 web 手型） */
+  button,
+  [role='button'],
+  [role='tab'],
+  [role='checkbox'],
+  [role='menuitem'],
+  select,
+  label {
+    cursor: default;
+  }
+  /* 原生表单控件染主题蓝（checkbox/radio/range/progress） */
+  input,
+  select {
+    accent-color: var(--primary);
+  }
+  /* 图片不拖出重影（原生看图应用行为） */
+  img {
+    -webkit-user-drag: none;
+  }
+  /* 选中文本染色（仅输入框等可选区域可见） */
+  ::selection {
+    background: color-mix(in srgb, var(--primary) 25%, transparent);
+  }
+  /* 数字对齐用 Tailwind 内建 tabular-nums（font-variant-numeric）——只切换数字字形，
+     字体本身始终跟随 --font-family-app 全局设置，不再有硬编码字体栈 */
 }
 
-/* 常驻细滚动条（WebView2/Chromium + Firefox） */
+/* 常驻细滚动条（WebView2/Chromium + Firefox）；滑块平时隐匿、悬停滚动区才显现（Win11 覆盖式滚动条语义） */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--accent) transparent;
@@ -159,10 +216,13 @@
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--accent);
+  background: transparent;
   border-radius: 4px;
 }
-::-webkit-scrollbar-thumb:hover {
+*:hover::-webkit-scrollbar-thumb {
+  background: var(--accent);
+}
+*:hover::-webkit-scrollbar-thumb:hover {
   background: var(--muted-foreground);
 }
 ::-webkit-scrollbar-corner {

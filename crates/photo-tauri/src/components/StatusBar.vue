@@ -70,7 +70,7 @@ watch(
 
 <template>
   <footer
-    class="flex h-6 shrink-0 items-center gap-3 border-t bg-background px-3 text-xs text-muted-foreground"
+    class="flex h-6 shrink-0 items-center gap-3 border-t bg-card px-3 text-xs text-muted-foreground"
   >
     <!-- 左段：当前目录（截断，悬停显示完整路径） -->
     <div class="flex min-w-0 flex-1 items-center gap-1.5">
@@ -81,7 +81,7 @@ watch(
     </div>
 
     <!-- 中段：项数 + 选中数（等宽数字，对齐 GPUI status_bar 计数区） -->
-    <div class="flex shrink-0 items-center gap-1 font-mono-num">
+    <div class="flex shrink-0 items-center gap-1 tabular-nums">
       <span>{{ captures.count }}</span>
       <span class="text-muted-foreground/70">项</span>
       <span class="text-muted-foreground/70">·</span>
@@ -91,7 +91,7 @@ watch(
 
     <!-- 右段：扫描状态 + 识别进度/摘要/空提示（优先级：扫描 > 识别中 > 摘要 > 提示 > 就绪） -->
     <div class="flex shrink-0 items-center gap-2">
-      <span v-if="captures.scanning" class="font-mono-num text-primary">
+      <span v-if="captures.scanning" class="tabular-nums text-primary">
         {{ stageText }}
         <template v-if="captures.progress && captures.progress.total > 0">
           {{ captures.progress.done }}/{{ captures.progress.total }}
@@ -100,7 +100,7 @@ watch(
       <!-- 识别进行中：n/m · 当前文件名 + ✕/Esc 取消 -->
       <span v-else-if="recognition.running" class="flex items-center gap-1.5 text-primary">
         <SparklesIcon class="size-3 animate-pulse" />
-        <span class="font-mono-num">
+        <span class="tabular-nums">
           {{ recognition.progress?.done ?? 0 }}/{{ recognition.progress?.total ?? '…' }}
         </span>
         <span class="max-w-44 truncate" :title="recognition.progress?.currentPath ?? ''">
@@ -108,7 +108,7 @@ watch(
         </span>
         <button
           type="button"
-          class="cursor-pointer text-muted-foreground/70 hover:text-foreground"
+          class="text-muted-foreground/70 hover:text-foreground"
           title="取消识别 (Esc)"
           aria-label="取消识别"
           @click="recognition.cancel()"
@@ -117,7 +117,7 @@ watch(
         </button>
       </span>
       <!-- 识别完成摘要（数秒后消失） -->
-      <span v-else-if="showSummary && recognition.summary" class="font-mono-num text-label-green">
+      <span v-else-if="showSummary && recognition.summary" class="tabular-nums text-label-green">
         {{ summaryText }}
       </span>
       <!-- 空提示（无未识别照片等） -->

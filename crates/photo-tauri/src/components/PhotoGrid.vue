@@ -109,9 +109,10 @@ function thumbSrc(c: CaptureMeta): string {
 
 /** cell 选中态：选中集高亮，锚点项额外 ring 强调 */
 function cellClass(i: number): string {
+  // 原生文件管理器语义：选中 = 主题色发丝边框 + 浅色 wash；锚点多一层 ring 供范围选择定位
   if (!selection.isSelected(i)) return 'border-transparent hover:border-border'
-  if (selection.anchorIndex === i) return 'border-primary bg-primary/10 ring-2 ring-primary'
-  return 'border-primary bg-primary/5 ring-1 ring-primary'
+  if (selection.anchorIndex === i) return 'border-primary bg-primary/10 ring-1 ring-primary/60'
+  return 'border-primary bg-primary/10'
 }
 
 /** 鸟种 chip 文本：已确认 → 鸟名 + 置信度（mock 层为 0–1 小数、真实后端 0–100，统一归一化） */
@@ -222,7 +223,7 @@ watch([rowCount, ROW_STEP], () => {
           v-for="i in rowCells(r)"
           :key="captures.items[i].primaryPath"
           :data-grid-cell="i"
-          class="group relative flex cursor-pointer flex-col overflow-hidden rounded-md border bg-card select-none"
+          class="group relative flex flex-col overflow-hidden rounded-md border bg-card shadow-sm transition-colors select-none"
           :class="cellClass(i)"
           :style="{ contentVisibility: 'auto', containIntrinsicSize: 'auto ' + ROW_HEIGHT + 'px' }"
           @click="onCellClick(i, $event)"
@@ -250,7 +251,7 @@ watch([rowCount, ROW_STEP], () => {
 
             <!-- 格式徽标（左上，半透明黑底，对齐 GPUI BADGE_BG） -->
             <span
-              class="absolute top-1 left-1 rounded-sm bg-black/70 px-1 text-[10px] leading-4 text-white"
+              class="absolute top-1 left-1 rounded-sm bg-black/70 px-1 text-[0.625rem] leading-4 text-white"
             >
               {{ formatBadgeLabel(captures.items[i]) }}
             </span>
@@ -279,33 +280,33 @@ watch([rowCount, ROW_STEP], () => {
               </span>
             </div>
             <div class="flex items-center justify-between">
-              <span class="text-[10px] text-muted-foreground font-mono-num">
+              <span class="text-[0.625rem] text-muted-foreground tabular-nums">
                 {{ formatBytes(captures.items[i].fileSize) }}
               </span>
               <span
                 v-if="ratingToNumber(captures.items[i].rating) > 0"
-                class="shrink-0 text-[10px] text-rating"
+                class="shrink-0 text-[0.625rem] text-rating"
               >
                 {{ '★'.repeat(ratingToNumber(captures.items[i].rating)) }}
               </span>
             </div>
             <!-- 鸟种状态 chip：Confirmed 绿 / NeedsReview 黄 / Unrecognized 灰；无记录空行占位 -->
-            <div class="flex h-[18px] items-center">
+            <div class="flex h-[1.125rem] items-center">
               <span
                 v-if="captures.items[i].recognitionStatus === 'Confirmed'"
-                class="max-w-full truncate rounded bg-label-green/10 px-1 text-[10px] text-label-green"
+                class="max-w-full truncate rounded bg-label-green/10 px-1 text-[0.625rem] text-label-green"
               >
                 {{ birdText(captures.items[i]) }}
               </span>
               <span
                 v-else-if="captures.items[i].recognitionStatus === 'NeedsReview'"
-                class="rounded bg-label-yellow/10 px-1 text-[10px] text-label-yellow"
+                class="rounded bg-label-yellow/10 px-1 text-[0.625rem] text-label-yellow"
               >
                 待复核
               </span>
               <span
                 v-else-if="captures.items[i].recognitionStatus === 'Unrecognized'"
-                class="rounded bg-muted px-1 text-[10px] text-muted-foreground"
+                class="rounded bg-muted px-1 text-[0.625rem] text-muted-foreground"
               >
                 未检测到鸟类
               </span>

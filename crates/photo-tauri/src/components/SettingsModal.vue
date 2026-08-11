@@ -205,7 +205,7 @@ const aboutRows = computed(
     <!-- 自绘头栏（× 按钮放标题右侧，对齐 GPUI settings-card 头栏），故关闭默认 × 按钮 -->
     <DialogContent
       :show-close-button="false"
-      class="flex h-[640px] max-w-3xl flex-col gap-0 p-0 sm:max-w-[860px]"
+      class="flex h-[40rem] max-w-3xl flex-col gap-0 p-0 sm:max-w-[53.75rem]"
     >
       <!-- 头栏：标题 + 关闭按钮 -->
       <div class="flex shrink-0 items-center justify-between border-b px-4 py-3">
@@ -288,7 +288,7 @@ const aboutRows = computed(
             <div class="space-y-1.5">
               <div class="flex items-center justify-between">
                 <label for="settings-thumb" class="text-sm font-medium">缩略图尺寸</label>
-                <span class="font-mono-num text-xs text-muted-foreground">{{ thumbnailSize }}px</span>
+                <span class="tabular-nums text-xs text-muted-foreground">{{ thumbnailSize }}px</span>
               </div>
               <input
                 id="settings-thumb"
@@ -317,7 +317,7 @@ const aboutRows = computed(
                 >
                   <span class="text-muted-foreground">{{ ACTION_DESC[action] }}</span>
                   <kbd
-                    class="rounded bg-muted px-2 py-0.5 font-mono-num text-xs text-foreground"
+                    class="rounded bg-muted px-2 py-0.5 tabular-nums text-xs text-foreground"
                   >
                     {{ shortcutRows(action).join(' / ') }}
                   </kbd>
@@ -339,7 +339,7 @@ const aboutRows = computed(
                 class="flex items-center justify-between text-sm"
               >
                 <span class="text-muted-foreground">{{ label }}</span>
-                <span class="font-mono-num text-xs">{{ value }}</span>
+                <span class="tabular-nums text-xs">{{ value }}</span>
               </div>
             </div>
             <!-- 便携布局说明（对齐 photo-config determine_config_path 语义） -->

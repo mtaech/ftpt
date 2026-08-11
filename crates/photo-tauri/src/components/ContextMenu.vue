@@ -74,13 +74,13 @@ function run(item: ContextMenuItem) {
     <div
       v-if="menu.open"
       ref="rootEl"
-      class="fixed z-[101] min-w-40 rounded-md border border-border bg-popover p-1 text-sm text-popover-foreground shadow-md select-none"
+      class="fixed z-[101] min-w-40 rounded-md border border-border bg-popover p-1 text-sm text-popover-foreground shadow-lg select-none"
       :style="{ left: pos.x + 'px', top: pos.y + 'px' }"
       @pointerdown.stop
     >
       <template v-for="(item, i) in menu.items" :key="i">
         <!-- 分隔线 -->
-        <div v-if="item.kind === 'sep'" class="my-1 h-px bg-border" />
+        <div v-if="item.kind === 'sep'" class="my-1 h-0.5 bg-border" />
         <!-- 子菜单：hover 展开右侧面板（此处用法只有一层嵌套） -->
         <div
           v-else-if="item.kind === 'submenu'"
@@ -89,7 +89,7 @@ function run(item: ContextMenuItem) {
           @mouseleave="openSub = -1"
         >
           <div
-            class="flex cursor-pointer items-center justify-between gap-4 rounded-sm px-2 py-1.5 hover:bg-accent"
+            class="flex items-center justify-between gap-4 rounded-sm px-2 py-1.5 hover:bg-accent"
           >
             <span>{{ item.label }}</span>
             <ChevronRightIcon class="size-3.5 shrink-0 text-muted-foreground" />
@@ -100,10 +100,10 @@ function run(item: ContextMenuItem) {
             :class="subSide"
           >
             <template v-for="(sub, j) in item.items" :key="j">
-              <div v-if="sub.kind === 'sep'" class="my-1 h-px bg-border" />
+              <div v-if="sub.kind === 'sep'" class="my-1 h-0.5 bg-border" />
               <div
                 v-else
-                class="flex cursor-pointer items-center justify-between gap-3 rounded-sm px-2 py-1.5 hover:bg-accent"
+                class="flex items-center justify-between gap-3 rounded-sm px-2 py-1.5 hover:bg-accent"
                 @click="run(sub)"
               >
                 <span :class="sub.kind === 'item' && sub.danger ? 'text-destructive' : ''">{{ sub.label }}</span>
@@ -118,7 +118,7 @@ function run(item: ContextMenuItem) {
         <!-- 普通项 / 勾选项 -->
         <div
           v-else
-          class="flex cursor-pointer items-center justify-between gap-3 rounded-sm px-2 py-1.5 hover:bg-accent"
+          class="flex items-center justify-between gap-3 rounded-sm px-2 py-1.5 hover:bg-accent"
           @click="run(item)"
         >
           <span :class="item.kind === 'item' && item.danger ? 'text-destructive' : ''">{{ item.label }}</span>

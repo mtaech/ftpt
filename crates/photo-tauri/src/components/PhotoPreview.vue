@@ -2,9 +2,8 @@
 // 单图预览：ptimg master 图源（1:1 时切 full），滚轮光标中心缩放（×1.25 步进，
 // 数学走 previewMath 纯函数），左键拖拽平移，工具条 −/%/+/适应/1:1/返回网格。
 import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue'
-import { MinusIcon, PlusIcon, MaximizeIcon, ScanIcon, ScanLineIcon, Grid2x2Icon } from '@lucide/vue'
+import { MinusIcon, PlusIcon, MaximizeIcon, ScanIcon, ScanLineIcon, Grid2x2Icon, ImageIcon } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
-import { Skeleton } from '@/components/ui/skeleton'
 import Filmstrip from '@/components/Filmstrip.vue'
 import { useCapturesStore } from '@/stores/captures'
 import { useSelectionStore } from '@/stores/selection'
@@ -298,8 +297,16 @@ function onImageContextMenu(e: MouseEvent) {
       @pointercancel="onPointerUp"
       @contextmenu.prevent="onImageContextMenu"
     >
-      <!-- 加载中骨架 -->
-      <Skeleton v-if="loading" class="absolute rounded-none" :style="{ inset: `${PAD}px` }" />
+      <!-- 加载中占位框（卡片式：边框 + 阴影 + 居中图标脉冲；加载完成淡出而非硬切） -->
+      <Transition name="loading-fade">
+        <div
+          v-if="loading"
+          class="absolute flex items-center justify-center rounded-md border bg-card shadow-sm"
+          :style="{ inset: `${PAD}px` }"
+        >
+          <ImageIcon class="size-10 animate-pulse text-muted-foreground/40" />
+        </div>
+      </Transition>
 
       <img
         v-if="current"
@@ -307,8 +314,8 @@ function onImageContextMenu(e: MouseEvent) {
         :src="imgSrc"
         :alt="displayName(current)"
         draggable="false"
-        class="absolute top-0 left-0 max-w-none"
-        :class="{ invisible: loading }"
+        class="absolute top-0 left-0 max-w-none transition-opacity duration-200 ease-out"
+        :class="loading ? 'opacity-0' : 'opacity-100'"
         :style="{
           width: `${disp[0]}px`,
           height: `${disp[1]}px`,
@@ -355,14 +362,14 @@ function onImageContextMenu(e: MouseEvent) {
 
       <!-- 工具条（stop 冒泡：不触发拖拽/框选/缩放） -->
       <div
-        class="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-md border bg-card/90 p-1 backdrop-blur"
+        class="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-md border bg-card/90 p-1 shadow-md backdrop-blur"
         @pointerdown.stop
         @wheel.stop
       >
         <Button size="sm" variant="ghost" title="缩小" @click="zoomStep(-1)">
           <MinusIcon />
         </Button>
-        <span class="w-12 text-center text-xs text-muted-foreground font-mono-num">
+        <span class="w-12 text-center text-xs text-muted-foreground tabular-nums">
           {{ preview.zoomPercent() }}%
         </span>
         <Button size="sm" variant="ghost" title="放大" @click="zoomStep(1)">
@@ -401,3 +408,15 @@ function onImageContextMenu(e: MouseEvent) {
     <Filmstrip />
   </div>
 </template>
+
+<style scoped>
+/* 加载占位框淡入淡出（200ms 强 ease-out；离开与图片淡入同步，避免硬切闪烁） */
+.loading-fade-enter-active,
+.loading-fade-leave-active {
+  transition: opacity 200ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.loading-fade-enter-from,
+.loading-fade-leave-to {
+  opacity: 0;
+}
+</style>

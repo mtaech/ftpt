@@ -362,7 +362,7 @@ function valueCls(v: number): string {
 
 <template>
   <aside
-    class="relative flex h-full shrink-0 flex-col border-l bg-background"
+    class="relative flex h-full shrink-0 flex-col border-l bg-card"
     :style="{ width: `${clampedWidth}px` }"
   >
     <!-- 拖宽把手（左缘，指针捕获保证拖出面板仍生效） -->
@@ -373,7 +373,7 @@ function valueCls(v: number): string {
     />
 
     <!-- 面板标题栏：信息/调整 tab + 关闭按钮（对齐 GPUI info_panel 头部；标准 Tabs 组件） -->
-    <div class="flex h-9 shrink-0 items-center justify-between border-b border-border px-2">
+    <div class="flex h-10 shrink-0 items-center justify-between border-b border-border px-2">
       <Tabs v-model="activeTab" class="h-full">
         <TabsList class="h-full items-stretch rounded-none bg-transparent p-0 text-muted-foreground">
           <TabsTrigger
@@ -406,29 +406,29 @@ function valueCls(v: number): string {
       <!-- ════════════ 信息 tab ════════════ -->
       <template v-if="activeTab === 'info'">
         <!-- ── Hero 卡：缩略图 + 文件名/格式徽标 + 分辨率/大小 ── -->
-        <div class="flex flex-col gap-2 rounded-md border border-border bg-card p-3">
+        <div class="flex flex-col gap-2 rounded-md border border-border bg-card p-3 shadow-sm">
           <template v-if="focused">
             <div
-              class="flex h-[140px] w-full items-center justify-center overflow-hidden rounded-md bg-muted"
+              class="flex h-[8.75rem] w-full items-center justify-center overflow-hidden rounded-md bg-muted"
             >
               <img :src="thumbSrc(focused)" :alt="displayName(focused)" class="size-full object-cover" />
             </div>
             <div class="flex items-center justify-between gap-2">
-              <div class="min-w-0 flex-1 truncate text-[13px] font-semibold" :title="focused.primaryPath">
+              <div class="min-w-0 flex-1 truncate text-[0.8125rem] font-semibold" :title="focused.primaryPath">
                 {{ displayName(focused) }}
               </div>
               <div
-                class="shrink-0 rounded-sm border border-border px-1 font-mono-num text-[10px] text-muted-foreground"
+                class="shrink-0 rounded-sm border border-border px-1 tabular-nums text-[0.625rem] text-muted-foreground"
               >
                 {{ formatBadgeLabel(focused).toUpperCase() }}
               </div>
             </div>
             <!-- 鸟种中文名（存在时显示，对齐 GPUI hero） -->
-            <div v-if="focused.birdName" class="truncate text-[13px] font-medium text-primary">
+            <div v-if="focused.birdName" class="truncate text-[0.8125rem] font-medium text-primary">
               {{ focused.birdName }}
             </div>
             <div class="flex items-center gap-2">
-              <span class="font-mono-num text-xs">
+              <span class="tabular-nums text-xs">
                 {{
                   focused.imageWidth && focused.imageHeight
                     ? `${focused.imageWidth} × ${focused.imageHeight}`
@@ -436,14 +436,14 @@ function valueCls(v: number): string {
                 }}
               </span>
               <span class="text-xs text-muted-foreground/60">·</span>
-              <span class="font-mono-num text-xs text-muted-foreground">
+              <span class="tabular-nums text-xs text-muted-foreground">
                 {{ formatBytes(focused.fileSize) }}
               </span>
             </div>
           </template>
           <template v-else>
             <div
-              class="flex h-[140px] w-full items-center justify-center rounded-md bg-muted"
+              class="flex h-[8.75rem] w-full items-center justify-center rounded-md bg-muted"
             >
               <GalleryVerticalEndIcon class="size-8 text-muted-foreground/30" />
             </div>
@@ -452,27 +452,27 @@ function valueCls(v: number): string {
         </div>
 
         <!-- ── EXIF 卡：拍摄参数格（对齐 GPUI render_exif_section）── -->
-        <div class="flex flex-col gap-2 rounded-md border border-border bg-card p-3">
+        <div class="flex flex-col gap-2 rounded-md border border-border bg-card p-3 shadow-sm">
           <div class="text-xs font-medium text-muted-foreground">拍摄信息</div>
           <template v-if="focused">
             <div class="flex gap-2">
               <div class="flex-1 rounded-md bg-muted px-2 py-1">
-                <div class="text-[10px] text-muted-foreground">焦距</div>
-                <div class="truncate font-mono-num text-[13px]">{{ focused.focalLength ?? DASH }}</div>
+                <div class="text-[0.625rem] text-muted-foreground">焦距</div>
+                <div class="truncate tabular-nums text-[0.8125rem]">{{ focused.focalLength ?? DASH }}</div>
               </div>
               <div class="flex-1 rounded-md bg-muted px-2 py-1">
-                <div class="text-[10px] text-muted-foreground">光圈</div>
-                <div class="truncate font-mono-num text-[13px]">{{ focused.fNumber ?? DASH }}</div>
+                <div class="text-[0.625rem] text-muted-foreground">光圈</div>
+                <div class="truncate tabular-nums text-[0.8125rem]">{{ focused.fNumber ?? DASH }}</div>
               </div>
             </div>
             <div class="flex gap-2">
               <div class="flex-1 rounded-md bg-muted px-2 py-1">
-                <div class="text-[10px] text-muted-foreground">快门</div>
-                <div class="truncate font-mono-num text-[13px]">{{ focused.exposureTime ?? DASH }}</div>
+                <div class="text-[0.625rem] text-muted-foreground">快门</div>
+                <div class="truncate tabular-nums text-[0.8125rem]">{{ focused.exposureTime ?? DASH }}</div>
               </div>
               <div class="flex-1 rounded-md bg-muted px-2 py-1">
-                <div class="text-[10px] text-muted-foreground">ISO</div>
-                <div class="truncate font-mono-num text-[13px]">{{ focused.iso ?? DASH }}</div>
+                <div class="text-[0.625rem] text-muted-foreground">ISO</div>
+                <div class="truncate tabular-nums text-[0.8125rem]">{{ focused.iso ?? DASH }}</div>
               </div>
             </div>
             <div class="flex items-center justify-between gap-2">
@@ -491,111 +491,8 @@ function valueCls(v: number): string {
           <div v-else class="text-xs text-muted-foreground">未选择图片</div>
         </div>
 
-        <!-- ── 评分卡：1–5 星点选 + 清除 ── -->
-        <div class="flex flex-col gap-2 rounded-md border border-border bg-card p-3">
-          <div class="flex items-center justify-between">
-            <span class="text-xs font-medium text-muted-foreground">评分</span>
-            <button
-              v-if="focused && ratingToNumber(focused.rating) > 0"
-              type="button"
-              class="cursor-pointer text-xs text-primary hover:underline"
-              @click="captures.applyRating(selection.selectedPaths, 0)"
-            >
-              清除
-            </button>
-          </div>
-          <template v-if="focused">
-            <div class="flex items-center gap-1">
-              <button
-                v-for="n in 5"
-                :key="n"
-                type="button"
-                class="cursor-pointer text-lg leading-none transition-colors select-none"
-                :class="n <= ratingToNumber(focused.rating) ? 'text-rating' : 'text-muted-foreground/30 hover:text-muted-foreground/60'"
-                :title="`${n} 星`"
-                @click="onStarClick(n)"
-              >
-                ★
-              </button>
-            </div>
-          </template>
-          <div v-else class="text-xs text-muted-foreground">未选择图片</div>
-        </div>
-
-        <!-- ── 色标卡：六色 chips 点选 ── -->
-        <div class="flex flex-col gap-2 rounded-md border border-border bg-card p-3">
-          <div class="flex items-center justify-between">
-            <span class="text-xs font-medium text-muted-foreground">颜色标签</span>
-            <button
-              v-if="focused && focused.colorLabel !== 'None'"
-              type="button"
-              class="cursor-pointer text-xs text-primary hover:underline"
-              @click="captures.applyColorLabel(selection.selectedPaths, null)"
-            >
-              清除
-            </button>
-          </div>
-          <template v-if="focused">
-            <div class="flex items-center justify-between">
-              <button
-                v-for="c in LABEL_CHIPS"
-                :key="c.label"
-                type="button"
-                class="size-5 cursor-pointer rounded-full border-2 transition-colors select-none"
-                :class="[
-                  c.cls,
-                  focused.colorLabel === c.label
-                    ? 'border-foreground'
-                    : 'border-transparent hover:border-muted-foreground',
-                ]"
-                :title="c.label"
-                @click="captures.applyColorLabel(selection.selectedPaths, c.label)"
-              />
-              <!-- 第六 chip：清除色标（无） -->
-              <button
-                type="button"
-                class="flex size-5 cursor-pointer items-center justify-center rounded-full border-2 bg-muted text-muted-foreground select-none"
-                :class="
-                  focused.colorLabel === 'None'
-                    ? 'border-foreground'
-                    : 'border-transparent hover:border-muted-foreground'
-                "
-                title="清除色标"
-                @click="captures.applyColorLabel(selection.selectedPaths, null)"
-              >
-                <XIcon class="size-3" />
-              </button>
-            </div>
-          </template>
-          <div v-else class="text-xs text-muted-foreground">未选择图片</div>
-        </div>
-
-        <!-- ── 旗标卡：入选/淘汰/无 ── -->
-        <div class="flex flex-col gap-2 rounded-md border border-border bg-card p-3">
-          <span class="text-xs font-medium text-muted-foreground">旗标</span>
-          <template v-if="focused">
-            <div class="flex items-center gap-1">
-              <button
-                v-for="o in FLAG_OPTIONS"
-                :key="o.label"
-                type="button"
-                class="flex-1 cursor-pointer rounded-sm border px-2 py-1 text-xs transition-colors select-none"
-                :class="
-                  focused.flag === o.flag
-                    ? 'border-primary bg-primary/10 font-medium text-primary'
-                    : 'border-border text-muted-foreground hover:bg-muted'
-                "
-                @click="captures.applyFlag(selection.selectedPaths, o.flag)"
-              >
-                {{ o.label }}
-              </button>
-            </div>
-          </template>
-          <div v-else class="text-xs text-muted-foreground">未选择图片</div>
-        </div>
-
         <!-- ── 识别卡：状态 chip + 完整结果（getRecognition）+ 重新识别/检测框/修正鸟种 ── -->
-        <div class="flex flex-col gap-2 rounded-md border border-border bg-card p-3">
+        <div class="flex flex-col gap-2 rounded-md border border-border bg-card p-3 shadow-sm">
           <span class="text-xs font-medium text-muted-foreground">识别</span>
           <!-- 未选择图片 -->
           <div v-if="!focused" class="flex flex-col gap-2">
@@ -624,14 +521,14 @@ function valueCls(v: number): string {
           <template v-else>
             <div class="flex items-center justify-between gap-2">
               <span
-                class="rounded-sm border px-2 py-0.5 text-[11px] select-none"
+                class="rounded-sm border px-2 py-0.5 text-[0.6875rem] select-none"
                 :class="STATUS_META[focused.recognitionStatus].cls"
               >
                 {{ STATUS_META[focused.recognitionStatus].label }}
               </span>
               <span
                 v-if="confPercent(displayConfidence) > 0"
-                class="font-mono-num text-[15px] font-semibold"
+                class="tabular-nums text-[0.9375rem] font-semibold"
                 :class="confTextCls"
               >
                 {{ confPercent(displayConfidence).toFixed(1) }}%
@@ -663,7 +560,7 @@ function valueCls(v: number): string {
               class="flex items-center gap-1 text-xs text-muted-foreground"
               :title="EYE_SHARPNESS_TIP"
             >
-              <span class="font-mono-num">眼锐度 {{ fullRecognition.eyeSharpness.toFixed(2) }}</span>
+              <span class="tabular-nums">眼锐度 {{ fullRecognition.eyeSharpness.toFixed(2) }}</span>
               <InfoIcon class="size-3 shrink-0 text-muted-foreground/70" />
             </div>
             <!-- 动作行：重新识别 + 检测框 -->
@@ -699,7 +596,7 @@ function valueCls(v: number): string {
                     v-for="n in correctOptions"
                     :key="n"
                     type="button"
-                    class="block w-full cursor-pointer truncate px-2 py-1 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                    class="block w-full truncate px-2 py-1 text-left text-xs hover:bg-accent hover:text-accent-foreground"
                     @click="onCorrectSelect(n)"
                   >
                     {{ n }}
@@ -712,17 +609,120 @@ function valueCls(v: number): string {
             </div>
           </template>
         </div>
+
+        <!-- ── 评分卡：1–5 星点选 + 清除 ── -->
+        <div class="flex flex-col gap-2 rounded-md border border-border bg-card p-3 shadow-sm">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-medium text-muted-foreground">评分</span>
+            <button
+              v-if="focused && ratingToNumber(focused.rating) > 0"
+              type="button"
+              class="text-xs text-primary hover:underline"
+              @click="captures.applyRating(selection.selectedPaths, 0)"
+            >
+              清除
+            </button>
+          </div>
+          <template v-if="focused">
+            <div class="flex items-center gap-1">
+              <button
+                v-for="n in 5"
+                :key="n"
+                type="button"
+                class="text-lg leading-none transition-colors select-none"
+                :class="n <= ratingToNumber(focused.rating) ? 'text-rating' : 'text-muted-foreground/30 hover:text-muted-foreground/60'"
+                :title="`${n} 星`"
+                @click="onStarClick(n)"
+              >
+                ★
+              </button>
+            </div>
+          </template>
+          <div v-else class="text-xs text-muted-foreground">未选择图片</div>
+        </div>
+
+        <!-- ── 色标卡：六色 chips 点选 ── -->
+        <div class="flex flex-col gap-2 rounded-md border border-border bg-card p-3 shadow-sm">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-medium text-muted-foreground">颜色标签</span>
+            <button
+              v-if="focused && focused.colorLabel !== 'None'"
+              type="button"
+              class="text-xs text-primary hover:underline"
+              @click="captures.applyColorLabel(selection.selectedPaths, null)"
+            >
+              清除
+            </button>
+          </div>
+          <template v-if="focused">
+            <div class="flex items-center justify-between">
+              <button
+                v-for="c in LABEL_CHIPS"
+                :key="c.label"
+                type="button"
+                class="size-5 rounded-full border-2 transition-colors select-none"
+                :class="[
+                  c.cls,
+                  focused.colorLabel === c.label
+                    ? 'border-foreground'
+                    : 'border-transparent hover:border-muted-foreground',
+                ]"
+                :title="c.label"
+                @click="captures.applyColorLabel(selection.selectedPaths, c.label)"
+              />
+              <!-- 第六 chip：清除色标（无） -->
+              <button
+                type="button"
+                class="flex size-5 items-center justify-center rounded-full border-2 bg-muted text-muted-foreground select-none"
+                :class="
+                  focused.colorLabel === 'None'
+                    ? 'border-foreground'
+                    : 'border-transparent hover:border-muted-foreground'
+                "
+                title="清除色标"
+                @click="captures.applyColorLabel(selection.selectedPaths, null)"
+              >
+                <XIcon class="size-3" />
+              </button>
+            </div>
+          </template>
+          <div v-else class="text-xs text-muted-foreground">未选择图片</div>
+        </div>
+
+        <!-- ── 旗标卡：入选/淘汰/无 ── -->
+        <div class="flex flex-col gap-2 rounded-md border border-border bg-card p-3 shadow-sm">
+          <span class="text-xs font-medium text-muted-foreground">旗标</span>
+          <template v-if="focused">
+            <div class="flex items-center gap-1">
+              <button
+                v-for="o in FLAG_OPTIONS"
+                :key="o.label"
+                type="button"
+                class="flex-1 rounded-sm border px-2 py-1 text-xs transition-colors select-none"
+                :class="
+                  focused.flag === o.flag
+                    ? 'border-primary bg-primary/10 font-medium text-primary'
+                    : 'border-border text-muted-foreground hover:bg-muted'
+                "
+                @click="captures.applyFlag(selection.selectedPaths, o.flag)"
+              >
+                {{ o.label }}
+              </button>
+            </div>
+          </template>
+          <div v-else class="text-xs text-muted-foreground">未选择图片</div>
+        </div>
       </template>
 
       <!-- ════════════ 调整 tab ════════════ -->
       <template v-else>
-        <div class="flex flex-col gap-2 rounded-md border border-border bg-card p-3">
+        <div class="flex flex-col gap-2 rounded-md border border-border bg-card p-3 shadow-sm">
           <div class="flex items-center justify-between">
             <span class="text-xs font-medium text-muted-foreground">基础调整</span>
             <button
               v-if="!isNeutral"
               type="button"
-              class="cursor-pointer text-xs text-primary hover:underline"
+              class="text-xs text-primary hover:underline"
               @click="resetAll"
             >
               重置全部
@@ -734,7 +734,7 @@ function valueCls(v: number): string {
               <span class="w-11 shrink-0 text-xs text-muted-foreground">曝光</span>
               <input
                 type="range"
-                class="h-4 w-full cursor-pointer accent-primary"
+                class="h-4 w-full accent-primary"
                 min="-2"
                 max="2"
                 step="0.05"
@@ -742,13 +742,13 @@ function valueCls(v: number): string {
                 aria-label="曝光"
                 @input="onSliderInput('exposure', $event)"
               />
-              <span class="w-16 shrink-0 text-right font-mono-num text-xs" :class="valueCls(adj.exposure ?? 0)">
+              <span class="w-16 shrink-0 text-right tabular-nums text-xs" :class="valueCls(adj.exposure ?? 0)">
                 {{ fmtExposure(adj.exposure ?? 0) }}
               </span>
               <button
                 v-if="adj.exposure !== 0"
                 type="button"
-                class="w-10 shrink-0 cursor-pointer text-right text-xs text-primary hover:underline"
+                class="w-10 shrink-0 text-right text-xs text-primary hover:underline"
                 @click="resetField('exposure')"
               >
                 重置
@@ -760,7 +760,7 @@ function valueCls(v: number): string {
               <span class="w-11 shrink-0 text-xs text-muted-foreground">对比度</span>
               <input
                 type="range"
-                class="h-4 w-full cursor-pointer accent-primary"
+                class="h-4 w-full accent-primary"
                 min="-100"
                 max="100"
                 step="1"
@@ -768,13 +768,13 @@ function valueCls(v: number): string {
                 aria-label="对比度"
                 @input="onSliderInput('contrast', $event)"
               />
-              <span class="w-16 shrink-0 text-right font-mono-num text-xs" :class="valueCls(adj.contrast ?? 0)">
+              <span class="w-16 shrink-0 text-right tabular-nums text-xs" :class="valueCls(adj.contrast ?? 0)">
                 {{ fmtSigned(adj.contrast ?? 0) }}
               </span>
               <button
                 v-if="adj.contrast !== 0"
                 type="button"
-                class="w-10 shrink-0 cursor-pointer text-right text-xs text-primary hover:underline"
+                class="w-10 shrink-0 text-right text-xs text-primary hover:underline"
                 @click="resetField('contrast')"
               >
                 重置
@@ -786,7 +786,7 @@ function valueCls(v: number): string {
               <span class="w-11 shrink-0 text-xs text-muted-foreground">饱和度</span>
               <input
                 type="range"
-                class="h-4 w-full cursor-pointer accent-primary"
+                class="h-4 w-full accent-primary"
                 min="-100"
                 max="100"
                 step="1"
@@ -794,13 +794,13 @@ function valueCls(v: number): string {
                 aria-label="饱和度"
                 @input="onSliderInput('saturation', $event)"
               />
-              <span class="w-16 shrink-0 text-right font-mono-num text-xs" :class="valueCls(adj.saturation ?? 0)">
+              <span class="w-16 shrink-0 text-right tabular-nums text-xs" :class="valueCls(adj.saturation ?? 0)">
                 {{ fmtSigned(adj.saturation ?? 0) }}
               </span>
               <button
                 v-if="adj.saturation !== 0"
                 type="button"
-                class="w-10 shrink-0 cursor-pointer text-right text-xs text-primary hover:underline"
+                class="w-10 shrink-0 text-right text-xs text-primary hover:underline"
                 @click="resetField('saturation')"
               >
                 重置

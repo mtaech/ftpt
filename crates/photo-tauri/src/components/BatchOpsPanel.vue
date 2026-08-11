@@ -149,17 +149,15 @@ watch(
 </script>
 
 <template>
-  <aside
-    class="flex w-[264px] shrink-0 flex-col gap-2 overflow-y-auto border-r bg-sidebar p-2"
-  >
+  <div class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-2">
     <!-- 操作指引（简短） -->
-    <div class="rounded-md bg-muted/50 px-2 py-1 text-[11px] leading-snug text-muted-foreground">
+    <div class="rounded-md bg-muted/50 px-2 py-1 text-[0.6875rem] leading-snug text-muted-foreground">
       操作对象 = 当前筛选结果。流程：标记/筛选 → 可选「同步同名文件」→ 开始执行（先干跑预览）→ 确认执行
     </div>
 
     <!-- 操作对象说明（数量随筛选实时联动；无筛选黄色警告） -->
     <div
-      class="rounded-md px-2 py-1 text-[11px] leading-snug"
+      class="rounded-md px-2 py-1 text-[0.6875rem] leading-snug"
       :class="noFilter ? 'bg-amber-500/10 text-amber-500' : 'bg-muted/50 text-muted-foreground'"
     >
       <template v-if="noFilter">
@@ -185,12 +183,12 @@ watch(
         {{ o.label }}
       </Button>
     </div>
-    <div class="px-1 text-[11px] text-muted-foreground">操作说明：{{ opDescription(batch.op) }}</div>
+    <div class="px-1 text-[0.6875rem] text-muted-foreground">操作说明：{{ opDescription(batch.op) }}</div>
 
     <!-- 目标目录（移动/复制必需；一步式对话框） -->
     <div v-if="targetNeeded" class="flex items-center gap-1">
       <div
-        class="min-w-0 flex-1 truncate rounded-md border bg-muted/40 px-2 py-1 font-mono-num text-[11px]"
+        class="min-w-0 flex-1 truncate rounded-md border bg-muted/40 px-2 py-1 tabular-nums text-[0.6875rem]"
         :class="batch.targetDir ? 'text-foreground' : 'text-muted-foreground'"
         :title="batch.targetDir ?? ''"
       >
@@ -203,7 +201,7 @@ watch(
 
     <!-- 同步同名文件开关（默认关） -->
     <button
-      class="flex w-fit cursor-pointer items-center gap-1.5 text-xs disabled:pointer-events-none disabled:opacity-50"
+      class="flex w-fit items-center gap-1.5 text-xs disabled:pointer-events-none disabled:opacity-50"
       :disabled="opsDisabled"
       @click="batch.setSyncSiblings(!batch.syncSiblings)"
     >
@@ -225,7 +223,7 @@ watch(
       <button
         v-for="chip in formatChips"
         :key="chip.key"
-        class="cursor-pointer rounded-full px-2 py-0.5 text-[11px] transition-colors disabled:pointer-events-none disabled:opacity-50"
+        class="rounded-sm px-2 py-0.5 text-[0.6875rem] transition-colors disabled:pointer-events-none disabled:opacity-50"
         :class="
           chip.active
             ? 'bg-primary text-primary-foreground'
@@ -236,7 +234,7 @@ watch(
       >
         {{ chip.label }}
       </button>
-      <div v-if="formatChips.length === 0" class="text-[11px] text-muted-foreground">
+      <div v-if="formatChips.length === 0" class="text-[0.6875rem] text-muted-foreground">
         目录中没有其他格式的同名文件
       </div>
     </div>
@@ -247,26 +245,26 @@ watch(
     </Button>
 
     <!-- 执行中提示（进度弹窗之外的兜底） -->
-    <div v-if="batch.running" class="text-center text-[11px] text-muted-foreground">执行中…</div>
+    <div v-if="batch.running" class="text-center text-[0.6875rem] text-muted-foreground">执行中…</div>
 
     <!-- 结果明细（完成后保留；失败列表可滚动） -->
     <div v-if="batch.result" class="space-y-1">
-      <div class="text-[11px] font-medium text-muted-foreground">执行结果</div>
-      <div class="text-[11px]" :class="batch.result.failed > 0 ? 'text-amber-500' : 'text-muted-foreground'">
+      <div class="text-[0.6875rem] font-medium text-muted-foreground">执行结果</div>
+      <div class="text-[0.6875rem]" :class="batch.result.failed > 0 ? 'text-amber-500' : 'text-muted-foreground'">
         成功 {{ batch.result.success }} / 失败 {{ batch.result.failed }}
       </div>
       <div v-if="batch.errors.length" class="max-h-40 space-y-0.5 overflow-y-auto pr-1">
         <div
           v-for="(e, i) in batch.errors"
           :key="i"
-          class="truncate text-[11px] leading-snug text-destructive"
+          class="truncate text-[0.6875rem] leading-snug text-destructive"
           :title="e"
         >
           {{ e }}
         </div>
       </div>
     </div>
-  </aside>
+  </div>
 
   <!-- ── 目标目录一步式对话框 ── -->
   <Dialog v-model:open="showTargetDialog">
@@ -278,7 +276,7 @@ watch(
         </DialogDescription>
       </DialogHeader>
       <div
-        class="truncate rounded-md border bg-muted/50 px-2 py-1.5 font-mono-num text-xs"
+        class="truncate rounded-md border bg-muted/50 px-2 py-1.5 tabular-nums text-xs"
         :title="batch.targetDir ?? ''"
       >
         {{ batch.targetDir ?? '未选择' }}
@@ -310,11 +308,11 @@ watch(
         <div
           v-for="(name, i) in deletePreviewNames"
           :key="i"
-          class="truncate font-mono-num text-[11px]"
+          class="truncate tabular-nums text-[0.6875rem]"
         >
           {{ name }}
         </div>
-        <div v-if="previewCount > deletePreviewNames.length" class="text-[11px] text-muted-foreground">
+        <div v-if="previewCount > deletePreviewNames.length" class="text-[0.6875rem] text-muted-foreground">
           …等共 {{ previewCount }} 个文件
         </div>
       </div>
@@ -340,7 +338,7 @@ watch(
           :style="{ width: `${progressPct}%` }"
         />
       </div>
-      <div class="truncate text-center font-mono-num text-xs text-muted-foreground">
+      <div class="truncate text-center tabular-nums text-xs text-muted-foreground">
         {{ progressText }}
       </div>
     </DialogContent>

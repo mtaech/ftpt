@@ -1267,10 +1267,10 @@ async fn do_scan(app: &AppHandle, dir: &Path) -> Result<(Vec<CaptureMeta>, Optio
             });
         }
 
-        // 三表同步：删多余行、清识别/调整孤儿行（EXIF 提取不在此做，由后台 enrich 并发完成）
-        if let Some(db) = &folder_db
-            && !entries.is_empty()
-        {
+        // 三表同步：删多余行、清识别/调整孤儿行（EXIF 提取不在此做，由后台 enrich 并发完成）。
+        // 空目录也必须同步：外部直接删除全部文件后重扫，entries 为空 → 全表行判为多余删除，
+        // 否则 .pt/data.db 里残留的识别/调整/缓存行永远不会被清理。
+        if let Some(db) = &folder_db {
             let app_sync = app_scan.clone();
             let stats = db
                 .sync_with_scan(&entries, &move |done, total| {

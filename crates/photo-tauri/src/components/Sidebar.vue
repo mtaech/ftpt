@@ -1,8 +1,7 @@
 <script setup lang="ts">
-// 左侧栏：打开目录 / 收藏当前目录 / 当前目录卡片 / 收藏列表 / 最近打开列表。
-// 收藏与最近经 '@/lib/ipc' 命令读取（mock 模式走内存态）；右缘把手可拖宽，宽度持久化 localStorage。
+// 左栏「目录」tab 内容：打开目录 / 收藏当前目录 / 当前目录卡片 / 收藏列表 / 最近打开列表。
+// 收藏与最近经 '@/lib/ipc' 命令读取（mock 模式走内存态）；外壳（宽度/拖宽/tab 头）在 LeftPanel.vue。
 import { computed, onMounted, ref } from 'vue'
-import { useStorage } from '@vueuse/core'
 import { ClockIcon, FolderOpenIcon, StarIcon, XIcon } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { useCapturesStore } from '@/stores/captures'
@@ -18,25 +17,6 @@ import {
 
 const captures = useCapturesStore()
 const contextMenu = useContextMenuStore()
-
-// ── 宽度：可拖拽，localStorage 持久化，范围 200–480（对齐 GPUI 左栏 size_range）──
-const width = useStorage('ftpt.leftPanelWidth', 180)
-const clampedWidth = computed(() => Math.min(480, Math.max(200, width.value)))
-/** 拖拽起始状态（指针捕获在把手上，move/up 仍持续收到） */
-let dragStartX = 0
-let dragStartW = 0
-function onHandleDown(e: PointerEvent) {
-  e.preventDefault()
-  dragStartX = e.clientX
-  dragStartW = width.value
-  ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
-}
-function onHandleMove(e: PointerEvent) {
-  if (e.buttons === 0) return
-  width.value = Math.min(480, Math.max(200, dragStartW + (e.clientX - dragStartX)))
-}
-/** 拖拽结束：指针捕获在 pointerup 后由浏览器自动释放，无需清理 */
-function onHandleUp() {}
 
 // ── 收藏 / 最近打开 ──────────────────────────────────────────────
 const favorites = ref<string[]>([])
@@ -167,22 +147,10 @@ async function openPath(dir: string) {
 </script>
 
 <template>
-  <aside
-    class="relative flex h-full shrink-0 flex-col border-r bg-sidebar"
-    :style="{ width: `${clampedWidth}px` }"
-  >
-    <!-- 操作区：打开目录 + 收藏当前目录 -->
-    <div class="flex flex-col gap-1.5 border-b p-2">
-      <Button
-        size="sm"
-        variant="secondary"
-        :disabled="captures.scanning"
-        @click="captures.openDirectory()"
-      >
-        <FolderOpenIcon data-icon="inline-start" />
-        打开目录
-      </Button>
-      <Button v-if="captures.directory" size="sm" variant="ghost" @click="toggleFavorite">
+  <div class="flex min-h-0 flex-1 flex-col">
+    <!-- 操作区：收藏当前目录（打开目录统一收归顶栏主按钮，此处不重复；无目录时整块隐藏） -->
+    <div v-if="captures.directory" class="flex flex-col gap-1.5 border-b p-2">
+      <Button size="sm" variant="ghost" @click="toggleFavorite">
         <StarIcon data-icon="inline-start" :class="isFav ? 'fill-current text-primary' : ''" />
         {{ isFav ? '取消收藏' : '收藏当前目录' }}
       </Button>
@@ -202,7 +170,7 @@ async function openPath(dir: string) {
           <div v-else class="text-sm text-muted-foreground">未打开目录</div>
           <div
             v-if="captures.directory"
-            class="truncate text-[10px] text-muted-foreground font-mono-num"
+            class="truncate text-[0.625rem] text-muted-foreground tabular-nums"
           >
             {{ captures.count }} 张
           </div>
@@ -210,14 +178,14 @@ async function openPath(dir: string) {
       </div>
 
       <!-- 收藏列表 -->
-      <div class="px-1 pb-1 text-[11px] font-medium text-muted-foreground">收藏</div>
-      <div v-if="favorites.length === 0" class="px-1 pb-1 text-[11px] text-muted-foreground/70">
+      <div class="px-1 pb-1 text-[0.6875rem] font-medium text-muted-foreground">收藏</div>
+      <div v-if="favorites.length === 0" class="px-1 pb-1 text-[0.6875rem] text-muted-foreground/70">
         点「收藏当前目录」加入
       </div>
       <div
         v-for="dir in favorites"
         :key="dir"
-        class="group mb-0.5 flex cursor-pointer items-center gap-1 rounded-md border border-transparent px-2 py-1 hover:border-border hover:bg-accent"
+        class="group mb-0.5 flex items-center gap-1 rounded-md border border-transparent px-2 py-1 hover:border-border hover:bg-accent"
         :title="dir"
         @click="openPath(dir)"
         @contextmenu.prevent="onFolderContextMenu(dir, $event)"
@@ -225,7 +193,7 @@ async function openPath(dir: string) {
         <StarIcon class="size-3 shrink-0 text-primary" />
         <div class="min-w-0 flex-1">
           <div class="truncate text-xs">{{ dirName(dir) }}</div>
-          <div class="truncate text-[10px] text-muted-foreground font-mono-num">{{ dir }}</div>
+          <div class="truncate text-[0.625rem] text-muted-foreground tabular-nums">{{ dir }}</div>
         </div>
         <!-- 移除按钮（悬浮显现） -->
         <button
@@ -238,17 +206,17 @@ async function openPath(dir: string) {
       </div>
 
       <!-- 最近打开列表 -->
-      <div class="mt-3 flex items-center gap-1 px-1 pb-1 text-[11px] font-medium text-muted-foreground">
+      <div class="mt-3 flex items-center gap-1 px-1 pb-1 text-[0.6875rem] font-medium text-muted-foreground">
         <ClockIcon class="size-3" />
         最近打开
       </div>
-      <div v-if="recents.length === 0" class="px-1 pb-1 text-[11px] text-muted-foreground/70">
+      <div v-if="recents.length === 0" class="px-1 pb-1 text-[0.6875rem] text-muted-foreground/70">
         暂无历史记录
       </div>
       <div
         v-for="dir in recents"
         :key="dir"
-        class="group mb-0.5 flex cursor-pointer items-center gap-1 rounded-md border border-transparent px-2 py-1 hover:border-border hover:bg-accent"
+        class="group mb-0.5 flex items-center gap-1 rounded-md border border-transparent px-2 py-1 hover:border-border hover:bg-accent"
         :title="dir"
         @click="openPath(dir)"
         @contextmenu.prevent="onFolderContextMenu(dir, $event)"
@@ -256,18 +224,9 @@ async function openPath(dir: string) {
         <FolderOpenIcon class="size-3 shrink-0 text-muted-foreground" />
         <div class="min-w-0 flex-1">
           <div class="truncate text-xs">{{ dirName(dir) }}</div>
-          <div class="truncate text-[10px] text-muted-foreground font-mono-num">{{ dir }}</div>
+          <div class="truncate text-[0.625rem] text-muted-foreground tabular-nums">{{ dir }}</div>
         </div>
       </div>
     </div>
-
-    <!-- 拖宽把手（右缘，指针捕获保证拖出侧栏仍生效） -->
-    <div
-      class="absolute inset-y-0 right-0 w-1 cursor-col-resize touch-none select-none hover:bg-primary/40"
-      @pointerdown="onHandleDown"
-      @pointermove="onHandleMove"
-      @pointerup="onHandleUp"
-      @pointercancel="onHandleUp"
-    />
-  </aside>
+  </div>
 </template>

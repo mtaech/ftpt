@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 根布局（对齐 GPUI layout.rs 三栏结构）：
-//   顶栏（全宽）→ 主区 h_flex：左 rail | 左栏(Sidebar) | 内容区 | 右栏(InfoPanel) | 右 rail
+//   顶栏（全宽）→ 主区 h_flex：左 rail | 左栏(LeftPanel：目录/批量双 tab) | 内容区 | 右栏(InfoPanel) | 右 rail
 //   → 底部 StatusBar。
 // 左/右栏可独立隐藏（Ctrl+[ / Ctrl+] 切换，右栏初始值跟随后端配置），
 // 拖宽把手在各面板内部（宽度 localStorage 持久化，范围 200–480）。全局快捷键见 keymap.ts。
@@ -11,6 +11,7 @@ import {
   ImageIcon,
   LayoutGridIcon,
   ListChecksIcon,
+  RefreshCwIcon,
   ScanSearchIcon,
   SettingsIcon,
 } from '@lucide/vue'
@@ -18,8 +19,7 @@ import { Button } from '@/components/ui/button'
 import PhotoGrid from '@/components/PhotoGrid.vue'
 import PhotoPreview from '@/components/PhotoPreview.vue'
 import FilterBar from '@/components/FilterBar.vue'
-import Sidebar from '@/components/Sidebar.vue'
-import BatchOpsPanel from '@/components/BatchOpsPanel.vue'
+import LeftPanel from '@/components/LeftPanel.vue'
 import InfoPanel from '@/components/InfoPanel.vue'
 import RightRail from '@/components/RightRail.vue'
 import StatusBar from '@/components/StatusBar.vue'
@@ -41,8 +41,8 @@ const configStore = useConfigStore()
 
 /** 左栏可见（对齐 GPUI sidebar_visible，运行时状态，默认可见） */
 const sidebarVisible = ref(true)
-/** 批量操作面板可见（顶栏按钮切换；独立面板，默认隐藏） */
-const batchPanelVisible = ref(false)
+/** 左栏当前 tab（'dir' 目录 / 'batch' 批量；顶栏「批量操作」按钮切换） */
+const leftTab = ref('dir')
 /** 右栏可见（对齐 GPUI config.right_panel_visible，初始值跟随后端配置，默认可见） */
 const rightPanelVisible = ref(true)
 /** 设置弹窗开关（顶栏齿轮按钮打开、Esc 分支关闭，v-model 传给 SettingsModal） */
@@ -53,6 +53,16 @@ function toggleLeftPanel() {
 }
 function toggleRightPanel() {
   rightPanelVisible.value = !rightPanelVisible.value
+}
+
+/** 顶栏「批量操作」：左栏切到批量 tab（已在批量 tab 则切回目录 tab） */
+function toggleBatchTab() {
+  if (leftTab.value === 'batch' && sidebarVisible.value) {
+    leftTab.value = 'dir'
+  } else {
+    sidebarVisible.value = true
+    leftTab.value = 'batch'
+  }
 }
 
 /**
@@ -164,26 +174,37 @@ function toPreview() {
 <template>
   <div class="flex h-screen flex-col overflow-hidden bg-background text-foreground">
     <!-- 顶栏（全宽，对齐 GPUI toolbar 置顶）：打开目录 / 目录名 / 计数 / 扫描进度 -->
-    <header class="flex h-9 shrink-0 items-center gap-2 border-b px-2">
-      <Button size="sm" variant="secondary" :disabled="captures.scanning" @click="captures.openDirectory()">
+    <header class="flex h-10 shrink-0 items-center gap-2 border-b bg-card px-2">
+      <Button size="sm" :disabled="captures.scanning" @click="captures.openDirectory()">
         <FolderOpenIcon data-icon="inline-start" />
         打开目录
       </Button>
-      <!-- 批量操作面板开关（BatchOpsUi 区域） -->
+      <!-- 批量操作：左栏 tab 切换（目录 / 批量，对齐右栏 tabs 模式） -->
       <Button
         size="sm"
         variant="ghost"
-        :class="{ 'bg-accent text-accent-foreground': batchPanelVisible }"
-        @click="batchPanelVisible = !batchPanelVisible"
+        :class="{ 'bg-accent text-accent-foreground': sidebarVisible && leftTab === 'batch' }"
+        @click="toggleBatchTab"
       >
         <ListChecksIcon data-icon="inline-start" />
         批量操作
+      </Button>
+      <!-- 刷新目录（对齐 GPUI toolbar refresh-btn；无目录/扫描中禁用，F5 同义） -->
+      <Button
+        size="icon-sm"
+        variant="ghost"
+        :disabled="!captures.directory || captures.scanning"
+        title="刷新目录 (F5)"
+        aria-label="刷新目录"
+        @click="captures.rescan()"
+      >
+        <RefreshCwIcon :class="{ 'animate-spin': captures.scanning }" />
       </Button>
       <span v-if="captures.directory" class="truncate text-sm" :title="captures.directory">
         {{ dirName(captures.directory) }}
       </span>
       <span v-else class="truncate text-sm text-muted-foreground">未打开目录</span>
-      <span v-if="captures.count > 0" class="shrink-0 text-xs text-muted-foreground font-mono-num">
+      <span v-if="captures.count > 0" class="shrink-0 text-xs text-muted-foreground tabular-nums">
         {{ captures.count }} 项
       </span>
       <!-- 扫描进度条（细条，吸顶栏右侧） -->
@@ -222,17 +243,8 @@ function toPreview() {
 
     <!-- 主区三栏：左 rail | 左栏 | 内容区 | 右栏 | 右 rail（对齐 GPUI layout.rs h_resizable） -->
     <div class="flex min-h-0 flex-1">
-      <!-- 左 Activity Rail：48px 竖排图标（对齐 GPUI RAIL_WIDTH） -->
+      <!-- 左 Activity Rail：48px 竖排图标（对齐 GPUI RAIL_WIDTH；打开目录只保留顶栏主按钮，不重复） -->
       <nav class="flex w-12 shrink-0 flex-col items-center gap-1 border-r bg-sidebar pt-2">
-        <Button
-          size="icon-sm"
-          variant="ghost"
-          title="打开目录"
-          :disabled="captures.scanning"
-          @click="captures.openDirectory()"
-        >
-          <FolderOpenIcon class="size-4" />
-        </Button>
         <Button
           size="icon-sm"
           variant="ghost"
@@ -262,11 +274,8 @@ function toPreview() {
         </Button>
       </nav>
 
-      <!-- 左栏（可拖宽；Ctrl+[ 隐藏/显示） -->
-      <Sidebar v-show="sidebarVisible" />
-
-      <!-- 批量操作面板（BatchOpsUi 区域；顶栏按钮切换） -->
-      <BatchOpsPanel v-show="batchPanelVisible" />
+      <!-- 左栏（目录 / 批量 双 tab，可拖宽；Ctrl+[ 隐藏/显示） -->
+      <LeftPanel v-show="sidebarVisible" v-model="leftTab" />
 
       <!-- 内容区：筛选栏（仅 grid + 有目录）+ 空态/网格/预览 -->
       <main class="flex min-w-0 flex-1 flex-col">

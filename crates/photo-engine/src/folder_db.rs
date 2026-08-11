@@ -1297,6 +1297,33 @@ mod tests {
     }
 
     #[test]
+    fn test_sync_with_scan_empty_entries_cleans_all() {
+        // 目录被外部清空后重扫：entries 为空 → 四表全部行都是孤儿，一次清干净
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        let exif = make_exif();
+        let xmp = XmpMetadata::default();
+        let rec = make_recognition();
+        let params = make_adjustments();
+        let f = tmp.path().join("f.jpg");
+        std::fs::write(&f, b"fake").unwrap();
+        db.put_exif(&f, &exif).unwrap();
+        db.put_xmp(&f, &xmp).unwrap();
+        db.upsert_recognition("f.jpg", &rec).unwrap();
+        db.put_adjustments("f.jpg", &params).unwrap();
+        std::fs::remove_file(&f).unwrap();
+
+        let stats = db.sync_with_scan(&[], &|_, _| {}).unwrap();
+        assert_eq!(stats.cache_deleted, 1);
+        assert_eq!(stats.recognition_deleted, 1);
+        assert_eq!(stats.adjustments_deleted, 1);
+        assert!(db.all_exif().unwrap().is_empty());
+        assert!(db.all_xmp_meta().unwrap().is_empty());
+        assert!(db.all_recognitions().unwrap().is_empty());
+        assert!(db.get_adjustments("f.jpg").unwrap().is_none());
+    }
+
+    #[test]
     fn test_adjustments_sync_with_scan_cleanup() {
         let tmp = TempDir::new().unwrap();
         let db = FolderDb::open_in_dir(tmp.path()).unwrap();

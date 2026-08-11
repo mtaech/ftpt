@@ -232,7 +232,7 @@ watch(
     <div class="flex items-center gap-1.5 overflow-x-auto px-2 py-1">
       <button
         type="button"
-        class="flex shrink-0 cursor-pointer items-center gap-0.5 text-xs select-none"
+        class="flex shrink-0 items-center gap-0.5 text-xs select-none"
         :class="filter.hasActiveFilters ? 'font-medium text-primary' : 'text-foreground'"
         @click="expanded = !expanded"
       >
@@ -250,7 +250,7 @@ watch(
         {{ chip.label }}
         <button
           type="button"
-          class="cursor-pointer text-primary/70 hover:text-primary"
+          class="text-primary/70 hover:text-primary"
           :aria-label="`清除${chip.label}`"
           @click="chip.clear()"
         >
@@ -262,7 +262,7 @@ watch(
 
       <!-- 排序下拉 + 方向（折叠态常驻，对齐 GPUI 折叠行） -->
       <select
-        class="h-7 shrink-0 cursor-pointer rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
+        class="h-8 shrink-0 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
         :value="filter.sortBy"
         aria-label="排序方式"
         @change="onSortByChange"
@@ -272,7 +272,7 @@ watch(
         </option>
       </select>
       <select
-        class="h-7 shrink-0 cursor-pointer rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
+        class="h-8 shrink-0 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
         :value="filter.sortDirection"
         aria-label="排序方向"
         @change="onSortDirChange"
@@ -292,7 +292,7 @@ watch(
         <span class="shrink-0 text-xs text-muted-foreground select-none">格式</span>
         <button
           type="button"
-          class="shrink-0 cursor-pointer rounded-sm border px-2 py-0.5 text-xs transition-colors select-none"
+          class="shrink-0 rounded-sm border px-2 py-0.5 text-xs transition-colors select-none"
           :class="chipCls(filter.criteria.formatFilter === null)"
           @click="filter.setFormat(null)"
         >
@@ -302,7 +302,7 @@ watch(
           v-for="c in FORMAT_CHIPS"
           :key="c.label"
           type="button"
-          class="shrink-0 cursor-pointer rounded-sm border px-2 py-0.5 text-xs transition-colors select-none"
+          class="shrink-0 rounded-sm border px-2 py-0.5 text-xs transition-colors select-none"
           :class="chipCls(sameFormat(filter.criteria.formatFilter, c.value))"
           @click="filter.setFormat(sameFormat(filter.criteria.formatFilter, c.value) ? null : c.value)"
         >
@@ -317,7 +317,7 @@ watch(
           v-for="c in RATING_CHIPS"
           :key="c.value"
           type="button"
-          class="shrink-0 cursor-pointer rounded-sm border px-2 py-0.5 text-xs transition-colors select-none"
+          class="shrink-0 rounded-sm border px-2 py-0.5 text-xs transition-colors select-none"
           :class="chipCls(filter.criteria.minRating === c.value)"
           @click="filter.setMinRating(filter.criteria.minRating === c.value ? null : c.value)"
         >
@@ -332,7 +332,7 @@ watch(
           v-for="c in FLAG_CHIPS"
           :key="c.label"
           type="button"
-          class="shrink-0 cursor-pointer rounded-sm border px-2 py-0.5 text-xs transition-colors select-none"
+          class="shrink-0 rounded-sm border px-2 py-0.5 text-xs transition-colors select-none"
           :class="chipCls(flagActive(c.flag, c.unflagged))"
           @click="onFlagChip(c.flag, c.unflagged)"
         >
@@ -347,7 +347,7 @@ watch(
           v-for="c in RECOGNITION_CHIPS"
           :key="c.value"
           type="button"
-          class="shrink-0 cursor-pointer rounded-sm border px-2 py-0.5 text-xs transition-colors select-none"
+          class="shrink-0 rounded-sm border px-2 py-0.5 text-xs transition-colors select-none"
           :class="chipCls(filter.criteria.recognitionFilter === c.value)"
           @click="filter.setRecognition(c.value)"
         >
@@ -360,7 +360,7 @@ watch(
         <span class="shrink-0 text-xs text-muted-foreground select-none">色标</span>
         <button
           type="button"
-          class="shrink-0 cursor-pointer rounded-sm border px-2 py-0.5 text-xs transition-colors select-none"
+          class="shrink-0 rounded-sm border px-2 py-0.5 text-xs transition-colors select-none"
           :class="chipCls(filter.criteria.colorLabel === null)"
           @click="filter.setColorLabel(null)"
         >
@@ -370,7 +370,7 @@ watch(
           v-for="c in COLOR_CHIPS"
           :key="c.value"
           type="button"
-          class="shrink-0 cursor-pointer rounded-sm border px-2 py-0.5 text-xs transition-colors select-none"
+          class="shrink-0 rounded-sm border px-2 py-0.5 text-xs transition-colors select-none"
           :class="chipCls(filter.criteria.colorLabel === c.value)"
           @click="filter.setColorLabel(filter.criteria.colorLabel === c.value ? null : c.value)"
         >
@@ -384,7 +384,7 @@ watch(
           日期 从
           <input
             type="date"
-            class="h-7 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
+            class="h-8 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
             :value="filter.criteria.dateFrom ?? ''"
             @change="onDateChange('from', $event)"
           />
@@ -393,7 +393,7 @@ watch(
           至
           <input
             type="date"
-            class="h-7 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
+            class="h-8 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
             :value="filter.criteria.dateTo ?? ''"
             @change="onDateChange('to', $event)"
           />
@@ -404,7 +404,7 @@ watch(
       <div ref="birdBoxEl" class="relative shrink-0">
         <button
           type="button"
-          class="flex h-7 min-w-36 max-w-56 cursor-pointer items-center gap-1 rounded-sm border px-2 text-xs transition-colors select-none"
+          class="flex h-8 min-w-36 max-w-56 items-center gap-1 rounded-sm border px-2 text-xs transition-colors select-none"
           :class="
             filter.criteria.birdNames.length > 0
               ? 'border-primary bg-primary/10 text-primary'
@@ -438,7 +438,7 @@ watch(
             <li v-for="name in birdOptions" :key="name">
               <button
                 type="button"
-                class="flex w-full cursor-pointer items-center gap-1.5 rounded-sm px-1.5 py-1 text-left text-xs hover:bg-muted"
+                class="flex w-full items-center gap-1.5 rounded-sm px-1.5 py-1 text-left text-xs hover:bg-muted"
                 @click="toggleBird(name)"
               >
                 <CheckIcon v-if="filter.criteria.birdNames.includes(name)" class="size-3.5 text-primary" />
