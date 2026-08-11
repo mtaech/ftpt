@@ -9,6 +9,7 @@ import {
   FolderOpenIcon,
   GalleryVerticalEndIcon,
   ImageIcon,
+  ImportIcon,
   LayoutGridIcon,
   ListChecksIcon,
   RefreshCwIcon,
@@ -18,6 +19,9 @@ import {
 import { Button } from '@/components/ui/button'
 import PhotoGrid from '@/components/PhotoGrid.vue'
 import PhotoPreview from '@/components/PhotoPreview.vue'
+import CompareView from '@/components/CompareView.vue'
+import SlideshowView from '@/components/SlideshowView.vue'
+import StatsView from '@/components/StatsView.vue'
 import FilterBar from '@/components/FilterBar.vue'
 import LeftPanel from '@/components/LeftPanel.vue'
 import InfoPanel from '@/components/InfoPanel.vue'
@@ -25,19 +29,30 @@ import RightRail from '@/components/RightRail.vue'
 import StatusBar from '@/components/StatusBar.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
 import SettingsModal from '@/components/SettingsModal.vue'
+import ImportDialog from '@/components/ImportDialog.vue'
+import ExportDialog from '@/components/ExportDialog.vue'
 import { useCapturesStore } from '@/stores/captures'
 import { useSelectionStore } from '@/stores/selection'
 import { usePreviewStore } from '@/stores/preview'
+import { useCompareStore } from '@/stores/compare'
+import { useFilterStore } from '@/stores/filter'
 import { useRecognitionStore } from '@/stores/recognition'
 import { useConfigStore } from '@/stores/config'
+import { useStatsStore } from '@/stores/stats'
+import { useBatchStore } from '@/stores/batch'
 import { installKeymap, type KeymapHandlers } from '@/keymap'
-import { deleteCaptures } from '@/lib/ipc'
+import { zoomHost } from '@/lib/zoomHost'
+import { deleteCaptures, undoBatchOperation } from '@/lib/ipc'
 
 const captures = useCapturesStore()
 const selection = useSelectionStore()
 const preview = usePreviewStore()
+const compare = useCompareStore()
+const filter = useFilterStore()
 const recognition = useRecognitionStore()
 const configStore = useConfigStore()
+const stats = useStatsStore()
+const batch = useBatchStore()
 
 /** 左栏可见（对齐 GPUI sidebar_visible，运行时状态，默认可见） */
 const sidebarVisible = ref(true)
@@ -47,6 +62,75 @@ const leftTab = ref('dir')
 const rightPanelVisible = ref(true)
 /** 设置弹窗开关（顶栏齿轮按钮打开、Esc 分支关闭，v-model 传给 SettingsModal） */
 const settingsOpen = ref(false)
+/** 导入弹窗开关（顶栏「导入」按钮打开，×/Esc/遮罩关闭） */
+const importOpen = ref(false)
+
+/**
+ * 标记键目标路径：对比模式（视图态）作用于聚焦格（单张），幻灯片态作用于
+ * 当前显示张，其余作用于选中集。评分/色标/旗标/Delete 共用，保证对比/幻灯片
+ * 模式不误伤未显示的项。以 preview.isCompare/isSlideshow 判定（而非 store 的
+ * active 字段），退出后立即恢复选中集语义。
+ */
+function markPaths(): string[] {
+  const p = compare.focusedPath
+  if (preview.isCompare && p) return [p]
+  // 幻灯片态：当前张 = 筛选序 slideshowIndex 对应项（越界安全）
+  if (preview.isSlideshow) {
+    const i = filter.filteredIndices[preview.slideshowIndex]
+    const item = i === undefined ? null : captures.items[i]
+    return item ? [item.primaryPath] : []
+  }
+  return selection.selectedPaths
+}
+
+/**
+ * 进入对比（C 键）：多选 2–4 张 → 对比选中集；
+ * 不足 2 张时当前项属连拍组 → 取组内前 4 张（按显示序）。
+ */
+function enterCompare() {
+  const sel = selection.selectedIndices
+  if (sel.length >= 2 && sel.length <= 4) {
+    compare.open(sel)
+    preview.openCompare()
+    return
+  }
+  const idx = selection.selectedIndex
+  if (idx === null || sel.length > 4) return
+  const entry = filter.burstGroups.get(idx)
+  if (!entry) return
+  const members = [...filter.burstGroups.entries()]
+    .filter(([, e]) => e.groupId === entry.groupId)
+    .map(([i]) => i)
+    .slice(0, 4)
+  if (members.length < 2) return
+  compare.open(members)
+  preview.openCompare()
+}
+
+/** 回到网格：对比模式先清对比集，再走预览关闭（顶栏「网格」按钮 / G 共用） */
+function closeToGrid() {
+  if (compare.active) compare.close()
+  preview.closePreview()
+}
+
+/**
+ * 统计视图开关（右 rail 图标 / t 键）：进入前退出对比（对比集失效语义同
+ * closeToGrid），从任意视图硬切到统计；退出回网格（对齐 compare 语义）。
+ */
+function toggleStats() {
+  if (preview.isStats) {
+    exitStats()
+    return
+  }
+  if (compare.active) compare.close()
+  preview.openStats()
+}
+
+/** 退出统计视图（Esc/G/退出按钮共用）：复位本地态，下次进入重新拉取 */
+function exitStats() {
+  stats.clear()
+  preview.closeStats()
+}
 
 function toggleLeftPanel() {
   sidebarVisible.value = !sidebarVisible.value
@@ -70,52 +154,115 @@ function toggleBatchTab() {
  * 此处只把 action 名接到真实 store 调用（识别/删除已接 recognition store 与 ipc）。
  */
 const keymapHandlers: KeymapHandlers = {
-  // 评分：1–5 评分，0 清除
-  rate1: () => void captures.applyRating(selection.selectedPaths, 1),
-  rate2: () => void captures.applyRating(selection.selectedPaths, 2),
-  rate3: () => void captures.applyRating(selection.selectedPaths, 3),
-  rate4: () => void captures.applyRating(selection.selectedPaths, 4),
-  rate5: () => void captures.applyRating(selection.selectedPaths, 5),
-  rate0: () => void captures.applyRating(selection.selectedPaths, 0),
-  // 色标：6红 7黄 8绿 9蓝
-  labelRed: () => void captures.applyColorLabel(selection.selectedPaths, 'Red'),
-  labelYellow: () => void captures.applyColorLabel(selection.selectedPaths, 'Yellow'),
-  labelGreen: () => void captures.applyColorLabel(selection.selectedPaths, 'Green'),
-  labelBlue: () => void captures.applyColorLabel(selection.selectedPaths, 'Blue'),
+  // 评分：1–5 评分，0 清除。对比模式下经 markPaths 作用于聚焦格单张（选片主路径），
+  // 聚焦切换用 ←/→ 或点击（见 prev/next 的 isCompare 分支）。
+  rate1: () => void captures.applyRating(markPaths(), 1),
+  rate2: () => void captures.applyRating(markPaths(), 2),
+  rate3: () => void captures.applyRating(markPaths(), 3),
+  rate4: () => void captures.applyRating(markPaths(), 4),
+  rate5: () => void captures.applyRating(markPaths(), 5),
+  rate0: () => void captures.applyRating(markPaths(), 0),
+  // 色标：6红 7黄 8绿 9蓝，Ctrl+6 紫
+  labelRed: () => void captures.applyColorLabel(markPaths(), 'Red'),
+  labelYellow: () => void captures.applyColorLabel(markPaths(), 'Yellow'),
+  labelGreen: () => void captures.applyColorLabel(markPaths(), 'Green'),
+  labelBlue: () => void captures.applyColorLabel(markPaths(), 'Blue'),
+  labelPurple: () => void captures.applyColorLabel(markPaths(), 'Purple'),
   // 旗标：P/X 标记，U 清除
-  flagPick: () => void captures.applyFlag(selection.selectedPaths, 'Pick'),
-  flagReject: () => void captures.applyFlag(selection.selectedPaths, 'Reject'),
-  flagNone: () => void captures.applyFlag(selection.selectedPaths, null),
+  flagPick: () => void captures.applyFlag(markPaths(), 'Pick'),
+  flagReject: () => void captures.applyFlag(markPaths(), 'Reject'),
+  flagNone: () => void captures.applyFlag(markPaths(), null),
   // 识别：B 单张/所选（多选时批量）、Ctrl+B 全部未识别、Ctrl+Shift+B 重新识别全部
   recognize: () => void recognition.recognize(selection.selectedPaths),
   recognizeUnrecognized: () => recognition.recognizeUnrecognized(),
   recognizeAll: () => recognition.recognizeAll(),
   // 预览：V 检测框开关
   toggleBbox: () => preview.toggleBbox(),
-  // 视图：G 网格/预览切换（无选中时先选首项再进预览，保留原逻辑）
+  // 剪切警告叠加：'o' 键（仅预览态生效；红 = 高光溢出、蓝 = 死黑）
+  toggleClipping: () => {
+    if (preview.isPreview) preview.toggleClipOverlay()
+  },
+  // 视图：G 网格/预览切换（对比/幻灯片/统计模式下 G = 退出回到之前视图，不继续切换）
   toggleGridPreview: () => {
+    if (preview.isStats) {
+      stats.clear()
+      preview.closeStats()
+      return
+    }
+    if (preview.isSlideshow) {
+      preview.closeSlideshow()
+      return
+    }
+    if (preview.isCompare) {
+      compare.close()
+      preview.closeCompare()
+      return
+    }
     if (!preview.isPreview && selection.selectedIndex === null) {
       if (captures.count === 0) return
       selection.select(0)
     }
     preview.toggleView()
   },
-  // 导航：方向键扁平 ±1 移动（4 列网格下跨行自然发生，对齐 GPUI）；Home/End 跳首尾
-  prev: () => selection.move(-1),
-  next: () => selection.move(1),
+  // 对比：C 进入（多选 2–4 张 / 连拍组前 4 张）
+  compare: enterCompare,
+  // 统计视图：t 进入/退出（全局鸟种索引，T1 批次）
+  stats: toggleStats,
+  // 缩放：= 放大 / - 缩小。锚点由视图组件注册的宿主决定（预览=视图中心、
+  // 对比=聚焦格中心）；网格/幻灯片态无宿主 → no-op。
+  zoomIn: () => zoomHost()?.zoomIn(),
+  zoomOut: () => zoomHost()?.zoomOut(),
+  // 幻灯片：s 进入（从当前选中张开始，按筛选结果顺序；对比态不进入）。
+  // 退出走 Esc/G（closePreview/toggleGridPreview 的 slideshow 分支）。
+  slideshow: () => {
+    if (preview.isCompare || preview.isSlideshow) return
+    if (selection.selectedIndex === null) {
+      if (captures.count === 0) return
+      selection.select(0)
+    }
+    preview.openSlideshow()
+  },
+  // 幻灯片：空格暂停/继续（仅幻灯片态生效）
+  slideshowTogglePlay: () => {
+    if (preview.isSlideshow) preview.toggleSlideshowPlay()
+  },
+  // 导航：方向键扁平 ±1 移动（4 列网格下跨行自然发生，对齐 GPUI）；Home/End 跳首尾。
+  // 对比模式下 ←/→ 改为移动聚焦格（网格选择不可见，移动无意义）；
+  // 幻灯片模式下 ←/→ 改为切张（切换即重置计时，见 SlideshowView watch）。
+  prev: () => {
+    if (preview.isSlideshow) {
+      preview.slideshowStep(-1)
+      return
+    }
+    if (preview.isCompare) compare.setFocus(compare.focus - 1)
+    else selection.move(-1)
+  },
+  next: () => {
+    if (preview.isSlideshow) {
+      preview.slideshowStep(1)
+      return
+    }
+    if (preview.isCompare) compare.setFocus(compare.focus + 1)
+    else selection.move(1)
+  },
   first: () => selection.moveTo(0),
   last: () => selection.moveTo(captures.count - 1),
   // 删除：Delete 单张/所选进回收站，无确认（对齐 GPUI layout.rs Delete 键）。
-  // 后端 delete_captures 删除后 emit scan:done，captures store 自动 reload，这里不重复拉取
+  // 后端 delete_captures 删除后 emit scan:done，captures store 自动 reload，这里不重复拉取；
+  // 对比模式下删聚焦格后对比集失效，直接退出对比。
   delete: () => {
-    const paths = selection.selectedPaths
+    const paths = markPaths()
     if (paths.length === 0) return
     void deleteCaptures(paths)
+    if (preview.isCompare) closeToGrid()
   },
+  // 撤销批量操作：Ctrl+Z（后端 undo_batch_operation 执行逆操作并触发重扫；
+  // 结果经状态栏 undoNotice 展示，跳过原因含「源不存在/原位置占用/副本保留」等）
+  undoBatch: () => void handleUndoBatch(),
   // 选择：Ctrl+A 全选 / Ctrl+D 取消选择
   selectAll: () => selection.selectAll(),
   deselectAll: () => selection.clear(),
-  // Esc：优先级对齐 GPUI layout.rs escape 分支（settings > 批量识别取消 > 框选清除 > 预览退出）
+  // Esc：优先级对齐 GPUI layout.rs escape 分支（settings > 批量识别取消 > 对比退出 > 框选清除 > 预览退出）
   closePreview: () => {
     // settings 分支：设置弹窗打开时 Esc 优先关闭（对齐 GPUI：settings > 批量识别取消 > 框选清除 > 预览退出）
     if (settingsOpen.value) {
@@ -124,6 +271,20 @@ const keymapHandlers: KeymapHandlers = {
     }
     if (recognition.running) {
       void recognition.cancel()
+      return
+    }
+    if (preview.isCompare) {
+      compare.close()
+      preview.closeCompare()
+      return
+    }
+    if (preview.isSlideshow) {
+      preview.closeSlideshow()
+      return
+    }
+    if (preview.isStats) {
+      stats.clear()
+      preview.closeStats()
       return
     }
     if (preview.pendingBox) {
@@ -137,6 +298,23 @@ const keymapHandlers: KeymapHandlers = {
   // 面板开关：Ctrl+[ / Ctrl+]（对齐 GPUI Action::ToggleLeftPanel / ToggleRightPanel）
   toggleLeftPanel,
   toggleRightPanel,
+}
+
+/**
+ * 撤销最近一次批量操作（Ctrl+Z）：调后端 undo_batch_operation（逆操作执行 +
+ * 元数据反向同步 + 全量重扫），结果经状态栏 undoNotice 展示；跳过原因
+ * （源不存在 / 原位置占用防覆盖 / 副本保留）随成功数一并提示。
+ */
+async function handleUndoBatch() {
+  try {
+    const r = await undoBatchOperation()
+    const skippedText =
+      r.skipped.length > 0 ? `，跳过 ${r.skipped.length} 条（${r.skipped[0][1]}${r.skipped.length > 1 ? ' 等' : ''}）` : ''
+    batch.undoNotice = `撤销成功：${r.reverted} 条${skippedText}`
+  } catch (e) {
+    // 无日志/未打开目录等：轻提示（不弹错误框，撤销是尽力而为的操作）
+    batch.undoNotice = `撤销失败：${String(e)}`
+  }
 }
 
 /** keymap 安装后的卸载函数（onUnmounted 调用） */
@@ -178,6 +356,11 @@ function toPreview() {
       <Button size="sm" :disabled="captures.scanning" @click="captures.openDirectory()">
         <FolderOpenIcon data-icon="inline-start" />
         打开目录
+      </Button>
+      <!-- 导入（T1 批次 ImportRebuild：SD 卡 → 按日期建目录 → 去重 → 复制/移动） -->
+      <Button size="sm" variant="outline" @click="importOpen = true">
+        <ImportIcon data-icon="inline-start" />
+        导入
       </Button>
       <!-- 批量操作：左栏 tab 切换（目录 / 批量，对齐右栏 tabs 模式） -->
       <Button
@@ -250,7 +433,7 @@ function toPreview() {
           variant="ghost"
           title="浏览 / 网格"
           :class="{ 'bg-accent text-accent-foreground': !preview.isPreview }"
-          @click="preview.closePreview()"
+          @click="closeToGrid"
         >
           <LayoutGridIcon class="size-4" />
         </Button>
@@ -283,9 +466,11 @@ function toPreview() {
         <FilterBar v-if="captures.directory" />
 
         <div class="min-h-0 flex-1">
-          <!-- 空态：无目录时（对齐 GPUI layout.rs empty state） -->
+          <!-- 统计视图：全局鸟种索引（T1 批次；无目录也可看，Esc/G/退出按钮关闭） -->
+          <StatsView v-if="preview.isStats" />
+          <!-- 空态：无目录时（对齐 GPUI layout.rs empty state；统计态优先于空态） -->
           <div
-            v-if="!captures.directory"
+            v-else-if="!captures.directory"
             class="flex h-full flex-col items-center justify-center gap-3"
           >
             <GalleryVerticalEndIcon class="size-12 text-muted-foreground/20" />
@@ -295,6 +480,8 @@ function toPreview() {
               打开目录
             </Button>
           </div>
+          <SlideshowView v-if="preview.isSlideshow" />
+          <CompareView v-else-if="preview.isCompare" />
           <PhotoPreview v-else-if="preview.isPreview" />
           <PhotoGrid v-else />
         </div>
@@ -308,7 +495,7 @@ function toPreview() {
       />
 
       <!-- 右 Activity Rail：48px（对齐 GPUI right_rail.rs） -->
-      <RightRail :visible="rightPanelVisible" @toggle="toggleRightPanel" />
+      <RightRail :visible="rightPanelVisible" @toggle="toggleRightPanel" @stats="toggleStats" />
     </div>
 
     <!-- 底部状态栏 24px -->
@@ -317,5 +504,9 @@ function toPreview() {
     <ContextMenu />
     <!-- 设置弹窗（Teleport 到 body；齿轮按钮打开、Esc/×/遮罩关闭） -->
     <SettingsModal v-model:open="settingsOpen" />
+    <!-- 导入弹窗（顶栏「导入」按钮打开；选源 → 计划预览 → 执行） -->
+    <ImportDialog v-model:open="importOpen" />
+    <!-- 导出弹窗（右键菜单「导出…」/ 批量面板「导出」打开；自身 store 管理显隐） -->
+    <ExportDialog />
   </div>
 </template>

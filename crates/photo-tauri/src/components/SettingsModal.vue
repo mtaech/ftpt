@@ -11,6 +11,7 @@ import { Dialog, DialogClose, DialogContent, DialogTitle } from '@/components/ui
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Button } from '@/components/ui/button'
 import { useConfigStore } from '@/stores/config'
+import { useCapturesStore } from '@/stores/captures'
 import { listSystemFonts } from '@/lib/ipc'
 import { BINDINGS, type KeyBinding, type KeymapAction } from '@/keymap'
 import type { Theme } from '@/lib/bindings'
@@ -70,6 +71,15 @@ const thumbnailSize = computed({
   set: (v: number) => void config.update({ thumbnailSize: v }),
 })
 
+/** 扫描包含子目录开关：改动即保存（setAppConfig → save_config）；有打开目录时立即重扫按新设置生效 */
+const includeSubdirectories = computed(() => config.includeSubdirectories)
+async function toggleIncludeSubdirectories() {
+  await config.update({ includeSubdirectories: !config.includeSubdirectories })
+  // 自动重扫当前目录（扫描编排按配置选单层/递归；无目录时等下次打开生效）
+  const captures = useCapturesStore()
+  if (captures.directory) void captures.rescan()
+}
+
 onMounted(async () => {
   try {
     fonts.value = await listSystemFonts()
@@ -92,6 +102,7 @@ const ACTION_DESC: Record<KeymapAction, string> = {
   labelYellow: '黄色标签',
   labelGreen: '绿色标签',
   labelBlue: '蓝色标签',
+  labelPurple: '紫色标签',
   flagPick: '标记为入选',
   flagReject: '标记为淘汰',
   flagNone: '清除旗标',
@@ -99,12 +110,20 @@ const ACTION_DESC: Record<KeymapAction, string> = {
   recognizeUnrecognized: '识别未识别的',
   recognizeAll: '重新识别全部',
   toggleBbox: '切换检测框',
+  toggleClipping: '切换剪切警告叠加（预览）',
   toggleGridPreview: '切换网格/预览',
+  zoomIn: '放大（预览/对比）',
+  zoomOut: '缩小（预览/对比）',
+  slideshow: '幻灯片模式',
+  slideshowTogglePlay: '幻灯片：暂停/继续',
+  compare: '对比模式（多选 2–4 张 / 连拍组前 4 张）',
+  stats: '统计视图（全局鸟种索引）',
   prev: '上一张',
   next: '下一张',
   first: '第一张',
   last: '最后一张',
   delete: '删除到回收站',
+  undoBatch: '撤销批量操作（移动/复制/重命名）',
   selectAll: '全选',
   deselectAll: '取消全选',
   closePreview: '取消/关闭',
@@ -122,6 +141,7 @@ const KEY_LABELS: Record<string, string> = {
   escape: 'Esc',
   f5: 'F5',
   delete: 'Delete',
+  ' ': '空格',
 }
 
 /** 把绑定行渲染为可读键位串（修饰键顺序 Ctrl → Shift → 键名，对齐 GPUI） */
@@ -137,13 +157,16 @@ function formatKeys(b: KeyBinding): string {
 const SHORTCUT_SECTIONS: { title: string; actions: KeymapAction[] }[] = [
   {
     title: '常用操作',
-    actions: ['prev', 'next', 'first', 'last', 'toggleGridPreview', 'delete', 'refresh'],
+    actions: [
+      'prev', 'next', 'first', 'last', 'toggleGridPreview', 'delete', 'undoBatch', 'refresh',
+      'zoomIn', 'zoomOut', 'slideshow', 'slideshowTogglePlay', 'toggleClipping',
+    ],
   },
   {
     title: '标记',
     actions: [
       'rate1', 'rate2', 'rate3', 'rate4', 'rate5', 'rate0',
-      'labelRed', 'labelYellow', 'labelGreen', 'labelBlue',
+      'labelRed', 'labelYellow', 'labelGreen', 'labelBlue', 'labelPurple',
       'flagPick', 'flagReject', 'flagNone',
     ],
   },
@@ -301,6 +324,31 @@ const aboutRows = computed(
               />
               <p class="text-xs text-muted-foreground">
                 即时调整网格 cell（对齐 GPUI）；缩略图缓存按需重新生成
+              </p>
+            </div>
+
+            <!-- 扫描包含子目录：改动即保存；已打开目录时自动重扫按新设置生效 -->
+            <div class="space-y-1.5">
+              <div class="flex items-center justify-between">
+                <label class="text-sm font-medium">扫描包含子目录</label>
+                <button
+                  type="button"
+                  role="switch"
+                  :aria-checked="includeSubdirectories"
+                  aria-label="扫描包含子目录"
+                  class="relative h-5 w-9 shrink-0 rounded-full transition-colors focus-visible:ring-2 focus-visible:ring-ring"
+                  :class="includeSubdirectories ? 'bg-primary' : 'bg-muted'"
+                  @click="toggleIncludeSubdirectories"
+                >
+                  <span
+                    class="absolute top-0.5 left-0.5 size-4 rounded-full bg-card shadow transition-transform"
+                    :class="includeSubdirectories ? 'translate-x-4' : ''"
+                  />
+                </button>
+              </div>
+              <p class="text-xs text-muted-foreground">
+                开启后扫描当前目录的全部子目录（递归，每文件一个 Capture）；
+                改动即时保存并自动重扫当前目录，未打开目录时下次打开生效
               </p>
             </div>
           </TabsContent>

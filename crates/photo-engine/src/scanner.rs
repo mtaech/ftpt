@@ -21,6 +21,30 @@ pub fn scan_directory(
     _filter: &FilterCriteria,
     on_progress: Option<Box<dyn Fn(u32) + Send>>,
 ) -> Result<Vec<Capture>, ScanError> {
+    scan_with_depth(dir, _filter, on_progress, Some(1))
+}
+
+/// 递归扫描目录（含全部子目录，不限深度）：与 `scan_directory` 同一套逻辑——
+/// 每个图片文件一个 Capture、扫描期不筛选，仅 walkdir 深度不同。
+/// 子目录照片的相对路径键（`sub/bird.jpg`）由 app 层
+/// `strip_prefix` + 正斜杠归一化生成，folder_db 的 rel 键天然兼容分隔符
+/// （upsert/get 均做 `\` → `/` 归一化，见 folder_db.rs）。
+pub fn scan_directory_recursive(
+    dir: &Path,
+    _filter: &FilterCriteria,
+    on_progress: Option<Box<dyn Fn(u32) + Send>>,
+) -> Result<Vec<Capture>, ScanError> {
+    scan_with_depth(dir, _filter, on_progress, None)
+}
+
+/// scan_directory / scan_directory_recursive 的公共实现：
+/// `max_depth` = Some(n) 限定层数（单层扫描 = Some(1)），None = 不限深度（递归）。
+fn scan_with_depth(
+    dir: &Path,
+    _filter: &FilterCriteria,
+    on_progress: Option<Box<dyn Fn(u32) + Send>>,
+    max_depth: Option<usize>,
+) -> Result<Vec<Capture>, ScanError> {
     let report = |pct: u32| {
         if let Some(ref cb) = on_progress {
             cb(pct);
@@ -36,10 +60,11 @@ pub fn scan_directory(
 
     let mut entries: Vec<Entry> = Vec::new();
 
-    for entry in WalkDir::new(dir)
-        .max_depth(1)
-        .into_iter()
-        .filter_map(|e| e.ok())
+    let mut walker = WalkDir::new(dir);
+    if let Some(depth) = max_depth {
+        walker = walker.max_depth(depth);
+    }
+    for entry in walker.into_iter().filter_map(|e| e.ok())
     {
         let path = entry.path();
         if !path.is_file() {
@@ -229,5 +254,63 @@ mod tests {
         let captures = scan_directory(dir.path(), &FilterCriteria::default(), None).unwrap();
         // 每文件一个 Capture：a.jpg/a.NEF/b.jpg/b.CR2/c.jpg 共 5 个
         assert_eq!(captures.len(), 5);
+    }
+
+    #[test]
+    fn test_recursive_nested_dirs() {
+        let dir = TempDir::new().unwrap();
+        create_test_files(
+            &dir,
+            &[
+                "a.jpg",
+                "sub/b.jpg",
+                "sub/deep/c.jpg",
+                "sub/deep/clip.mov",
+                "sub/skip.xmp",
+            ],
+        );
+
+        // 单层扫描：只含根目录直属文件（xmp 非 viewable 忽略）
+        let flat = scan_directory(dir.path(), &FilterCriteria::default(), None).unwrap();
+        assert_eq!(flat.len(), 1);
+        assert_eq!(flat[0].source_files[0].path.file_name().unwrap(), "a.jpg");
+
+        // 递归扫描：全部子目录内的图片/视频都进（xmp 仍忽略）
+        let nested = scan_directory_recursive(dir.path(), &FilterCriteria::default(), None).unwrap();
+        assert_eq!(nested.len(), 4, "a.jpg/b.jpg/c.jpg/clip.mov，xmp 应被忽略");
+        let names: Vec<&str> = nested
+            .iter()
+            .map(|c| c.source_files[0].path.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert!(names.contains(&"a.jpg"));
+        assert!(names.contains(&"b.jpg"));
+        assert!(names.contains(&"c.jpg"));
+        assert!(names.contains(&"clip.mov"));
+    }
+
+    #[test]
+    fn test_recursive_rel_path_keys() {
+        let dir = TempDir::new().unwrap();
+        create_test_files(
+            &dir,
+            &["a.jpg", "sub/b.jpg", "sub/deep/c.jpg", "sub/deep/clip.mov"],
+        );
+
+        let nested = scan_directory_recursive(dir.path(), &FilterCriteria::default(), None).unwrap();
+        // 含子目录时 rel 路径键（strip_prefix + 正斜杠）必须正确：
+        // folder_db 的 recognition/adjustments 表以此作主键，子目录分隔符天然兼容
+        let mut rels: Vec<String> = nested
+            .iter()
+            .map(|c| {
+                c.source_files[c.primary_index]
+                    .path
+                    .strip_prefix(dir.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        rels.sort();
+        assert_eq!(rels, vec!["a.jpg", "sub/b.jpg", "sub/deep/c.jpg", "sub/deep/clip.mov"]);
     }
 }

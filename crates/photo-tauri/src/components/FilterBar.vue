@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { useFilterStore } from '@/stores/filter'
 import { useCapturesStore } from '@/stores/captures'
 import { usePreviewStore } from '@/stores/preview'
+import { useConfigStore } from '@/stores/config'
 import { formatToString } from '@/lib/filter'
 import { ratingToNumber } from '@/lib/format'
 import type {
@@ -23,9 +24,23 @@ import type {
 const filter = useFilterStore()
 const captures = useCapturesStore()
 const preview = usePreviewStore()
+const config = useConfigStore()
 
 /** 折叠态（对齐 GPUI filter_bar_expanded；默认折叠） */
 const expanded = ref(false)
+
+// ── 网格缩略图尺寸实时调节（滑块 120–400px）：本地即时生效（PhotoGrid 列数/行高
+// 实时跟随），300ms 去抖后持久化 setAppConfig（对齐「设置改动即保存」语义，拖动不刷后端）──
+const THUMB_SLIDER = { min: 120, max: 400, step: 10 } as const
+let thumbPersistTimer: number | undefined
+const thumbnailSize = computed({
+  get: () => config.thumbnailSize,
+  set: (v: number) => {
+    config.setThumbnailSize(v)
+    clearTimeout(thumbPersistTimer)
+    thumbPersistTimer = setTimeout(() => void config.update({ thumbnailSize: v }), 300)
+  },
+})
 
 // ── 格式 chips（固定集合，对齐 GPUI render_format_filter；RAW 用 { Raw: 'RAW' }）──
 const FORMAT_CHIPS: { label: string; value: ImageFormat }[] = [
@@ -82,6 +97,7 @@ const SORT_OPTIONS: { value: SortBy; label: string }[] = [
   { value: 'FileSize', label: '文件大小' },
   { value: 'Rating', label: '评分' },
   { value: 'Modified', label: '修改时间' },
+  { value: 'EyeSharpness', label: '眼锐度' },
 ]
 
 /** 格式相等（null = 未激活；Raw 需比较载荷，对齐 GPUI format_chip 的 active 判断） */
@@ -149,6 +165,32 @@ const summaryChips = computed(() => {
       clear: () => filter.setDateRange(null, null),
     })
   }
+  if (c.isoMin !== null || c.isoMax !== null) {
+    chips.push({
+      key: 'iso',
+      label: `ISO: ${c.isoMin ?? ''}~${c.isoMax ?? ''}`,
+      clear: () => filter.setIsoRange(null, null),
+    })
+  }
+  if (c.focalMin !== null || c.focalMax !== null) {
+    chips.push({
+      key: 'focal',
+      label: `焦距: ${c.focalMin ?? ''}~${c.focalMax ?? ''}mm`,
+      clear: () => filter.setFocalRange(null, null),
+    })
+  }
+  if (c.lensFilter.length > 0) {
+    const label =
+      c.lensFilter.length === 1 ? c.lensFilter[0] : `${c.lensFilter[0]} 等${c.lensFilter.length}支`
+    chips.push({ key: 'lens', label: `镜头: ${label}`, clear: () => filter.setLensFilter([]) })
+  }
+  if (c.keywordFilter.length > 0) {
+    const label =
+      c.keywordFilter.length === 1
+        ? c.keywordFilter[0]
+        : `${c.keywordFilter[0]} 等${c.keywordFilter.length}个`
+    chips.push({ key: 'keyword', label: `关键词: ${label}`, clear: () => filter.setKeywordFilter([]) })
+  }
   return chips
 })
 
@@ -178,6 +220,64 @@ function onDateChange(side: 'from' | 'to', e: Event) {
   const v = (e.target as HTMLInputElement).value || null
   if (side === 'from') filter.setDateRange(v, filter.criteria.dateTo)
   else filter.setDateRange(filter.criteria.dateFrom, v)
+}
+
+// ── ISO 区间 / 焦距区间（闭区间，空 = 该侧不限制）──
+function numOrNull(v: string): number | null {
+  const n = Number(v)
+  return v === '' || !Number.isFinite(n) ? null : n
+}
+function onIsoChange(side: 'min' | 'max', e: Event) {
+  const v = numOrNull((e.target as HTMLInputElement).value)
+  filter.setIsoRange(side === 'min' ? v : filter.criteria.isoMin, side === 'max' ? v : filter.criteria.isoMax)
+}
+function onFocalChange(side: 'min' | 'max', e: Event) {
+  const v = numOrNull((e.target as HTMLInputElement).value)
+  filter.setFocalRange(
+    side === 'min' ? v : filter.criteria.focalMin,
+    side === 'max' ? v : filter.criteria.focalMax,
+  )
+}
+
+// ── 镜头多选下拉（自绘，候选 = 当前目录 distinct lens 值；精确匹配）──
+const lensOpen = ref(false)
+const lensSearch = ref('')
+const lensBoxEl = ref<HTMLElement | null>(null)
+
+const lensOptions = computed(() => {
+  const seen = new Set<string>()
+  const all: string[] = []
+  for (const c of captures.items) {
+    if (c.lens && !seen.has(c.lens)) {
+      seen.add(c.lens)
+      all.push(c.lens)
+    }
+  }
+  all.sort()
+  const q = lensSearch.value.trim().toLowerCase()
+  return q ? all.filter((l) => l.toLowerCase().includes(q)) : all
+})
+
+function toggleLens(lens: string) {
+  const cur = filter.criteria.lensFilter
+  filter.setLensFilter(cur.includes(lens) ? cur.filter((l) => l !== lens) : [...cur, lens])
+}
+
+// ── 关键词筛选输入：回车添加（逗号分隔），chips 态由 summaryChips 呈现 ──
+const keywordInput = ref('')
+function onKeywordAdd() {
+  const parts = keywordInput.value
+    .split(/[,，]/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  if (parts.length === 0) return
+  keywordInput.value = ''
+  const cur = filter.criteria.keywordFilter
+  const merged = [...cur]
+  for (const p of parts) {
+    if (!merged.includes(p)) merged.push(p)
+  }
+  filter.setKeywordFilter(merged)
 }
 
 // ── 排序控件 ──
@@ -211,10 +311,17 @@ function onDocMouseDown(e: MouseEvent) {
     birdOpen.value = false
     birdSearch.value = ''
   }
+  if (lensOpen.value && lensBoxEl.value && !lensBoxEl.value.contains(e.target as Node)) {
+    lensOpen.value = false
+    lensSearch.value = ''
+  }
 }
 
 onMounted(() => document.addEventListener('mousedown', onDocMouseDown))
-onUnmounted(() => document.removeEventListener('mousedown', onDocMouseDown))
+onUnmounted(() => {
+  document.removeEventListener('mousedown', onDocMouseDown)
+  clearTimeout(thumbPersistTimer)
+})
 
 // 目录打开后刷新鸟种候选（listBirdSpecies 名录全量、拼音排序）
 watch(
@@ -227,7 +334,7 @@ watch(
 </script>
 
 <template>
-  <div v-if="!preview.isPreview" class="shrink-0 border-b border-border bg-card">
+  <div v-if="preview.isGrid" class="shrink-0 border-b border-border bg-card">
     <!-- 折叠行：切换按钮 + 摘要 chips + 排序控件（横向滚动） -->
     <div class="flex items-center gap-1.5 overflow-x-auto px-2 py-1">
       <button
@@ -280,6 +387,23 @@ watch(
         <option value="Ascending">升序</option>
         <option value="Descending">降序</option>
       </select>
+
+      <!-- 网格缩略图尺寸滑块（拖动即时改网格列宽/行高，300ms 去抖持久化；仅网格态显示） -->
+      <div
+        class="flex shrink-0 items-center gap-1.5"
+        :title="'缩略图尺寸 ' + thumbnailSize + 'px'"
+      >
+        <span class="text-[0.625rem] text-muted-foreground tabular-nums">{{ thumbnailSize }}px</span>
+        <input
+          type="range"
+          v-model.number="thumbnailSize"
+          :min="THUMB_SLIDER.min"
+          :max="THUMB_SLIDER.max"
+          :step="THUMB_SLIDER.step"
+          class="h-3.5 w-28 cursor-pointer accent-primary"
+          aria-label="缩略图尺寸"
+        />
+      </div>
     </div>
 
     <!-- 展开态：条件组（对齐 GPUI expanded_form） -->
@@ -398,6 +522,121 @@ watch(
             @change="onDateChange('to', $event)"
           />
         </label>
+      </div>
+
+      <!-- ISO 区间（闭区间，空 = 该侧不限制） -->
+      <div class="flex items-center gap-1">
+        <span class="shrink-0 text-xs text-muted-foreground select-none">ISO</span>
+        <input
+          type="number"
+          min="0"
+          placeholder="最小"
+          class="h-8 w-16 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+          :value="filter.criteria.isoMin ?? ''"
+          @change="onIsoChange('min', $event)"
+        />
+        <span class="text-xs text-muted-foreground select-none">~</span>
+        <input
+          type="number"
+          min="0"
+          placeholder="最大"
+          class="h-8 w-16 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+          :value="filter.criteria.isoMax ?? ''"
+          @change="onIsoChange('max', $event)"
+        />
+      </div>
+
+      <!-- 焦距区间（mm，闭区间，空 = 该侧不限制） -->
+      <div class="flex items-center gap-1">
+        <span class="shrink-0 text-xs text-muted-foreground select-none">焦距</span>
+        <input
+          type="number"
+          min="0"
+          placeholder="最小"
+          class="h-8 w-16 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+          :value="filter.criteria.focalMin ?? ''"
+          @change="onFocalChange('min', $event)"
+        />
+        <span class="text-xs text-muted-foreground select-none">~</span>
+        <input
+          type="number"
+          min="0"
+          placeholder="最大"
+          class="h-8 w-16 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+          :value="filter.criteria.focalMax ?? ''"
+          @change="onFocalChange('max', $event)"
+        />
+        <span class="text-xs text-muted-foreground select-none">mm</span>
+      </div>
+
+      <!-- 镜头多选（自绘下拉，候选 = 当前目录 distinct lens；精确匹配） -->
+      <div ref="lensBoxEl" class="relative shrink-0">
+        <button
+          type="button"
+          class="flex h-8 min-w-36 max-w-56 items-center gap-1 rounded-sm border px-2 text-xs transition-colors select-none"
+          :class="
+            filter.criteria.lensFilter.length > 0
+              ? 'border-primary bg-primary/10 text-primary'
+              : 'border-border bg-card text-foreground'
+          "
+          @click="lensOpen = !lensOpen"
+        >
+          <span class="truncate">
+            {{
+              filter.criteria.lensFilter.length === 0
+                ? '选择镜头...'
+                : filter.criteria.lensFilter.length === 1
+                  ? filter.criteria.lensFilter[0]
+                  : `${filter.criteria.lensFilter[0]} 等${filter.criteria.lensFilter.length}支`
+            }}
+          </span>
+          <ChevronDownIcon class="ml-auto size-3.5 shrink-0" />
+        </button>
+        <div
+          v-if="lensOpen"
+          class="absolute top-full left-0 z-30 mt-1 w-64 rounded-md border border-border bg-popover shadow-lg"
+        >
+          <input
+            v-model="lensSearch"
+            type="text"
+            placeholder="搜索镜头..."
+            class="m-1.5 h-7 w-[calc(100%-0.75rem)] rounded-sm border border-input bg-card px-1.5 text-xs text-foreground outline-none"
+            @keydown.esc="lensOpen = false"
+          />
+          <ul class="max-h-48 overflow-y-auto p-1">
+            <li v-for="lens in lensOptions" :key="lens">
+              <button
+                type="button"
+                class="flex w-full items-center gap-1.5 rounded-sm px-1.5 py-1 text-left text-xs hover:bg-muted"
+                @click="toggleLens(lens)"
+              >
+                <CheckIcon v-if="filter.criteria.lensFilter.includes(lens)" class="size-3.5 text-primary" />
+                <span v-else class="size-3.5" />
+                <span class="truncate">{{ lens }}</span>
+              </button>
+            </li>
+            <li v-if="lensOptions.length === 0" class="px-1.5 py-1 text-xs text-muted-foreground">
+              无匹配镜头
+            </li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- 关键词筛选（输入添加，回车/逗号分隔；任一命中即中） -->
+      <div class="flex items-center gap-1">
+        <span class="shrink-0 text-xs text-muted-foreground select-none">关键词</span>
+        <input
+          v-model="keywordInput"
+          type="text"
+          placeholder="输入后回车添加..."
+          class="h-8 w-40 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+          :class="
+            filter.criteria.keywordFilter.length > 0
+              ? 'border-primary bg-primary/10 text-primary'
+              : ''
+          "
+          @keydown.enter.prevent="onKeywordAdd"
+        />
       </div>
 
       <!-- 鸟种多选搜索（自绘下拉；TODO(替换点)：shadcn-vue Combobox multiple 接入后替换） -->

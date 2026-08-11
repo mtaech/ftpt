@@ -6,10 +6,12 @@ import { FolderIcon, SparklesIcon, XIcon } from '@lucide/vue'
 import { useCapturesStore } from '@/stores/captures'
 import { useSelectionStore } from '@/stores/selection'
 import { useRecognitionStore } from '@/stores/recognition'
+import { useBatchStore } from '@/stores/batch'
 
 const captures = useCapturesStore()
 const selection = useSelectionStore()
 const recognition = useRecognitionStore()
+const batch = useBatchStore()
 
 /** 目录显示名（路径末段，对齐 App.vue dirName） */
 function dirName(dir: string | null): string {
@@ -64,6 +66,29 @@ watch(
       showSummary.value = false
       recognition.reset()
     }, SUMMARY_MS)
+  },
+)
+
+// ── 撤销批量操作提示区（Ctrl+Z 结果；对齐 summary 的瞬态展示语义） ──
+
+/** 撤销提示展示开关：undoNotice 到来显示，UNDO_MS 后隐藏并清空 store */
+const UNDO_MS = 4000
+const showUndo = ref(false)
+let undoTimer: number | undefined
+
+watch(
+  () => batch.undoNotice,
+  (n) => {
+    clearTimeout(undoTimer)
+    if (!n) {
+      showUndo.value = false
+      return
+    }
+    showUndo.value = true
+    undoTimer = setTimeout(() => {
+      showUndo.value = false
+      batch.undoNotice = null
+    }, UNDO_MS)
   },
 )
 </script>
@@ -123,6 +148,10 @@ watch(
       <!-- 空提示（无未识别照片等） -->
       <span v-else-if="recognition.notice" class="text-muted-foreground">
         {{ recognition.notice }}
+      </span>
+      <!-- 撤销批量操作提示（Ctrl+Z 结果；数秒后消失） -->
+      <span v-else-if="showUndo && batch.undoNotice" class="tabular-nums text-label-blue">
+        {{ batch.undoNotice }}
       </span>
       <span v-else>就绪</span>
     </div>

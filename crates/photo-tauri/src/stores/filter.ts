@@ -18,6 +18,7 @@ import type {
   SortDirection,
 } from '@/lib/bindings'
 import { listBirdSpecies } from '@/lib/ipc'
+import { computeBurstGroups, type BurstEntry } from '@/lib/burst'
 import { useCapturesStore } from './captures'
 
 export const useFilterStore = defineStore('filter', {
@@ -45,6 +46,19 @@ export const useFilterStore = defineStore('filter', {
     filtered(): CaptureMeta[] {
       const captures = useCapturesStore()
       return this.filteredIndices.map((i) => captures.items[i])
+    },
+    /**
+     * 连拍组映射（captures.items 下标 → 组信息；仅 size≥2 的组）。
+     * 按显示序分组（computeBurstGroups 输入即 filteredIndices 对应项），
+     * 网格徽标与对比模式「取组内前 4 张」共用。
+     */
+    burstGroups(): Map<number, BurstEntry> {
+      const captures = useCapturesStore()
+      const order = this.filteredIndices
+      const groups = computeBurstGroups(order.map((i) => captures.items[i]))
+      const byIndex = new Map<number, BurstEntry>()
+      groups.forEach((e, pos) => byIndex.set(order[pos], e))
+      return byIndex
     },
     /** 是否有任一筛选条件生效（批量操作禁用依据） */
     hasActiveFilters(): boolean {
@@ -86,6 +100,24 @@ export const useFilterStore = defineStore('filter', {
     /** 识别状态筛选 */
     setRecognition(recognitionFilter: RecognitionFilter) {
       this.criteria.recognitionFilter = recognitionFilter
+    },
+    /** ISO 区间（闭区间；null = 该侧不限制） */
+    setIsoRange(isoMin: number | null, isoMax: number | null) {
+      this.criteria.isoMin = isoMin
+      this.criteria.isoMax = isoMax
+    },
+    /** 焦距区间（mm，闭区间；null = 该侧不限制） */
+    setFocalRange(focalMin: number | null, focalMax: number | null) {
+      this.criteria.focalMin = focalMin
+      this.criteria.focalMax = focalMax
+    },
+    /** 镜头多选（全量替换选中集） */
+    setLensFilter(lensFilter: string[]) {
+      this.criteria.lensFilter = [...lensFilter]
+    },
+    /** 关键词筛选（全量替换选中集） */
+    setKeywordFilter(keywordFilter: string[]) {
+      this.criteria.keywordFilter = [...keywordFilter]
     },
     /** 排序方式/方向（对齐 GPUI：改排序不清筛选） */
     setSort(sortBy: SortBy, sortDirection: SortDirection) {

@@ -12,6 +12,7 @@ import {
   scanDirectory,
   setColorLabel,
   setFlag,
+  setKeywords,
   setRating,
   type ScanProgressPayload,
 } from '@/lib/ipc'
@@ -147,6 +148,15 @@ export const useCapturesStore = defineStore('captures', {
         paths,
         (c) => (c.colorLabel = label ?? 'None'),
         () => setColorLabel(paths, label),
+      )
+    },
+
+    /** 关键词全量替换（对齐评分卡语义：作用于选中集，focus 编辑结果整体应用） */
+    async applyKeywords(paths: string[], keywords: string[]) {
+      await this.mutateOptimistic(
+        paths,
+        (c) => (c.keywords = [...keywords]),
+        () => setKeywords(paths, keywords),
       )
     },
   },

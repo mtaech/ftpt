@@ -32,10 +32,14 @@ function mk(overrides: Partial<CaptureMeta>): CaptureMeta {
     rating: 'None',
     colorLabel: 'None',
     flag: null,
+    keywords: [],
+    gpsLat: null,
+    gpsLon: null,
     birdName: null,
     birdConfidence: null,
     recognitionStatus: null,
     birdBbox: null,
+    eyeSharpness: null,
     ...overrides,
   }
 }
@@ -160,6 +164,93 @@ describe('filterCaptures', () => {
     expect(filterCaptures(items, c)).toEqual([3])
   })
 
+  it('ISO 区间：闭区间边界精确，无 ISO 数据排除', () => {
+    const items = [
+      mk({ iso: 100 }),
+      mk({ iso: 200 }),
+      mk({ iso: 400 }),
+      mk({ iso: null }),
+    ]
+    const c = defaultFilterCriteria()
+    c.isoMin = 200
+    c.isoMax = 400
+    expect(filterCaptures(items, c)).toEqual([1, 2])
+    // 单侧限制
+    const c2 = defaultFilterCriteria()
+    c2.isoMin = 200
+    expect(filterCaptures(items, c2)).toEqual([1, 2])
+    const c3 = defaultFilterCriteria()
+    c3.isoMax = 200
+    expect(filterCaptures(items, c3)).toEqual([0, 1])
+  })
+
+  it('焦距区间：解析 "600mm"/"840mm" 数值，解析失败/无焦距排除', () => {
+    const items = [
+      mk({ focalLength: '600mm' }),
+      mk({ focalLength: '840mm' }),
+      mk({ focalLength: '50mm' }),
+      mk({ focalLength: '无法解析' }),
+      mk({ focalLength: null }),
+    ]
+    const c = defaultFilterCriteria()
+    c.focalMin = 600
+    expect(filterCaptures(items, c)).toEqual([0, 1])
+    const c2 = defaultFilterCriteria()
+    c2.focalMin = 500
+    c2.focalMax = 700
+    expect(filterCaptures(items, c2)).toEqual([0])
+    // 设了区间但焦距缺失/解析失败 → 排除
+    const c3 = defaultFilterCriteria()
+    c3.focalMax = 100
+    expect(filterCaptures(items, c3)).toEqual([2])
+  })
+
+  it('镜头多选：精确匹配 EXIF lens 串，任一命中保留，无镜头排除', () => {
+    const items = [
+      mk({ lens: 'NIKKOR Z 600mm f/4 TC VR S' }),
+      mk({ lens: 'NIKKOR Z 24-70mm f/2.8' }),
+      mk({ lens: 'NIKKOR Z 600mm f/4 TC VR S' }),
+      mk({ lens: null }),
+    ]
+    const c = defaultFilterCriteria()
+    c.lensFilter = ['NIKKOR Z 600mm f/4 TC VR S']
+    expect(filterCaptures(items, c)).toEqual([0, 2])
+    const c2 = defaultFilterCriteria()
+    c2.lensFilter = ['NIKKOR Z 600mm f/4 TC VR S', 'NIKKOR Z 24-70mm f/2.8']
+    expect(filterCaptures(items, c2)).toEqual([0, 1, 2])
+  })
+
+  it('关键词筛选：包含任一选中关键词即中，空/无命中排除', () => {
+    const items = [
+      mk({ keywords: ['精选', '测试'] }),
+      mk({ keywords: ['天空'] }),
+      mk({ keywords: [] }),
+    ]
+    const c = defaultFilterCriteria()
+    c.keywordFilter = ['精选']
+    expect(filterCaptures(items, c)).toEqual([0])
+    // 任一命中：任一选中词出现在该图关键词中即保留（item0 无 天空/不存在，排除）
+    const c2 = defaultFilterCriteria()
+    c2.keywordFilter = ['天空', '不存在']
+    expect(filterCaptures(items, c2)).toEqual([1])
+  })
+
+  it('EXIF/关键词组合：ISO+焦距+镜头+关键词按「与」同时生效', () => {
+    const items = [
+      mk({ iso: 400, focalLength: '600mm', lens: 'L1', keywords: ['鸟'] }),
+      mk({ iso: 400, focalLength: '600mm', lens: 'L1', keywords: ['花'] }),
+      mk({ iso: 800, focalLength: '600mm', lens: 'L1', keywords: ['鸟'] }),
+      mk({ iso: 400, focalLength: '600mm', lens: 'L2', keywords: ['鸟'] }),
+    ]
+    const c = defaultFilterCriteria()
+    c.isoMin = 400
+    c.isoMax = 400
+    c.focalMin = 500
+    c.lensFilter = ['L1']
+    c.keywordFilter = ['鸟']
+    expect(filterCaptures(items, c)).toEqual([0])
+  })
+
   it('组合筛选：多条件按「与」同时生效', () => {
     const items = [
       mk({ baseName: 'a', primaryFormat: 'jpeg', rating: 'Three', flag: 'Pick', dateTaken: '2026-08-02T08:00:00' }),
@@ -177,6 +268,12 @@ describe('filterCaptures', () => {
       flagFilter: 'Pick',
       unflaggedFilter: false,
       recognitionFilter: 'All',
+      isoMin: null,
+      isoMax: null,
+      focalMin: null,
+      focalMax: null,
+      lensFilter: [],
+      keywordFilter: [],
     }
     expect(filterCaptures(items, c)).toEqual([1])
   })
@@ -207,6 +304,49 @@ describe('applyFilterAndSort', () => {
 
   it('修改时间排序：以 dateTaken 为代理，无时间（null）排最前', () => {
     expect(applyFilterAndSort(items, opts('Modified', 'Ascending'))).toEqual([0, 1, 2])
+  })
+
+  it('眼锐度排序：全 None 保持原序（稳定）', () => {
+    const all = [
+      mk({ baseName: 'a', eyeSharpness: null }),
+      mk({ baseName: 'b', eyeSharpness: null }),
+      mk({ baseName: 'c', eyeSharpness: null }),
+    ]
+    expect(applyFilterAndSort(all, opts('EyeSharpness', 'Ascending'))).toEqual([0, 1, 2])
+    expect(applyFilterAndSort(all, opts('EyeSharpness', 'Descending'))).toEqual([0, 1, 2])
+  })
+
+  it('眼锐度排序：部分 None 时 None 排最前，有值按数值升序', () => {
+    const mixed = [
+      mk({ baseName: 'a', eyeSharpness: null }),
+      mk({ baseName: 'b', eyeSharpness: 2.5 }),
+      mk({ baseName: 'c', eyeSharpness: 1.0 }),
+    ]
+    // None(0) → 1.0(2) → 2.5(1)
+    expect(applyFilterAndSort(mixed, opts('EyeSharpness', 'Ascending'))).toEqual([0, 2, 1])
+    // 降序 = 升序反转（None 垫底，由外层 sortDirection 统一处理）
+    expect(applyFilterAndSort(mixed, opts('EyeSharpness', 'Descending'))).toEqual([1, 2, 0])
+  })
+
+  it('眼锐度排序：纯数值升降序', () => {
+    const nums = [
+      mk({ baseName: 'a', eyeSharpness: 1.0 }),
+      mk({ baseName: 'b', eyeSharpness: 3.0 }),
+      mk({ baseName: 'c', eyeSharpness: 2.0 }),
+    ]
+    expect(applyFilterAndSort(nums, opts('EyeSharpness', 'Ascending'))).toEqual([0, 2, 1])
+    expect(applyFilterAndSort(nums, opts('EyeSharpness', 'Descending'))).toEqual([1, 2, 0])
+  })
+
+  it('眼锐度排序与评分排序互不影响', () => {
+    const mixed = [
+      mk({ baseName: 'a', rating: 'One', eyeSharpness: 1.0 }),
+      mk({ baseName: 'b', rating: 'Three', eyeSharpness: null }),
+      mk({ baseName: 'c', rating: 'Two', eyeSharpness: 2.0 }),
+    ]
+    // 眼锐度：None(1) → 1.0(0) → 2.0(2)；评分：One(0) → Two(2) → Three(1)
+    expect(applyFilterAndSort(mixed, opts('EyeSharpness', 'Ascending'))).toEqual([1, 0, 2])
+    expect(applyFilterAndSort(mixed, opts('Rating', 'Ascending'))).toEqual([0, 2, 1])
   })
 
   it('降序为升序反转', () => {
@@ -247,7 +387,7 @@ describe('边界', () => {
 
   it('单条列表：任何排序下仍返回自身', () => {
     const items = [mk({ baseName: 'only' })]
-    for (const sortBy of ['FileName', 'DateTaken', 'FileSize', 'Rating', 'Modified'] as SortBy[]) {
+    for (const sortBy of ['FileName', 'DateTaken', 'FileSize', 'Rating', 'Modified', 'EyeSharpness'] as SortBy[]) {
       expect(applyFilterAndSort(items, opts(sortBy, 'Ascending'))).toEqual([0])
       expect(applyFilterAndSort(items, opts(sortBy, 'Descending'))).toEqual([0])
     }
@@ -262,6 +402,24 @@ describe('辅助函数', () => {
     expect(hasActiveFilters(c)).toBe(true)
     c.colorLabel = null
     c.recognitionFilter = 'Confirmed'
+    expect(hasActiveFilters(c)).toBe(true)
+    c.recognitionFilter = 'All'
+    c.isoMin = 100
+    expect(hasActiveFilters(c)).toBe(true)
+    c.isoMin = null
+    c.isoMax = 3200
+    expect(hasActiveFilters(c)).toBe(true)
+    c.isoMax = null
+    c.focalMin = 400
+    expect(hasActiveFilters(c)).toBe(true)
+    c.focalMin = null
+    c.focalMax = 800
+    expect(hasActiveFilters(c)).toBe(true)
+    c.focalMax = null
+    c.lensFilter = ['L1']
+    expect(hasActiveFilters(c)).toBe(true)
+    c.lensFilter = []
+    c.keywordFilter = ['鸟']
     expect(hasActiveFilters(c)).toBe(true)
   })
 

@@ -5,6 +5,7 @@ use thiserror::Error;
 use photo_domain::Capture;
 
 use crate::folder_db::{FolderDb, FolderDbError};
+use crate::template::NameTemplateContext;
 
 #[derive(Error, Debug)]
 pub enum OpError {
@@ -145,7 +146,44 @@ pub fn rename_captures(
     results
 }
 
-/// 删除文件后同步删除对应识别行。
+/// 模板模式批量重命名（T1 批次，配合 [`crate::template::render_name_template`]）：
+/// `template` 为命名模板（占位符 `{name}`/`{species}`/`{date}`/`{camera}`/`{seq}`）；
+/// 每张拍摄的物种/日期/相机由 `meta_fn` 按 capture 组装（调用方持有 CaptureMeta 等
+/// 元数据，engine 层不感知识别/EXIF 来源），序号从 `start_seq` 起按处理顺序递增。
+/// 每条拍摄的全部源文件（JPG/NEF/XMP 兄弟）同步改名，与 `rename_captures` 一致。
+pub fn rename_captures_templated<F>(
+    captures: &[&Capture],
+    template: &str,
+    start_seq: u32,
+    mut meta_fn: F,
+) -> Vec<(PathBuf, Result<(), OpError>)>
+where
+    F: FnMut(&Capture) -> NameTemplateContext,
+{
+    let mut results = Vec::new();
+
+    for (i, capture) in captures.iter().enumerate() {
+        let mut ctx = meta_fn(capture);
+        ctx.seq = start_seq + i as u32;
+        let base = crate::template::render_name_template(template, &ctx);
+
+        for source_file in &capture.source_files {
+            let old_path = &source_file.path;
+            if !old_path.exists() {
+                results.push((old_path.clone(), Err(OpError::NotFound(old_path.clone()))));
+                continue;
+            }
+            if let Some(ext) = old_path.extension() {
+                let new_name = format!("{}.{}", base, ext.to_string_lossy());
+                let new_path = old_path.with_file_name(&new_name);
+                let result = std::fs::rename(old_path, &new_path).map_err(OpError::from);
+                results.push((new_path, result));
+            }
+        }
+    }
+
+    results
+}
 /// rel_paths 是相对于文件夹根路径的路径列表（正斜杠）。
 pub fn sync_delete_recognitions(db: &FolderDb, rel_paths: &[String]) -> Result<(), FolderDbError> {
     db.delete_recognitions(rel_paths)
@@ -220,6 +258,39 @@ pub fn sync_move_xmp(src_db: &FolderDb, dst_db: &mut FolderDb, entries: &[(Strin
 /// 重命名文件后同步重命名对应 xmp_meta 行。
 pub fn sync_rename_xmp(db: &FolderDb, old_path: &str, new_path: &str) -> Result<(), FolderDbError> {
     db.rename_xmp(old_path, new_path)
+}
+
+// ── keywords 同步（关键词标签，键为完整路径，与 xmp_meta 同键约定）──
+
+/// 删除文件后同步删除对应关键词行。
+pub fn sync_delete_keywords(db: &FolderDb, paths: &[String]) -> Result<(), FolderDbError> {
+    db.delete_keyword_rows(paths)
+}
+
+/// 复制文件后同步复制对应关键词行到目标库。
+/// entries: (源路径, 目标路径)
+pub fn sync_copy_keywords(
+    src_db: &FolderDb,
+    dst_db: &mut FolderDb,
+    entries: &[(String, String)],
+) -> Result<(), FolderDbError> {
+    src_db.copy_keywords_to(dst_db, entries)
+}
+
+/// 移动文件后同步迁移关键词行到目标库（复制到目标 + 删除源）。
+pub fn sync_move_keywords(
+    src_db: &FolderDb,
+    dst_db: &mut FolderDb,
+    entries: &[(String, String)],
+) -> Result<(), FolderDbError> {
+    src_db.copy_keywords_to(dst_db, entries)?;
+    let src_paths: Vec<String> = entries.iter().map(|(s, _)| s.clone()).collect();
+    src_db.delete_keyword_rows(&src_paths)
+}
+
+/// 重命名文件后同步重命名对应关键词行。
+pub fn sync_rename_keywords(db: &FolderDb, old_path: &str, new_path: &str) -> Result<(), FolderDbError> {
+    db.rename_keywords(old_path, new_path)
 }
 
 /// 生成不会冲突的文件名：如果 path 已存在，追加 _1/_2/... 后缀
@@ -392,6 +463,52 @@ mod tests {
             Err(OpError::NotFound(p)) => assert_eq!(p, path),
             _ => panic!("expected NotFound error"),
         }
+    }
+
+    #[test]
+    fn test_rename_captures_templated() {
+        let dir = TempDir::new().unwrap();
+        let capture = make_test_capture(&dir, "DSC_0001", &["jpg", "NEF"]);
+        let capture2 = make_test_capture(&dir, "DSC_0002", &["jpg"]);
+
+        let results = rename_captures_templated(
+            &[&capture, &capture2],
+            "{name}_{species}_{seq}",
+            5,
+            |c| NameTemplateContext {
+                name: c.base_name.clone(),
+                species: Some("白鹭".to_string()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(results.len(), 3);
+        for (_, r) in &results {
+            assert!(r.is_ok(), "rename failed: {:?}", r);
+        }
+        // 新文件名：原名 + 鸟种 + 补零 3 位序号
+        assert!(dir.path().join("DSC_0001_白鹭_005.jpg").exists());
+        assert!(dir.path().join("DSC_0001_白鹭_005.NEF").exists());
+        assert!(dir.path().join("DSC_0002_白鹭_006.jpg").exists());
+        // 旧文件名不存在
+        assert!(!dir.path().join("DSC_0001.jpg").exists());
+    }
+
+    #[test]
+    fn test_rename_captures_templated_illegal_chars_sanitized() {
+        let dir = TempDir::new().unwrap();
+        let capture = make_test_capture(&dir, "IMG_1", &["jpg"]);
+
+        let results = rename_captures_templated(
+            &[&capture],
+            "x/y:z_{seq}",
+            1,
+            |c| NameTemplateContext {
+                name: c.base_name.clone(),
+                ..Default::default()
+            },
+        );
+        assert!(results[0].1.is_ok(), "rename failed: {:?}", results[0].1);
+        assert!(dir.path().join("xyz_001.jpg").exists());
     }
 
     #[test]

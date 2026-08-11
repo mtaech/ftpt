@@ -17,10 +17,12 @@ import type {
 import {
   batchOpExecute,
   batchOpPreview,
+  batchRename,
   onBatchProgress,
   pickDirectory,
   type BatchProgressPayload,
 } from '@/lib/ipc'
+import { renderNameTemplate } from '@/lib/nameTemplate'
 import { useCapturesStore } from './captures'
 import { useFilterStore } from './filter'
 
@@ -124,8 +126,14 @@ export const useBatchStore = defineStore('batch', {
     errors: [] as string[],
     /** 面板 toast 瞬态提示（组件负责 4s 自动消失） */
     toast: null as string | null,
+    /** 撤销批量操作结果提示（Ctrl+Z 后由 App.vue 写入；状态栏展示，4s 自动消失） */
+    undoNotice: null as string | null,
     /** 事件是否已接线（防重复 listen） */
     listening: false,
+    /** 重命名命名模板（T1 批次：占位符 {name}/{species}/{date}/{seq}/{camera}） */
+    renameTemplate: '{name}_{seq}',
+    /** 重命名起始序号（补零 3 位） */
+    renameStartSeq: 1,
   }),
   getters: {
     /** 发送给后端的操作选项（BatchOpOptions 契约形态） */
@@ -135,6 +143,19 @@ export const useBatchStore = defineStore('batch', {
         syncSiblings: state.syncSiblings,
         formats: state.formats,
       }
+    },
+    /** 重命名实时预览：当前筛选第一张的渲染基名（无筛选/空模板时为空） */
+    renamePreview(state): string {
+      const filter = useFilterStore()
+      const first = filter.filtered[0]
+      if (!first || !state.renameTemplate.trim()) return ''
+      return renderNameTemplate(state.renameTemplate, {
+        name: first.baseName,
+        species: first.birdName ?? null,
+        date: first.dateTaken ?? null,
+        camera: first.cameraModel ?? null,
+        seq: state.renameStartSeq,
+      })
     },
   },
   actions: {
@@ -239,6 +260,43 @@ export const useBatchStore = defineStore('batch', {
       } catch (e) {
         this.errors = [...this.errors, `执行失败：${String(e)}`]
         this.toast = `批量${opLabel(this.op)}执行失败：${String(e)}`
+      } finally {
+        this.running = false
+      }
+    },
+
+    /**
+     * 模板批量重命名（T1 批次）：操作对象 = 当前筛选结果（与 Move/Copy/Delete 同边界）。
+     * 模板占位符数据由后端按 CaptureMeta 组装（鸟种/日期/相机），序号从
+     * renameStartSeq 递增。复用 batch:progress/done 事件驱动进度弹窗；
+     * 完成后全量重扫刷新网格（文件已改名）。
+     */
+    async runRename() {
+      if (this.running) return
+      const filter = useFilterStore()
+      if (!filter.hasActiveFilters) {
+        this.toast = '未设置筛选条件，请先在筛选栏设置条件（防全文件误操作）'
+        return
+      }
+      const paths = filter.filtered.map((m) => m.primaryPath)
+      if (paths.length === 0) {
+        this.toast = '没有可重命名的照片'
+        return
+      }
+      this.running = true
+      this.result = null
+      this.errors = []
+      this.progress = { done: 0, total: paths.length, currentPath: '' }
+      try {
+        const result = await batchRename(paths, this.renameTemplate, this.renameStartSeq)
+        this.result = result
+        this.errors = result.failures.map((f) => `${f.path}：${f.error}`)
+        this.toast = `重命名完成：成功 ${result.success} / 失败 ${result.failed}`
+        const captures = useCapturesStore()
+        await captures.rescan()
+      } catch (e) {
+        this.errors = [...this.errors, `执行失败：${String(e)}`]
+        this.toast = `批量重命名失败：${String(e)}`
       } finally {
         this.running = false
       }

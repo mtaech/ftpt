@@ -27,12 +27,17 @@ import {
 } from '@/stores/batch'
 import { useCapturesStore } from '@/stores/captures'
 import { useFilterStore } from '@/stores/filter'
+import { useExportStore } from '@/stores/export'
 import { formatToString } from '@/lib/filter'
 import type { BatchOpType } from '@/lib/bindings'
 
 const batch = useBatchStore()
 const captures = useCapturesStore()
 const filter = useFilterStore()
+
+/** 重命名模板占位符说明 */
+const RENAME_HELP =
+  '{name} 原名 · {species} 鸟种 · {date} YYYYMMDD · {seq} 序号（补零 3 位）· {camera} 相机型号'
 
 // ── 本地 UI 状态 ─────────────────────────────────────
 
@@ -122,6 +127,11 @@ function onPrimary() {
 function onConfirmDelete() {
   showDeleteConfirm.value = false
   void batch.confirmExecute()
+}
+
+/** 打开导出对话框（对象 = 当前筛选结果，与重命名同边界） */
+function openExport() {
+  void useExportStore().openDialog(filter.filtered.map((m) => m.primaryPath))
 }
 
 /** 目标目录对话框「浏览…」：系统目录选择 → 拒绝源目录（toast）→ 成功自动关闭 */
@@ -236,6 +246,39 @@ watch(
       </button>
       <div v-if="formatChips.length === 0" class="text-[0.6875rem] text-muted-foreground">
         目录中没有其他格式的同名文件
+      </div>
+    </div>
+
+    <!-- ── 批量重命名（命名模板占位符，T1 批次；对象 = 当前筛选结果） ── -->
+    <div class="mt-1 space-y-1.5 border-t pt-2">
+      <p class="text-[0.6875rem] font-medium text-foreground">批量重命名（当前筛选结果）</p>
+      <input
+        v-model="batch.renameTemplate"
+        placeholder="{name}_{seq}"
+        class="h-8 w-full rounded-md border border-input bg-background px-2 font-mono text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      />
+      <div class="flex items-center gap-1.5">
+        <label class="shrink-0 text-[0.6875rem] text-muted-foreground">起始序号</label>
+        <input
+          v-model.number="batch.renameStartSeq"
+          type="number"
+          min="0"
+          class="h-8 w-20 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        />
+        <span class="ml-auto truncate font-mono text-[0.6875rem] text-muted-foreground">
+          预览：{{ batch.renamePreview || '—' }}
+        </span>
+      </div>
+      <p class="text-[0.6875rem] leading-snug text-muted-foreground">
+        {{ RENAME_HELP }}
+      </p>
+      <div class="flex gap-1.5">
+        <Button class="flex-1" variant="outline" :disabled="opsDisabled" @click="batch.runRename()">
+          重命名
+        </Button>
+        <Button class="flex-1" variant="outline" :disabled="opsDisabled" @click="openExport()">
+          导出…
+        </Button>
       </div>
     </div>
 

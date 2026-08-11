@@ -17,6 +17,7 @@ const DEFAULT_CONFIG: AppConfig = {
   rightPanelWidth: 200,
   fontFamily: 'Segoe UI',
   recognitionThreadCount: 2,
+  includeSubdirectories: false,
 }
 
 export const useConfigStore = defineStore('config', {
@@ -35,6 +36,8 @@ export const useConfigStore = defineStore('config', {
     recognitionThreadCount: (s) => s.config.recognitionThreadCount ?? 2,
     /** 缩略图尺寸 px（回退 220，对齐 photo-config 默认） */
     thumbnailSize: (s) => s.config.thumbnailSize ?? 220,
+    /** 扫描包含子目录开关（回退 false = 单层扫描，对齐 photo-config 默认） */
+    includeSubdirectories: (s) => s.config.includeSubdirectories ?? false,
     /** 网格 cell 高度 = thumbnailSize + 56（对齐 GPUI grid.rs cell_size 公式） */
     rowHeight: (s) => (s.config.thumbnailSize ?? 220) + 56,
   },
@@ -64,6 +67,10 @@ export const useConfigStore = defineStore('config', {
       } catch {
         // mock/后端未就绪：本地态仍生效，下次 load 会回读真实值
       }
+    },
+    /** 缩略图尺寸即时生效（仅本地，不持久化）：滑块拖动中调用，持久化由调用方去抖 */
+    setThumbnailSize(size: number) {
+      this.config = { ...this.config, thumbnailSize: size }
     },
   },
 })

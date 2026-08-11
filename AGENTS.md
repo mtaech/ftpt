@@ -5,12 +5,12 @@
 Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览、标记、识别和转换照片。Cargo workspace 含 5 个成员：
 
 - `photo-domain` — 纯类型叶子 crate（Capture, ExifMetadata, XmpMetadata, Recognition 类型, 枚举），依赖仅 serde + chrono
-- `photo-engine` — 文件操作引擎（scanner, ops, exif, thumbnail, convert, folder_db, batch_ops），**全同步**
+- `photo-engine` — 文件操作引擎（scanner, ops, exif, thumbnail, convert, folder_db, batch_ops, global_db 跨文件夹鸟种索引, histogram 直方图/剪切, import SD 卡导入, template 命名模板, undo 批量撤销日志），**全同步**
 - `photo-recognize` — 鸟类识别管线（YOLO 检测 → 鸟种分类 → 名录映射 → 鸟眼锐度，ONNX Runtime），**全同步**
 - `photo-config` — 配置读写（TOML + SQLite 持久化）
 - `photo-tauri` — **Tauri v2 前端**（Vue 3 + Pinia + Tailwind v4 + shadcn-vue），2026-08 自 GPUI 版迁移完成（Q2 决策：并行新 app，parity 验收后删除旧 GPUI `photo-tool-app`；GPUI 版源码已删除，git 历史 `545921a` 前可查）
 
-核心工作流：**目录扫描 → 浏览/标记/筛选 → 鸟类识别（单张/批量）→ 文件操作（删除/移动/复制/重命名）→ 格式转换**。迁移决策与功能清单见 `docs/tauri-migration-plan.md`（Phase 1–3 完成，Phase 4 打包/验收收尾中）。
+核心工作流：**目录扫描（单层/递归可配）→ 浏览/标记/筛选 → 鸟类识别（单张/批量）→ 文件操作（删除/移动/复制/重命名，可撤销）→ 格式转换/导出预设**；另含 **SD 卡导入、全局鸟种统计、连拍对比、幻灯片**。迁移决策与功能清单见 `docs/tauri-migration-plan.md`（Phase 1–3 完成，Phase 4 打包/验收收尾中）。
 
 ---
 
@@ -46,7 +46,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 ```
 
 - `photo-tauri` 依赖其余四者；`photo-recognize` 依赖 `photo-domain`（RAW 输入解码调用 `photo_engine::thumbnail::decode_raw_preview`）
-- **Rust 后端**（`crates/photo-tauri/src-tauri/src/lib.rs`）：24 个 commands（`#[tauri::command]` + `#[specta::specta]`，注册于 `specta_builder`）+ 8 个事件（`app.emit` 明文通道）+ `ptimg://` 自定义协议（缩略图/预览母版/1:1 全尺寸三路流式 serve，不走 IPC base64）
+- **Rust 后端**（`crates/photo-tauri/src-tauri/src/lib.rs`）：39 个 commands（`#[tauri::command]` + `#[specta::specta]`，注册于 `specta_builder`）+ 12 个事件（`app.emit` 明文通道，含 import/export 进度）+ `ptimg://` 自定义协议（缩略图/预览母版/1:1 全尺寸三路流式 serve，不走 IPC base64）
 - **前端**（`crates/photo-tauri/src/`）：Vue 3 + Pinia stores（captures/selection/preview/filter/recognition/batch/config/contextMenu）+ keymap.ts（全键位 action 分发）+ 组件（App 三栏布局 / PhotoGrid 虚拟网格 / PhotoPreview / Filmstrip / FilterBar / InfoPanel 双 tab / Sidebar / StatusBar / BatchOpsPanel / SettingsModal / ContextMenu）
 - **类型共享**：specta + tauri-specta 从 serde 类型生成 TS 绑定 → `crates/photo-tauri/src/lib/bindings.ts`（由 `cargo run -p photo-tauri --bin export_bindings` 生成；Rust 侧 `specta_builder` 需保持 pub）
 
@@ -58,7 +58,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 4. **SourceFile** → **thumbnail**：磁盘缓存 JPEG 字节（缓存键 = `DefaultHasher(path+size)` 的 `{:016x}.jpg`，目录 = 照片目录 `.pt/thumbs`，每文件夹独立）；RAW 完整解码（half_size 预览选项）母版按 `u32::MAX` 键存一份，网格缩略图/预览/全分辨率均从母版 DCT 派生（不落盘）；内嵌 JPEG 长边 ≥2048（RW2/DNG 大内嵌）时直接用作母版省解码；常规图优先 EXIF 内嵌缩略图
 5. **Capture** → **convert**：RAW 内嵌预览→JPEG、常规图缩放（Lanczos3）；`export_adjusted` 全尺寸烘焙（调整参数渲染）
 6. **Capture** → **recognize**：`photo-recognize` 管线（YOLO 检测鸟体 → 整图 eye.onnx 检测眼（双槽一致性选点，CPU 推理）→ bird_model 分类 Top-5 → `sp_cls_map` JOIN `animal_info` 名录映射）→ `Recognition` 三态（Confirmed/NeedsReview/Unrecognized）+ 连续鸟眼锐度分（NULL 兜底，不影响三态）→ `folder_db` upsert 到文件夹级 `.pt/data.db`
-7. **import**（已移除，待重建）：检测可移动设备 → DCIM 递归扫描 → 按 EXIF 日期建子目录 → 委托 **ops** 移动/复制
+7. **import**：检测可移动设备（Windows GetDriveTypeW FFI；Linux 解析 /proc/mounts + /sys/class/block removable；其余平台退化手动选源）→ 递归扫描源 → 按 EXIF 日期（fallback mtime）建 YYYY-MM-DD 子目录 → 去重（同名同大小跳过）→ 委托 **ops** 移动/复制；`DriveInfo.path` 跨平台统一为根路径（Windows 盘符根 / Linux 挂载点）
 
 ### 模块依赖关系
 
@@ -138,6 +138,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 - `quick-xml` 在根 `Cargo.toml` 的 `[workspace.dependencies]` 中声明但各 crate src 无引用
 - 使用了 let-chains（edition 2024 特性），如 `photo-config/config.rs` 便携路径判断
 - **tauri-specta 生成 bindings.ts 会覆盖手写追加段**：specta 不导出的类型（FilterCriteria/SortBy 等——Rust 侧无 command 引用它们）需在文件尾部手写保留，重新导出后手动恢复
+- **export_bindings 按 cwd 相对路径写文件**：必须 `cd crates/photo-tauri/src-tauri` 再 `cargo run -p photo-tauri --bin export_bindings`；从 workspace 根跑会把 bindings.ts 写到 `crates/src/lib/` 错位置
 - **前端验证命令必须带 `-b`**：`npx vue-tsc -b --noEmit`；`npx vue-tsc --noEmit` 在 solution-style tsconfig 下 exit 0 假绿
 - **启动自动恢复扫描事件早于页面挂载**（缓存命中 ~200ms）：前端 `captures.init()` 主动拉 `getAppConfig().lastDirectory` + `getCaptures()` 自愈
 - **mock 模式数据分叉**：多人同时编辑时 vite HMR 堆叠多份模块实例，mock 模块级数组分叉（表现为 store 与 getRecognition 数据不一致）——全量刷新页面即可
@@ -156,11 +157,11 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 
 |模块|测试数|覆盖内容|
 |---|---|---|
-|`photo-domain::domain.rs`|23|扩展名解析、RAW 白名单、enrich_with_xmp/recognition、ExifMetadata 摘要、XmpMetadata 枚举转换、BBox/RecognitionStatus/RecognitionFilter 序列化与状态映射|
-|`photo-config::lib.rs`|23|默认值、TOML 保存/加载往返、配置路径、AppConfig 字段钳制|
-|`photo-engine`|66 + 1 ignore|scanner 单层扫描、ops 移动/复制/重命名/删除（含 sidecar）、识别行同步、thumbnail 缓存键、exif 摘要、convert 三分支、folder_db 建表/迁移/upsert/rename 同步/三表清理、adjustments 持久化|
+|`photo-domain::domain.rs`|26|扩展名解析、RAW 白名单、enrich_with_xmp/recognition、ExifMetadata 摘要、XmpMetadata 枚举转换、BBox/RecognitionStatus/RecognitionFilter 序列化与状态映射、EyeSharpness 排序枚举、GPS DMS 转换|
+|`photo-config::lib.rs`|10|默认值、TOML 保存/加载往返、配置路径、AppConfig 字段钳制（含 include_subdirectories、export_presets）|
+|`photo-engine`|134 + 1 ignore|scanner 单层/递归、ops 移动/复制/重命名/删除（含 sidecar）、识别行同步、thumbnail 缓存键、exif 摘要、convert、folder_db 建表/迁移/upsert/rename 同步/多表清理、adjustments、global_db 索引/修正日志/命中率、histogram 直方图/剪切、import 分组/去重/复制移动、template 占位符渲染、undo 三类逆操作、keywords 表|
 |`photo-recognize`|32 + 1 ignore|阶段→状态映射、输入源解析（JPEG/RAW）、检测框变换、softmax/Top-5、名录映射、进度回调、眼关键点、锐度融合单调性|
-|前端 filter.test.ts|22|无筛选返回全部、各筛选条件单独生效、组合（与逻辑）、5 种排序 + 降序 + 稳定排序、空列表/边界、日期解析失败保留|
+|前端 vitest|48（3 文件）|filter 30（含 ISO/焦距/镜头/关键词筛选）、burst 11、nameTemplate 7|
 
 ---
 
@@ -205,7 +206,8 @@ async mutateOptimistic(paths, apply, remote) {
 ### Keybinding 层
 
 - `src/keymap.ts`：`installKeymap(handlers)` 全局安装；按键 → action 名解析（焦点上下文隔离 + 修饰键精确匹配），App.vue 提供 `KeymapHandlers` 表接真实 store 调用；`BINDINGS` 导出供快捷键参考页
-- 键位全集对齐 GPUI layout.rs：1-5/0 评分、6-9 色标、P/X/U 旗标、B/Ctrl+B/Ctrl+Shift+B 识别、V 检测框、G 视图切换、方向键/Home/End、Delete 删除、Ctrl+A/D 选择、Esc（设置 > 批量识别取消 > 框选清除 > 预览退出）、F5 重扫、Ctrl+[ / Ctrl+] 面板开关
+- 键位全集对齐 GPUI layout.rs：1-5/0 评分、6-9 色标、P/X/U 旗标、B/Ctrl+B/Ctrl+Shift+B 识别、V 检测框、G 视图切换、方向键/Home/End、Delete 删除、Ctrl+A/D 选择、Esc（设置 > 批量识别取消 > 对比退出 > 框选清除 > 预览退出）、F5 重扫、Ctrl+[ / Ctrl+] 面板开关；**前端新增**：C 对比模式（多选 2–4 张 / 连拍组前 4 张，对比内 ←/→ 移聚焦格、1-5 评分聚焦格、Esc/G 退出）、T 鸟种统计、S 幻灯片（空格暂停）、O 剪切警告叠加（预览）、Ctrl+Z 撤销批量操作（移动/复制/重命名）、Ctrl+6 紫色标签、=/- 缩放（预览/对比）
+- 排序含 EyeSharpness（眼锐度，T0 批次）：CaptureMeta.eye_sharpness 经 enrich_with_recognition 填充，比较器在 filter.ts（None 排最前）；连拍分组纯前端（lib/burst.ts，相邻 dateTaken ≤2s 成组，仅登记 size≥2）
 
 ### 调试：真机 WebView2 DOM 验证
 

@@ -1,8 +1,7 @@
 <script setup lang="ts">
 // 右侧 Activity Rail：48px 宽，与左侧 rail 对称（对齐 GPUI right_rail.rs）。
-// 目前只有一个按钮：PanelRight/PanelRightOpen 切换右侧信息面板；
-// 后续右侧面板相关图标按钮追加到这里。
-import { PanelRightIcon, PanelRightOpenIcon } from '@lucide/vue'
+// 按钮：右侧信息面板切换 + 统计视图（T1 批次 SpeciesIndex）。
+import { BarChart3Icon, PanelRightIcon, PanelRightOpenIcon } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 
 defineProps<{
@@ -11,7 +10,7 @@ defineProps<{
 }>()
 
 /** 切换右侧面板（App.vue 监听；等价 Ctrl+]） */
-const emit = defineEmits<{ toggle: [] }>()
+const emit = defineEmits<{ toggle: []; stats: [] }>()
 </script>
 
 <template>
@@ -28,6 +27,15 @@ const emit = defineEmits<{ toggle: [] }>()
     >
       <PanelRightIcon v-if="visible" class="size-4" />
       <PanelRightOpenIcon v-else class="size-4" />
+    </Button>
+    <Button
+      size="icon-sm"
+      variant="ghost"
+      title="统计视图 (t)"
+      aria-label="统计视图"
+      @click="emit('stats')"
+    >
+      <BarChart3Icon class="size-4" />
     </Button>
   </nav>
 </template>

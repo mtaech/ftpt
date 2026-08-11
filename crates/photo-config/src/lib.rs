@@ -43,6 +43,50 @@ pub struct AppConfig {
     /// 批量识别线程数（1-4）。低配设备减小，高配设备加大。默认 4（8 核以上 CPU）。
     #[serde(default = "default_recognition_threads")]
     pub recognition_thread_count: u32,
+    /// 导出预设列表（T1 批次：命名模板/长边/质量组合）。旧配置无此字段时为空。
+    #[serde(default)]
+    pub export_presets: Vec<ExportPreset>,
+    /// 扫描是否包含子目录（递归扫描全部子层）。默认 false = 单层扫描（保持现状）。
+    /// 布尔字段无需钳制；改动后需重新扫描生效（scan 编排处按此值选单层/递归）。
+    #[serde(default)]
+    pub include_subdirectories: bool,
+}
+
+/// 导出预设（T1 批次）：导出对话框的可复用组合（预设名 + 长边 + JPEG 质量 + 命名模板）。
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExportPreset {
+    /// 预设名（对话框下拉显示）
+    pub name: String,
+    /// 长边像素上限（None = 原尺寸；0 在钳制时归一为 None）
+    pub long_edge: Option<u32>,
+    /// JPEG 质量 1-100（保存/使用时钳制）
+    pub quality: u8,
+    /// 命名模板（占位符语法见 engine template.rs：{name}/{species}/{date}/{seq}/{camera}）
+    pub template: String,
+}
+
+impl ExportPreset {
+    /// 字段钳制：质量 1-100；长边 0 → None（无缩放）。
+    pub fn clamped(mut self) -> Self {
+        self.quality = self.quality.clamp(1, 100);
+        if self.long_edge == Some(0) {
+            self.long_edge = None;
+        }
+        self
+    }
+}
+
+impl Default for ExportPreset {
+    fn default() -> Self {
+        Self {
+            name: "原图".to_string(),
+            long_edge: None,
+            quality: 95,
+            template: "{name}".to_string(),
+        }
+    }
 }
 
 fn default_right_panel_width() -> u32 {
@@ -70,6 +114,8 @@ impl Default for AppConfig {
             right_panel_width: 200,
             font_family: default_font_family(),
             recognition_thread_count: default_recognition_threads(),
+            include_subdirectories: false,
+            export_presets: vec![ExportPreset::default()],
         }
     }
 }
@@ -247,6 +293,8 @@ mod tests {
         let cfg = AppConfig::default();
         assert_eq!(cfg.thumbnail_size, 220);
         assert_eq!(cfg.theme, Theme::Light);
+        // 扫描子目录开关默认关闭（保持单层扫描现状）
+        assert!(!cfg.include_subdirectories);
     }
 
     #[test]
@@ -262,6 +310,21 @@ mod tests {
         ).unwrap();
         let loaded = load_config(&path).unwrap();
         assert_eq!(loaded.font_family, "Microsoft YaHei UI");
+        // 旧配置无 includeSubdirectories 字段 → serde(default) 回退 false
+        assert!(!loaded.include_subdirectories);
+    }
+
+    #[test]
+    fn test_include_subdirectories_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("PT.db");
+        let cfg = AppConfig {
+            include_subdirectories: true,
+            ..Default::default()
+        };
+        save_config(&path, &cfg).unwrap();
+        let loaded = load_config(&path).unwrap();
+        assert!(loaded.include_subdirectories);
     }
 
     #[test]
@@ -313,5 +376,66 @@ mod tests {
     fn test_config_path() {
         let result = determine_config_path();
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_export_preset_default_and_clamp() {
+        let p = ExportPreset::default();
+        assert_eq!(p.name, "原图");
+        assert_eq!(p.long_edge, None);
+        assert_eq!(p.quality, 95);
+        assert_eq!(p.template, "{name}");
+
+        // 质量钳制 1-100；长边 0 → None
+        let low = ExportPreset {
+            quality: 0,
+            long_edge: Some(0),
+            ..ExportPreset::default()
+        }
+        .clamped();
+        assert_eq!(low.quality, 1);
+        assert_eq!(low.long_edge, None);
+
+        let high = ExportPreset {
+            quality: 200,
+            long_edge: Some(8000),
+            ..ExportPreset::default()
+        }
+        .clamped();
+        assert_eq!(high.quality, 100);
+        assert_eq!(high.long_edge, Some(8000));
+    }
+
+    #[test]
+    fn test_export_presets_default_list() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.export_presets.len(), 1);
+        assert_eq!(cfg.export_presets[0], ExportPreset::default());
+    }
+
+    #[test]
+    fn test_export_presets_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("PT.db");
+        let cfg = AppConfig {
+            export_presets: vec![
+                ExportPreset {
+                    name: "网络分享".into(),
+                    long_edge: Some(2000),
+                    quality: 85,
+                    template: "{species}_{seq}".into(),
+                },
+                ExportPreset::default(),
+            ],
+            ..Default::default()
+        };
+        save_config(&path, &cfg).unwrap();
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(loaded.export_presets.len(), 2);
+        assert_eq!(loaded.export_presets[0].name, "网络分享");
+        assert_eq!(loaded.export_presets[0].long_edge, Some(2000));
+        assert_eq!(loaded.export_presets[0].quality, 85);
+        assert_eq!(loaded.export_presets[0].template, "{species}_{seq}");
+        assert_eq!(loaded.export_presets[1], ExportPreset::default());
     }
 }

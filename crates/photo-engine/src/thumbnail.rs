@@ -401,6 +401,65 @@ fn resize_jpeg(jpeg_bytes: &[u8], size: u32) -> Result<Vec<u8>, ThumbnailError> 
     Ok(cursor.into_inner())
 }
 
+/// JPEG DCT 降采样解码为 RGB8 像素（长边 ≤ size，只解需要的 block，不重编码）。
+/// 供直方图/剪切叠加等需要像素而非 JPEG 字节的场景复用（对齐
+/// `decode_jpeg_scaled_reader` 的 DCT 因子选择；1/2 因子输出仍超 size 时 Lanczos 收尾）。
+pub fn decode_jpeg_rgb8_scaled(path: &Path, size: u32) -> Result<image::RgbImage, ThumbnailError> {
+    use jpeg_decoder::Decoder;
+    let file = std::fs::File::open(path)?;
+    let mut decoder = Decoder::new(std::io::BufReader::new(file));
+    decoder
+        .read_info()
+        .map_err(|e| ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
+            std::io::ErrorKind::InvalidData, e.to_string(),
+        ))))?;
+    let info = decoder.info().ok_or_else(|| {
+        ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
+            std::io::ErrorKind::InvalidData, "missing JPEG info after read_info",
+        )))
+    })?;
+    // 原图长边 ≤ size：不缩放直接全解码（DCT 因子选 1/1 等价，显式短路更省）
+    let (out_w, out_h) = if u32::from(info.width.max(info.height)) <= size {
+        (info.width, info.height)
+    } else {
+        let req = size.min(u16::MAX as u32) as u16;
+        decoder
+            .scale(req, req)
+            .map_err(|e| ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
+                std::io::ErrorKind::InvalidData, e.to_string(),
+            ))))?
+    };
+    let pixels = decoder
+        .decode()
+        .map_err(|e| ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
+            std::io::ErrorKind::InvalidData, e.to_string(),
+        ))))?;
+    let expected = (out_w as u32 * out_h as u32 * 3) as usize;
+    if pixels.len() != expected {
+        return Err(ThumbnailError::Image(image::ImageError::IoError(
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("JPEG buffer size mismatch: {} != {}", pixels.len(), expected),
+            ),
+        )));
+    }
+    let img = image::RgbImage::from_raw(out_w as u32, out_h as u32, pixels).ok_or_else(|| {
+        ThumbnailError::Image(image::ImageError::IoError(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "JPEG decode produced invalid buffer",
+        )))
+    })?;
+    // 1/2 因子输出仍超 size（如 4000→2000 但目标 1600）→ Lanczos 收尾
+    if img.width().max(img.height()) <= size {
+        Ok(img)
+    } else {
+        let ratio = size as f64 / img.width().max(img.height()) as f64;
+        let nw = ((img.width() as f64 * ratio).round().max(1.0)) as u32;
+        let nh = ((img.height() as f64 * ratio).round().max(1.0)) as u32;
+        Ok(image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3))
+    }
+}
+
 /// jpeg-decoder DCT 降采样解码：从任意 reader 解码并缩放到长边 ≤ size，输出 JPEG 字节。
 /// 请求尺寸直接传给 scale：choose_idct_size 取输出 ≥ 请求的最小因子（1/8~1/1）——
 /// 小目标走降采样（快），大目标走 1/1 全量（保精度）；输出仍超 size 时 Lanczos 收尾。

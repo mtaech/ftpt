@@ -156,6 +156,11 @@ fn extract_exif_raw(path: &Path) -> Result<ExifMetadata, ExifError> {
 }
 
 /// 从 rawlib::ExifData 转为 ExifMetadata，共用逻辑
+///
+/// GPS 与常规图路径同构：rawlib::exif 已支持 GPS DMS 解析，raw_exif.gps_latitude/
+/// gps_longitude 为 (度, 分, 秒) 元组（rawlib 侧已按 Ref 施加南纬/西经符号到度分量），
+/// 与 `extract_exif_regular` 的输出格式一致——RAW 不需要 fallback None 的特例，
+/// 十进制转换统一在 `CaptureMeta::enrich_with_exif`（photo_domain::dms_to_decimal）完成。
 fn raw_exif_to_meta(raw_exif: rawlib::ExifData, path: &Path) -> ExifMetadata {
     let mut meta = ExifMetadata::default();
     meta.camera.make = raw_exif.make;

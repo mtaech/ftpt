@@ -1,10 +1,12 @@
 <script setup lang="ts">
-// 网格：固定 4 列 + 行级虚拟化（绝对定位行，渲染可见行 ± 2 行缓冲，cell 高约 240px）。
+// 网格：动态列数 + 行级虚拟化（绝对定位行，渲染可见行 ± 2 行缓冲，cell 高约 240px）。
+// 列数 = 容器宽 ÷ cell 宽（thumbnailSize + gap），实时跟随缩略图尺寸滑块与窗口宽度；
+// 行高跟随后端配置 thumbnailSize（cell = thumbnailSize + 56，对齐 GPUI grid.rs cell_size）。
 // cell = 缩略图 + 格式徽标(左上) + 旗标角标(右上) + 文件名/大小/星级 + 鸟种状态 chip + 色标条(底缘)。
 // 选择交互：单击 select、Ctrl+单击 toggle、Shift+单击 selectRange、双击进预览。
 // thumb:ready → store 版本号递增 → img src ?v= 刷新。
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { CheckIcon, XIcon } from '@lucide/vue'
+import { CheckIcon, LayersIcon, XIcon } from '@lucide/vue'
 import { useCapturesStore } from '@/stores/captures'
 import { useFilterStore } from '@/stores/filter'
 import { useSelectionStore } from '@/stores/selection'
@@ -28,14 +30,24 @@ const preview = usePreviewStore()
 const contextMenu = useContextMenuStore()
 const config = useConfigStore()
 
-/** 网格布局常量：4 列；行高跟随后端配置 thumbnailSize（cell = thumbnailSize + 56，对齐 GPUI grid.rs cell_size），行距 gap-1.5（6px）、容器内边距 6px */
-const COLS = 4
+/** 网格布局常量：行高跟随后端配置 thumbnailSize（cell = thumbnailSize + 56，对齐 GPUI grid.rs cell_size），行距 gap-1.5（6px）、容器内边距 6px */
 const ROW_HEIGHT = computed(() => config.rowHeight)
 const ROW_GAP = 6
 const ROW_STEP = computed(() => ROW_HEIGHT.value + ROW_GAP)
 const PAD = 6
 /** 可见行窗口的缓冲行数（拖动滚动条时即将进入视口的行提前就绪） */
 const BUFFER_ROWS = 2
+/** 网格容器可视宽度（ResizeObserver 测量，列数计算依据） */
+const gridWidth = ref(0)
+/**
+ * 动态列数：容器宽 ÷ cell 宽（thumbnailSize + gap），下限 1；未测量时回退 4
+ * （对齐原固定 4 列）。缩略图尺寸滑块/窗口宽度变化即时生效。
+ */
+const COLS = computed(() => {
+  const w = gridWidth.value
+  if (w <= 0) return 4
+  return Math.max(1, Math.floor((w + ROW_GAP) / (config.thumbnailSize + ROW_GAP)))
+})
 
 /** 色标条颜色（取 theme.rs LABEL_* 原值，经 @theme 注册为 bg-label-*） */
 const LABEL_BAR: Record<Exclude<ColorLabel, 'None'>, string> = {
@@ -53,7 +65,7 @@ const viewportH = ref(0)
 /** 显示序：过滤+排序后的 captures.items 下标（对齐 Rust display_order），缓存避免重复计算 */
 const displayIndices = computed(() => filter.filteredIndices)
 
-const rowCount = computed(() => Math.ceil(displayIndices.value.length / COLS))
+const rowCount = computed(() => Math.ceil(displayIndices.value.length / COLS.value))
 /** 撑出滚动高度的占位容器（rows 绝对定位在其中） */
 const spacerH = computed(() =>
   rowCount.value === 0 ? 0 : PAD * 2 + rowCount.value * ROW_STEP.value - ROW_GAP,
@@ -70,11 +82,11 @@ const visibleRowList = computed(() => {
   return out
 })
 
-/** 行下标 → 该行实际存在的 cell（captures.items 下标；末行可能不满 4 个） */
+/** 行下标 → 该行实际存在的 cell（captures.items 下标；末行可能不满 COLS 个） */
 function rowCells(r: number): number[] {
-  const end = Math.min((r + 1) * COLS, displayIndices.value.length)
+  const end = Math.min((r + 1) * COLS.value, displayIndices.value.length)
   const out: number[] = []
-  for (let p = r * COLS; p < end; p++) out.push(displayIndices.value[p])
+  for (let p = r * COLS.value; p < end; p++) out.push(displayIndices.value[p])
   return out
 }
 
@@ -90,6 +102,7 @@ function measure() {
   const el = scrollEl.value
   if (el) {
     viewportH.value = el.clientHeight
+    gridWidth.value = el.clientWidth
     // 组件重挂载（HMR/切视图）后元素可能保留原滚动位置，同步到 ref 保证渲染窗口一致
     scrollTop.value = el.scrollTop
   }
@@ -113,6 +126,11 @@ function cellClass(i: number): string {
   if (!selection.isSelected(i)) return 'border-transparent hover:border-border'
   if (selection.anchorIndex === i) return 'border-primary bg-primary/10 ring-1 ring-primary/60'
   return 'border-primary bg-primary/10'
+}
+
+/** 连拍组信息（filter store 按显示序分组，key = captures.items 下标；仅 size≥2 的组） */
+function burstOf(i: number) {
+  return filter.burstGroups.get(i)
 }
 
 /** 鸟种 chip 文本：已确认 → 鸟名 + 置信度（mock 层为 0–1 小数、真实后端 0–100，统一归一化） */
@@ -166,7 +184,7 @@ watch(
     // 选中项不在显示序中（被筛选掉）时不滚动
     const pos = displayIndices.value.indexOf(i)
     if (pos < 0) return
-    const rowTop = PAD + Math.floor(pos / COLS) * ROW_STEP.value
+    const rowTop = PAD + Math.floor(pos / COLS.value) * ROW_STEP.value
     const rowBottom = rowTop + ROW_HEIGHT.value
     let target = el.scrollTop
     if (rowTop < el.scrollTop) {
@@ -216,8 +234,12 @@ watch([rowCount, ROW_STEP], () => {
       <div
         v-for="r in visibleRowList"
         :key="r"
-        class="absolute inset-x-0 grid grid-cols-4 gap-1.5 px-1.5"
-        :style="{ top: PAD + r * ROW_STEP + 'px', height: ROW_HEIGHT + 'px' }"
+        class="absolute inset-x-0 grid gap-1.5 px-1.5"
+        :style="{
+          top: PAD + r * ROW_STEP + 'px',
+          height: ROW_HEIGHT + 'px',
+          gridTemplateColumns: 'repeat(' + COLS + ', minmax(0, 1fr))',
+        }"
       >
         <div
           v-for="i in rowCells(r)"
@@ -266,6 +288,15 @@ watch([rowCount, ROW_STEP], () => {
             >
               <CheckIcon v-if="captures.items[i].flag === 'Pick'" class="size-3" />
               <XIcon v-else class="size-3" />
+            </div>
+
+            <!-- 连拍组徽标（左下，半透明黑底，对齐格式/旗标徽标风格；仅 size≥2 显示） -->
+            <div
+              v-if="burstOf(i)"
+              class="absolute bottom-1 left-1 flex items-center gap-0.5 rounded-sm bg-black/70 px-1 text-[0.625rem] leading-4 text-white"
+            >
+              <LayersIcon class="size-3" />
+              <span class="tabular-nums">{{ burstOf(i)!.size }}</span>
             </div>
           </div>
 

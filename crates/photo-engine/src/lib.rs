@@ -1,8 +1,13 @@
 pub mod folder_db;
+pub mod global_db;
+pub mod import;
 pub mod adjustments;
 pub mod batch_ops;
 pub mod convert;
 pub mod exif;
+pub mod histogram;
 pub mod ops;
 pub mod scanner;
+pub mod template;
 pub mod thumbnail;
+pub mod undo;

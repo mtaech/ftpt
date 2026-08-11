@@ -21,13 +21,14 @@ import { useSelectionStore } from '@/stores/selection'
 import { usePreviewStore } from '@/stores/preview'
 import { useRecognitionStore } from '@/stores/recognition'
 import { useFilterStore } from '@/stores/filter'
-import { correctBird, getAdjustments, getRecognition, ptimgUrl, setAdjustments } from '@/lib/ipc'
+import { correctBird, getAdjustments, getFrequentSpecies, getHistogram, getRecognition, isTauri, ptimgUrl, setAdjustments } from '@/lib/ipc'
 import { displayName, formatBadgeLabel, formatBytes, ratingToNumber } from '@/lib/format'
 import type {
   AdjustParams,
   CaptureMeta,
   ColorLabel,
   Flag,
+  HistogramPayload,
   Recognition,
   RecognitionFailureStage,
   RecognitionStatus,
@@ -107,6 +108,35 @@ const FLAG_OPTIONS: { label: string; flag: Flag | null }[] = [
   { label: '淘汰', flag: 'Reject' },
   { label: '无', flag: null },
 ]
+
+// ── 关键词：chips 展示 + 输入添加（回车/逗号分隔）+ × 删除 ──
+// 语义对齐评分卡：以聚焦图的关键词列表为编辑目标，编辑结果整体作用于选中集
+const keywordInput = ref('')
+
+/** 输入添加：回车或逗号分隔多个关键词，去空白/去重后合并进聚焦图列表并应用到选中集 */
+function onKeywordAdd() {
+  const cur = focused.value?.keywords ?? []
+  const parts = keywordInput.value
+    .split(/[,，]/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  if (parts.length === 0) return
+  const merged = [...cur]
+  for (const p of parts) {
+    if (!merged.includes(p)) merged.push(p)
+  }
+  keywordInput.value = ''
+  if (merged.length === cur.length) return
+  void captures.applyKeywords(selection.selectedPaths, merged)
+}
+
+/** 点击 × 删除单个关键词（聚焦图列表去掉该词后应用到选中集） */
+function removeKeyword(kw: string) {
+  const cur = focused.value?.keywords ?? []
+  const next = cur.filter((k) => k !== kw)
+  if (next.length === cur.length) return
+  void captures.applyKeywords(selection.selectedPaths, next)
+}
 
 // ── 识别：状态 chip + 完整结果（getRecognition）+ 修正鸟种下拉 ──
 const STATUS_META: Record<RecognitionStatus, { label: string; cls: string }> = {
@@ -227,23 +257,48 @@ function onToggleBbox() {
   preview.toggleBbox()
 }
 
-// ── 修正鸟种下拉：展开 → 名录全量 + 搜索过滤，选即 correctBird（对齐 GPUI correction_open）──
+// ── 修正鸟种下拉：展开 → 高频「常用」分组前置 + 名录全量 + 搜索过滤，选即 correctBird（对齐 GPUI correction_open）──
 const correctOpen = ref(false)
 const correctSearch = ref('')
 const correctBoxEl = ref<HTMLElement | null>(null)
 
-/** 候选 = 名录全量（复用 filter store speciesOptions），按搜索词过滤 */
+/**
+ * 高频鸟种（get_frequent_species(10)，全局索引张数降序）——本机使用频次即区域
+ * 相关性代理（离线替代区域名录）。加载失败降级空数组（不阻塞下拉主流程）。
+ */
+const frequentSpecies = ref<string[]>([])
+
+/**
+ * 候选 = 高频常用分组（frequent ∩ 名录，保持频次序）+ 其余名录（原名录顺序）。
+ * 搜索词命中与否均分组展示：常用组只留命中的，未命中整组隐藏。
+ */
 const correctOptions = computed(() => {
   const all = filter.speciesOptions
+  const freq = frequentSpecies.value.filter((n) => all.includes(n))
+  const rest = all.filter((n) => !freq.includes(n))
   const q = correctSearch.value.trim().toLowerCase()
-  return q ? all.filter((n) => n.toLowerCase().includes(q)) : all
+  const match = (n: string) => (q ? n.toLowerCase().includes(q) : true)
+  return {
+    frequent: freq.filter(match),
+    rest: rest.filter(match),
+  }
 })
 
 function toggleCorrect() {
   correctOpen.value = !correctOpen.value
   correctSearch.value = ''
-  // 名录未加载时补齐（InfoPanel 与 FilterBar 独立挂载，不依赖其 watcher）
-  if (correctOpen.value && filter.speciesOptions.length === 0) void filter.loadSpecies()
+  if (correctOpen.value) {
+    // 名录未加载时补齐（InfoPanel 与 FilterBar 独立挂载，不依赖其 watcher）；
+    // 高频列表同理首次展开时拉取
+    if (filter.speciesOptions.length === 0) void filter.loadSpecies()
+    if (frequentSpecies.value.length === 0) {
+      void getFrequentSpecies(10)
+        .then((list) => {
+          frequentSpecies.value = list
+        })
+        .catch((e) => console.error('加载高频鸟种失败', e))
+    }
+  }
 }
 
 /** 选择即修正：correctBird 写识别表 → 重拉完整结果 + 全量刷新网格摘要 */
@@ -268,7 +323,183 @@ function onDocMouseDown(e: MouseEvent) {
   }
 }
 onMounted(() => document.addEventListener('mousedown', onDocMouseDown))
-onUnmounted(() => document.removeEventListener('mousedown', onDocMouseDown))
+onUnmounted(() => {
+  document.removeEventListener('mousedown', onDocMouseDown)
+  histObserver?.disconnect()
+  histObserver = null
+})
+
+// ══════════════════ 直方图卡 / GPS（T1 批次 HistogramPanel 切片）══════════════════
+
+/** 直方图数据（null = 未加载；失败置 histError） */
+const hist = ref<HistogramPayload | null>(null)
+const histError = ref(false)
+const histLoading = ref(false)
+/** 加载序号：切图后旧请求结果直接丢弃（防异步回填串图，同 getRecognition 模式） */
+let histLoadSeq = 0
+
+function loadHistogram(path: string) {
+  const seq = ++histLoadSeq
+  hist.value = null
+  histError.value = false
+  histLoading.value = true
+  void getHistogram(path)
+    .then((h) => {
+      if (seq !== histLoadSeq || focusedPath.value !== path) return
+      hist.value = h
+      histLoading.value = false
+    })
+    .catch(() => {
+      if (seq !== histLoadSeq) return
+      histError.value = true
+      histLoading.value = false
+    })
+}
+
+// 切图重拉直方图（EXIF 回填/识别重排后 focusedPath 变化同样触发）
+watch(
+  focusedPath,
+  (path) => {
+    if (!path) {
+      hist.value = null
+      histError.value = false
+      histLoading.value = false
+      return
+    }
+    loadHistogram(path)
+  },
+  { immediate: true },
+)
+
+/** 剪切百分比（total 为 0 时为 0%） */
+const clipPct = (count: number, total: number): number => (total > 0 ? (count / total) * 100 : 0)
+const clipHighPct = computed(() => clipPct(hist.value?.clipHighCount ?? 0, hist.value?.totalPixels ?? 0))
+const clipLowPct = computed(() => clipPct(hist.value?.clipLowCount ?? 0, hist.value?.totalPixels ?? 0))
+
+/** 直方图画布引用（挂载/尺寸变化/数据变化时重绘） */
+const histCanvas = ref<HTMLCanvasElement | null>(null)
+
+/** 绘制 luma 面积 + 主线 + RGB 细线 + 网格（颜色随 CSS 变量，暗色主题自适应） */
+function drawHistogram() {
+  const canvas = histCanvas.value
+  const h = hist.value
+  if (!canvas || !h) return
+  const dpr = Math.min(window.devicePixelRatio || 1, 2)
+  const cssW = canvas.clientWidth
+  const cssH = canvas.clientHeight
+  if (cssW <= 0 || cssH <= 0) return
+  const pw = Math.round(cssW * dpr)
+  const ph = Math.round(cssH * dpr)
+  if (canvas.width !== pw || canvas.height !== ph) {
+    canvas.width = pw
+    canvas.height = ph
+  }
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+  const css = getComputedStyle(document.documentElement)
+  const fg = css.getPropertyValue('--foreground').trim() || '#cdd6f4'
+  const muted = css.getPropertyValue('--muted-foreground').trim() || '#a6adc8'
+  const border = css.getPropertyValue('--border').trim() || '#313244'
+  const W = canvas.width
+  const H = canvas.height
+  const plotH = H - 14
+  ctx.clearRect(0, 0, W, H)
+  // 网格：每 64 级竖线 + 底边
+  ctx.strokeStyle = border
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  for (let i = 0; i <= 4; i++) {
+    const x = Math.round((i * 64 * (W - 1)) / 255) + 0.5
+    ctx.moveTo(x, 0)
+    ctx.lineTo(x, plotH)
+  }
+  ctx.moveTo(0, plotH + 0.5)
+  ctx.lineTo(W, plotH + 0.5)
+  ctx.stroke()
+  const maxBin = Math.max(1, ...h.luma)
+  const xOf = (i: number) => (i * (W - 1)) / 255
+  const yOf = (v: number) => plotH - (v / maxBin) * plotH
+  const drawCurve = (bins: number[], color: string, alpha: number) => {
+    ctx.strokeStyle = color
+    ctx.globalAlpha = alpha
+    ctx.beginPath()
+    for (let i = 0; i < 256; i++) {
+      const x = xOf(i)
+      const y = yOf(bins[i])
+      if (i === 0) ctx.moveTo(x, y)
+      else ctx.lineTo(x, y)
+    }
+    ctx.stroke()
+    ctx.globalAlpha = 1
+  }
+  // RGB 三色细线（半透明，先画避免盖住 luma 主线）
+  drawCurve(h.r, '#f87171', 0.5)
+  drawCurve(h.g, '#4ade80', 0.5)
+  drawCurve(h.b, '#60a5fa', 0.5)
+  // luma 面积填充（低透明度）+ 主线
+  ctx.fillStyle = fg
+  ctx.globalAlpha = 0.18
+  ctx.beginPath()
+  ctx.moveTo(0, plotH)
+  for (let i = 0; i < 256; i++) ctx.lineTo(xOf(i), yOf(h.luma[i]))
+  ctx.lineTo(W - 1, plotH)
+  ctx.closePath()
+  ctx.fill()
+  ctx.globalAlpha = 1
+  ctx.strokeStyle = fg
+  ctx.lineWidth = 1.2
+  ctx.beginPath()
+  for (let i = 0; i < 256; i++) {
+    const x = xOf(i)
+    const y = yOf(h.luma[i])
+    if (i === 0) ctx.moveTo(x, y)
+    else ctx.lineTo(x, y)
+  }
+  ctx.stroke()
+  // 底部刻度
+  ctx.fillStyle = muted
+  ctx.font = '9px ui-monospace, monospace'
+  ctx.fillText('0', 2, H - 2)
+  ctx.fillText('255', W - 24, H - 2)
+}
+
+// 数据或画布挂载变化时重绘（flush: 'post' 保证 canvas ref 已就位）
+watch([hist, histCanvas], () => drawHistogram(), { flush: 'post' })
+
+/** 画布尺寸变化（面板拖宽）时重绘 */
+let histObserver: ResizeObserver | null = null
+watch(histCanvas, (el) => {
+  histObserver?.disconnect()
+  histObserver = null
+  if (!el) return
+  histObserver = new ResizeObserver(() => drawHistogram())
+  histObserver.observe(el)
+})
+
+// ── GPS：十进制坐标 + OSM 地图链接 ──
+
+/** 十进制坐标显示（6 位小数；负号保留，南纬/西经为负） */
+function fmtGps(v: number): string {
+  return v.toFixed(6)
+}
+
+/** OSM 地图链接（zoom 15，坐标居中） */
+function gpsMapUrl(lat: number, lon: number): string {
+  return `https://www.openstreetmap.org/?mlat=${lat.toFixed(6)}&mlon=${lon.toFixed(6)}&zoom=15`
+}
+
+/**
+ * 打开地图：Tauri 环境用 window.open（WebView2 外部 URL 默认交系统浏览器），
+ * 浏览器 mock 环境不拦截，走 anchor target=_blank 默认行为。
+ */
+function onOpenMap(e: Event) {
+  const c = focused.value
+  if (!c || c.gpsLat == null || c.gpsLon == null) return
+  if (isTauri) {
+    e.preventDefault()
+    window.open(gpsMapUrl(c.gpsLat, c.gpsLon), '_blank', 'noopener')
+  }
+}
 
 // ══════════════════ 调整 tab ══════════════════
 
@@ -487,8 +718,48 @@ function valueCls(v: number): string {
               <span class="shrink-0 text-xs text-muted-foreground">日期</span>
               <span class="min-w-0 truncate text-xs">{{ focused.dateTaken ?? DASH }}</span>
             </div>
+            <!-- GPS 行（T1 批次）：有坐标显示十进制 6 位 + OSM 地图链接；无坐标显示「无」 -->
+            <div class="flex items-center justify-between gap-2">
+              <span class="shrink-0 text-xs text-muted-foreground">位置</span>
+              <span
+                v-if="focused.gpsLat != null && focused.gpsLon != null"
+                class="flex min-w-0 items-center gap-1.5 text-xs"
+              >
+                <span class="truncate tabular-nums">
+                  {{ fmtGps(focused.gpsLat) }}, {{ fmtGps(focused.gpsLon) }}
+                </span>
+                <a
+                  :href="gpsMapUrl(focused.gpsLat, focused.gpsLon)"
+                  target="_blank"
+                  rel="noreferrer"
+                  class="shrink-0 text-primary hover:underline"
+                  @click="onOpenMap"
+                >在地图查看</a>
+              </span>
+              <span v-else class="text-xs text-muted-foreground">无</span>
+            </div>
           </template>
           <div v-else class="text-xs text-muted-foreground">未选择图片</div>
+        </div>
+
+        <!-- ── 直方图卡（T1 批次）：luma 曲线 + RGB 细线 + 剪切统计 ── -->
+        <div class="flex flex-col gap-2 rounded-md border border-border bg-card p-3 shadow-sm">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-medium text-muted-foreground">直方图</span>
+            <span v-if="histLoading" class="text-[0.625rem] text-muted-foreground/60">计算中…</span>
+          </div>
+          <template v-if="hist">
+            <canvas ref="histCanvas" class="h-20 w-full" />
+            <div class="flex gap-3 text-[0.625rem] tabular-nums">
+              <span class="text-label-red">高光剪切 {{ clipHighPct.toFixed(1) }}%</span>
+              <span class="text-label-blue">死黑 {{ clipLowPct.toFixed(1) }}%</span>
+            </div>
+          </template>
+          <div v-else-if="histError" class="text-xs text-muted-foreground">
+            直方图不可用（解码失败）
+          </div>
+          <div v-else-if="!focused" class="text-xs text-muted-foreground">未选择图片</div>
+          <div v-else class="text-xs text-muted-foreground">计算中…</div>
         </div>
 
         <!-- ── 识别卡：状态 chip + 完整结果（getRecognition）+ 重新识别/检测框/修正鸟种 ── -->
@@ -592,8 +863,26 @@ function valueCls(v: number): string {
                   @click.stop
                 />
                 <div class="max-h-40 overflow-y-auto">
+                  <template v-if="correctOptions.frequent.length > 0">
+                    <div class="px-2 pt-1 pb-0.5 text-[10px] font-medium text-muted-foreground/70">
+                      常用
+                    </div>
+                    <button
+                      v-for="n in correctOptions.frequent"
+                      :key="n"
+                      type="button"
+                      class="block w-full truncate px-2 py-1 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                      @click="onCorrectSelect(n)"
+                    >
+                      {{ n }}
+                    </button>
+                  </template>
+                  <div
+                    v-if="correctOptions.frequent.length > 0 && correctOptions.rest.length > 0"
+                    class="my-1 border-t border-border/60"
+                  ></div>
                   <button
-                    v-for="n in correctOptions"
+                    v-for="n in correctOptions.rest"
                     :key="n"
                     type="button"
                     class="block w-full truncate px-2 py-1 text-left text-xs hover:bg-accent hover:text-accent-foreground"
@@ -601,7 +890,10 @@ function valueCls(v: number): string {
                   >
                     {{ n }}
                   </button>
-                  <div v-if="correctOptions.length === 0" class="px-2 py-1 text-xs text-muted-foreground">
+                  <div
+                    v-if="correctOptions.frequent.length === 0 && correctOptions.rest.length === 0"
+                    class="px-2 py-1 text-xs text-muted-foreground"
+                  >
                     无匹配鸟种
                   </div>
                 </div>
@@ -709,6 +1001,51 @@ function valueCls(v: number): string {
                 {{ o.label }}
               </button>
             </div>
+          </template>
+          <div v-else class="text-xs text-muted-foreground">未选择图片</div>
+        </div>
+
+        <!-- ── 关键词卡：chips 展示 + 输入添加（回车/逗号分隔）+ × 删除；作用于选中集 ── -->
+        <div class="flex flex-col gap-2 rounded-md border border-border bg-card p-3 shadow-sm">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-medium text-muted-foreground">关键词</span>
+            <button
+              v-if="focused && focused.keywords.length > 0"
+              type="button"
+              class="text-xs text-primary hover:underline"
+              @click="captures.applyKeywords(selection.selectedPaths, [])"
+            >
+              清除
+            </button>
+          </div>
+          <template v-if="focused">
+            <!-- chips（× 删除） -->
+            <div v-if="focused.keywords.length > 0" class="flex flex-wrap gap-1">
+              <span
+                v-for="kw in focused.keywords"
+                :key="kw"
+                class="flex items-center gap-1 rounded-sm border border-border bg-muted px-1.5 py-0.5 text-xs select-none"
+              >
+                {{ kw }}
+                <button
+                  type="button"
+                  class="text-muted-foreground hover:text-foreground"
+                  :aria-label="`删除关键词 ${kw}`"
+                  @click="removeKeyword(kw)"
+                >
+                  <XIcon class="size-3" />
+                </button>
+              </span>
+            </div>
+            <div v-else class="text-xs text-muted-foreground">暂无关键词</div>
+            <!-- 输入添加：回车/逗号提交 -->
+            <input
+              v-model="keywordInput"
+              type="text"
+              placeholder="添加关键词（回车或逗号分隔）"
+              class="h-8 w-full rounded-sm border border-border bg-card px-2 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+              @keydown.enter.prevent="onKeywordAdd"
+            />
           </template>
           <div v-else class="text-xs text-muted-foreground">未选择图片</div>
         </div>

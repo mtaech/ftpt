@@ -3,6 +3,7 @@
 import type {
   AdjustParams,
   AppConfig,
+  BatchOpFailure,
   BatchOpItem,
   BatchOpOptions,
   BatchOpPreview,
@@ -10,9 +11,21 @@ import type {
   BatchOpType,
   CaptureMeta,
   ColorLabel,
+  CorrectionStat,
   Flag,
+  HistogramPayload,
+  ImportCandidate,
+  ImportDrive,
+  ImportMode,
+  ImportPlan,
+  ImportResult,
   Recognition,
+  SpeciesOverview,
+  SpeciesPhoto,
+  SubdirInfo,
+  UndoBatchResult,
 } from './bindings'
+import { renderNameTemplate } from './nameTemplate'
 import { formatToString } from './filter'
 
 export const MOCK_DIR = 'E:/Mock/Birds'
@@ -53,7 +66,14 @@ function makeCaptures(): CaptureMeta[] {
       primaryPath: `${MOCK_DIR}/DSC_${String(1000 + i)}.${ext.toLowerCase()}`,
       primaryFormat: isRaw ? 'raw' : ext.toLowerCase(),
       fileSize: 4_000_000 + ((i * 7919) % 20_000_000),
-      dateTaken: `2026-08-${String((i % 9) + 1).padStart(2, '0')}T10:${String(i % 60).padStart(2, '0')}:00`,
+      // 前 6 张（1s 间隔）与 100–103（同秒）构成连拍组，供网格徽标/对比模式手动验证；
+      // 其余按分钟递增（60s 间隔，不成组）
+      dateTaken:
+        i < 6
+          ? `2026-08-01T10:15:${String(28 + i).padStart(2, '0')}`
+          : i >= 100 && i < 104
+            ? '2026-08-02T10:40:00'
+            : `2026-08-${String((i % 9) + 1).padStart(2, '0')}T10:${String(i % 60).padStart(2, '0')}:00`,
       extensions: isRaw ? [ext, 'JPG'] : [ext],
       cameraMake: 'NIKON',
       cameraModel: 'Z 9',
@@ -64,13 +84,19 @@ function makeCaptures(): CaptureMeta[] {
       focalLength: '840mm',
       imageWidth: 8256,
       imageHeight: 5504,
+      // GPS：每 3 张有坐标（含南纬/西经负值样本），其余无——验证 GPS 行两态
+      gpsLat: i % 3 === 0 ? 39.9042 + (i % 12) * 0.05 : null,
+      gpsLon: i % 3 === 0 ? (i % 5 === 0 ? -(116.4074 + (i % 7) * 0.03) : 116.4074 + (i % 7) * 0.03) : null,
       rating: i % 7 === 0 ? 'Three' : 'None',
       colorLabel: i % 11 === 0 ? 'Red' : 'None',
       flag: i % 13 === 0 ? 'Pick' : null,
+      // 预置少量关键词（确定性），便于手动验证 InfoPanel 关键词卡与筛选 chips
+      keywords: i % 5 === 0 ? ['精选'] : i % 3 === 0 ? ['测试'] : [],
       birdName: null,
       birdConfidence: null,
       recognitionStatus: null,
       birdBbox: null,
+      eyeSharpness: null,
     })
   }
   return out
@@ -109,9 +135,12 @@ export const mockCommands = {
     return MOCK_DIR
   },
 
-  async scanDirectory(_path: string): Promise<number> {
+  async scanDirectory(path: string): Promise<number> {
     captures = makeCaptures()
+    mockCurrentDir = path
     const total = captures.length
+    // 与真实后端一致：最近目录列表更新（最新在前、去重）
+    recent = [mockCurrentDir, ...recent.filter((r) => r !== mockCurrentDir)].slice(0, 10)
     // 模拟扫描 → EXIF 回填 → 缩略图三段进度
     const stages = ['scan', 'exif', 'thumb'] as const
     let delay = 0
@@ -124,7 +153,7 @@ export const mockCommands = {
         )
       }
     }
-    setTimeout(() => mockEmit('scan:done', { total, directory: MOCK_DIR }), delay + 60)
+    setTimeout(() => mockEmit('scan:done', { total, directory: mockCurrentDir }), delay + 60)
     // 逐张缩略图就绪事件（抽 24 张模拟，验证 thumb:ready 刷新链路）
     for (let i = 0; i < 24; i++) {
       setTimeout(() => mockEmit('thumb:ready', { path: captures[i * 8].primaryPath }), delay + 150 + i * 80)
@@ -152,6 +181,16 @@ export const mockCommands = {
     return { status: 'ok', data: null }
   },
 
+  async setKeywords(paths: string[], keywords: string[]): Promise<MockResult<null>> {
+    // 与后端 set_keywords 同语义：归一化（去空白/去空串/去重）后全量替换
+    const seen = new Set<string>()
+    const cleaned = keywords
+      .map((k) => k.trim())
+      .filter((k) => k !== '' && !seen.has(k) && (seen.add(k), true))
+    for (const c of captures) if (paths.includes(c.primaryPath)) c.keywords = [...cleaned]
+    return { status: 'ok', data: null }
+  },
+
   // ── Phase 2/3 mock：内存态 + 模拟事件流 ──────────────
 
   async listFavorites(): Promise<string[]> {
@@ -165,6 +204,9 @@ export const mockCommands = {
   },
   async listRecent(): Promise<string[]> {
     return [...recent]
+  },
+  async listSubdirs(path: string): Promise<MockResult<SubdirInfo[]>> {
+    return { status: 'ok', data: MOCK_SUBDIRS[path] ?? [] }
   },
   async listBirdSpecies(): Promise<MockResult<string[]>> {
     return {
@@ -204,10 +246,23 @@ export const mockCommands = {
     }
     if (op === 'Delete') {
       captures = captures.filter((c) => !items.some((it) => it.path === c.primaryPath))
-      mockEmit('scan:done', { total: captures.length, directory: MOCK_DIR })
+      mockEmit('scan:done', { total: captures.length, directory: mockCurrentDir })
     }
+    // 撤销日志（对齐后端 OpJournal）：Move/Copy 记录最近一次批次，Delete 清空（回收站不可撤销）
+    mockUndoJournal = op === 'Move' || op === 'Copy' ? { kind: op, count } : null
     mockEmit('batch:done', { success: count, failed: 0 })
     return { status: 'ok', data: { success: count, failed: 0, failures: [] } }
+  },
+  /**
+   * 撤销最近一次批量操作（移动/复制）：mock 无真实文件系统，网格本就完整，
+   * 语义上等价于「文件已回来」——返回撤销条数并触发 scan:done 全量重扫。
+   */
+  async undoBatchOperation(): Promise<MockResult<UndoBatchResult>> {
+    const entry = mockUndoJournal
+    if (!entry) return { status: 'error', error: '没有可撤销的批量操作' }
+    mockUndoJournal = null
+    mockEmit('scan:done', { total: captures.length, directory: mockCurrentDir })
+    return { status: 'ok', data: { reverted: entry.count, skipped: [] } }
   },
   async getAdjustments(path: string): Promise<AdjustParams> {
     return adjustments.get(path) ?? { exposure: 0, contrast: 0, saturation: 0 }
@@ -216,6 +271,65 @@ export const mockCommands = {
     adjustments.set(path, params)
     return { status: 'ok', data: null }
   },
+
+  // ── 直方图 / 剪切叠加（T1 批次 HistogramPanel 切片）────────────────
+
+  /** 路径哈希 → 确定性伪随机（mulberry32 风格；同一路径结果稳定） */
+  async getHistogram(path: string): Promise<MockResult<HistogramPayload>> {
+    let seed = 0
+    for (let i = 0; i < path.length; i++) seed = (seed * 31 + path.charCodeAt(i)) | 0
+    const rand = () => {
+      seed = (seed + 0x6d2b79f5) | 0
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed)
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+    }
+    // 合成直方图：以 (中心, 峰值) 的高斯 + 噪声生成 4 通道，总和 = totalPixels
+    const total = 8256 * 5504
+    const mkChannel = (center: number, sigma: number): number[] => {
+      const bins = new Array<number>(256).fill(0)
+      let sum = 0
+      for (let i = 0; i < 256; i++) {
+        const d = (i - center) / sigma
+        const v = Math.round(total * 0.35 * Math.exp(-0.5 * d * d) + total * 0.06 * rand())
+        bins[i] = v
+        sum += v
+      }
+      // 归一化使总和恰好等于 total（保持 bin 总数 = 像素数的不变量）
+      const k = total / sum
+      for (let i = 0; i < 256; i++) bins[i] = Math.round(bins[i] * k)
+      return bins
+    }
+    const luma = mkChannel(110 + (seed % 60), 34)
+    const r = mkChannel(95 + (seed % 50), 30)
+    const g = mkChannel(120 + (seed % 55), 30)
+    const b = mkChannel(70 + (seed % 65), 30)
+    const clipHighCount = luma.slice(250).reduce((a, v) => a + v, 0)
+    const clipLowCount = luma.slice(0, 6).reduce((a, v) => a + v, 0)
+    return {
+      status: 'ok',
+      data: { luma, r, g, b, clipHighCount, clipLowCount, totalPixels: total },
+    }
+  },
+
+  /** canvas 合成剪切叠加 PNG（上半红 = 高光、下半蓝 = 死黑，中间透明带），转字节返回 */
+  async getClippingMask(_path: string): Promise<MockResult<number[]>> {
+    const c = document.createElement('canvas')
+    c.width = 400
+    c.height = 300
+    const ctx = c.getContext('2d')
+    if (!ctx) return { status: 'ok', data: [] }
+    ctx.clearRect(0, 0, 400, 300)
+    ctx.fillStyle = 'rgba(255,0,0,1)'
+    ctx.fillRect(0, 0, 400, 120)
+    ctx.fillStyle = 'rgba(0,0,255,1)'
+    ctx.fillRect(0, 180, 400, 120)
+    const blob = await new Promise<Blob | null>((res) => c.toBlob(res, 'image/png'))
+    if (!blob) return { status: 'ok', data: [] }
+    const buf = new Uint8Array(await blob.arrayBuffer())
+    return { status: 'ok', data: Array.from(buf) }
+  },
+
   async getAppConfig(): Promise<AppConfig> {
     return { ...appConfig, favoriteDirs: [...favorites], recentDirectories: [...recent] }
   },
@@ -253,7 +367,7 @@ export const mockCommands = {
   async deleteCaptures(paths: string[]): Promise<MockResult<null>> {
     captures = captures.filter((c) => !paths.includes(c.primaryPath))
     // 与后端 delete_captures 语义一致：删除后 emit scan:done 驱动前端重扫
-    mockEmit('scan:done', { total: captures.length, directory: MOCK_DIR })
+    mockEmit('scan:done', { total: captures.length, directory: mockCurrentDir })
     return { status: 'ok', data: null }
   },
   async exportAdjusted(path: string, outputDir: string | null): Promise<MockResult<string>> {
@@ -269,12 +383,264 @@ export const mockCommands = {
     appConfig = config
     return { status: 'ok', data: null }
   },
+
+  // ── T1 批次（SpeciesIndex）：全局鸟种统计 mock ──────────
+
+  async getSpeciesStats(): Promise<MockResult<SpeciesOverview>> {
+    return {
+      status: 'ok',
+      data: {
+        folderCount: 2,
+        stats: SPECIES_MOCK.map((s) => ({
+          birdName: s.bird,
+          photoCount: s.count,
+          firstDate: s.dates[0],
+          lastDate: s.dates[s.dates.length - 1],
+          avgSharpness: s.sharp,
+        })),
+      },
+    }
+  },
+  async getSpeciesPhotos(birdName: string): Promise<MockResult<SpeciesPhoto[]>> {
+    return { status: 'ok', data: mockSpeciesPhotos(birdName) }
+  },
+
+  // ── T 批次 Wave 2（RecoFeedback）：修正审计 + 命中率 + 高频鸟种 mock ──
+
+  async getCorrectionStats(): Promise<MockResult<CorrectionStat[]>> {
+    return { status: 'ok', data: MOCK_CORRECTION_STATS }
+  },
+  async getFrequentSpecies(limit: number): Promise<MockResult<string[]>> {
+    return { status: 'ok', data: mockFrequentSpecies(limit) }
+  },
+
+  // ── T1 批次（ImportRebuild）：导入 mock（假驱动器 + 假计划） ──
+
+  async listImportDrives(): Promise<ImportDrive[]> {
+    return [...MOCK_IMPORT_DRIVES]
+  },
+  async scanImportSource(path: string): Promise<MockResult<ImportCandidate[]>> {
+    // 模拟递归扫描耗时
+    await sleep(120)
+    return { status: 'ok', data: mockImportCandidates(path) }
+  },
+  async planImport(candidates: ImportCandidate[], _destRoot: string): Promise<MockResult<ImportPlan>> {
+    await sleep(60)
+    return { status: 'ok', data: mockPlanImport(candidates) }
+  },
+  async executeImport(plan: ImportPlan, destRoot: string, _mode: ImportMode): Promise<MockResult<ImportResult>> {
+    const files = plan.groups.flatMap((g) => g.files)
+    const total = files.length
+    let done = 0
+    for (const file of files) {
+      await sleep(40)
+      done += 1
+      mockEmit('import:progress', { done, total, current: file })
+    }
+    const imported = total
+    const skipped = plan.skipped.length
+    mockEmit('import:done', { imported, skipped, failed: 0 })
+    // 目标根目录处于当前扫描目录内 → 模拟后端重扫（新导入照片刷新网格）
+    if (destRoot === mockCurrentDir || destRoot.startsWith(`${mockCurrentDir}/`)) {
+      mockEmit('scan:done', { total: captures.length, directory: mockCurrentDir })
+    }
+    return { status: 'ok', data: { imported, skipped, failed: 0 } }
+  },
+
+  // ── T1 批次（ExportPresets）：批量重命名（模板）+ 批量导出（预设） mock ──
+
+  async batchRename(paths: string[], template: string, startSeq: number): Promise<MockResult<BatchOpResult>> {
+    const failures: BatchOpFailure[] = []
+    let success = 0
+    const total = paths.length
+    paths.forEach((path, i) => {
+      const c = captures.find((x) => x.primaryPath === path)
+      const base = renderNameTemplate(template, {
+        name: c?.baseName ?? path.split(/[\\/]/).pop() ?? 'photo',
+        species: c?.birdName ?? null,
+        date: c?.dateTaken ?? null,
+        camera: c?.cameraModel ?? null,
+        seq: startSeq + i,
+      })
+      if (c) {
+        // 模拟改名：更新内存 CaptureMeta（真实后端重扫后网格同样刷新）
+        c.baseName = base
+        c.primaryPath = c.primaryPath.replace(/[^\\/]+$/, `${base}${extOf(c.primaryPath)}`)
+        success += 1
+      } else {
+        failures.push({ path, error: '找不到该照片' })
+      }
+      mockEmit('batch:progress', { done: i + 1, total, currentPath: path })
+    })
+    mockEmit('batch:done', { success, failed: failures.length })
+    return { status: 'ok', data: { success, failed: failures.length, failures } }
+  },
+
+  async exportCaptures(
+    paths: string[],
+    _outputDir: string,
+    _longEdge: number | null,
+    _quality: number,
+    template: string,
+    startSeq: number,
+  ): Promise<MockResult<BatchOpResult>> {
+    const failures: BatchOpFailure[] = []
+    const total = paths.length
+    let success = 0
+    for (let i = 0; i < total; i++) {
+      const path = paths[i]
+      const c = captures.find((x) => x.primaryPath === path)
+      if (c) {
+        success += 1
+        // 模拟导出：渲染目标名放进进度事件（与后端 export_captures 语义一致）
+        const rendered = renderNameTemplate(template, {
+          name: c.baseName,
+          species: c.birdName ?? null,
+          date: c.dateTaken ?? null,
+          camera: c.cameraModel ?? null,
+          seq: startSeq + i,
+        })
+        mockEmit('export:progress', {
+          done: i + 1,
+          total,
+          currentPath: `${path} → ${rendered}.jpg`,
+        })
+      } else {
+        failures.push({ path, error: '找不到该照片' })
+        mockEmit('export:progress', { done: i + 1, total, currentPath: path })
+      }
+    }
+    mockEmit('export:done', { success, failed: failures.length })
+    return { status: 'ok', data: { success, failed: failures.length, failures } }
+  },
+}
+
+/** 取路径扩展名（含点；无扩展名返回空串） */
+function extOf(p: string): string {
+  const m = /(\.[^./\\]+)$/.exec(p)
+  return m ? m[1] : ''
 }
 
 /** mock 内部状态（收藏/最近/调整参数/配置） */
 let favorites: string[] = []
 let recent: string[] = [MOCK_DIR]
 const adjustments = new Map<string, AdjustParams>()
+
+/** mock 撤销日志（对齐后端 OpJournal：只记最近一次 Move/Copy 批次，Delete 不记录） */
+let mockUndoJournal: { kind: 'Move' | 'Copy'; count: number } | null = null
+
+// ── T1 批次（SpeciesIndex）：全局鸟种统计 mock 数据 ────────
+// 确定性合成：5 种鸟（张数降序，含无锐度样本）+ 照片指向 mock captures 路径
+// （缩略图走 placeholderImage，无需真实文件）
+
+const SPECIES_MOCK: { bird: string; count: number; sharp: number | null; dates: string[] }[] = [
+  { bird: '白鹭', count: 6, sharp: 42.5, dates: ['2026-08-01', '2026-08-03'] },
+  { bird: '翠鸟', count: 4, sharp: 61.2, dates: ['2026-08-02', '2026-08-05'] },
+  { bird: '苍鹭', count: 3, sharp: null, dates: ['2026-08-01', '2026-08-02'] },
+  { bird: '麻雀', count: 2, sharp: 33.0, dates: ['2026-08-04', '2026-08-04'] },
+  { bird: '斑嘴鸭', count: 1, sharp: 55.5, dates: ['2026-08-06', '2026-08-06'] },
+]
+
+/** 某鸟种 mock 照片定位：与 makeCaptures 同构生成 primaryPath（ext 大小写一致），
+ *  保证统计视图双击跳转能在 captures.items 中按主路径命中 */
+function mockSpeciesPhotos(bird: string): SpeciesPhoto[] {
+  const specIdx = SPECIES_MOCK.findIndex((s) => s.bird === bird)
+  if (specIdx < 0) return []
+  const spec = SPECIES_MOCK[specIdx]
+  const out: SpeciesPhoto[] = []
+  for (let i = 0; i < spec.count; i++) {
+    const n = 1000 + ((specIdx * 13 + i * 7) % 200)
+    const isRaw = FORMATS[n % FORMATS.length] === 'Raw'
+    const ext = isRaw ? RAWS[n % RAWS.length] : FORMATS[n % FORMATS.length].toUpperCase()
+    out.push({ folder: MOCK_DIR, relPath: `DSC_${String(n)}.${ext.toLowerCase()}` })
+  }
+  return out
+}
+
+// ── T 批次 Wave 2（RecoFeedback）：识别命中率 + 高频鸟种 mock 数据 ────────
+// 与 SPECIES_MOCK 同口径：predicted = 该鸟种张数，correctedAway = 被人工改走张数。
+// 含边界样本：翠鸟/苍鹭命中率偏低（模型弱项）、麻雀/斑嘴鸭样本 < 3 触发「样本少」。
+const MOCK_CORRECTION_STATS: CorrectionStat[] = [
+  { birdName: '斑嘴鸭', predictedCount: 1, correctedAwayCount: 0, accuracy: 1 },
+  { birdName: '白鹭', predictedCount: 6, correctedAwayCount: 0, accuracy: 1 },
+  { birdName: '苍鹭', predictedCount: 3, correctedAwayCount: 2, accuracy: 1 / 3 },
+  { birdName: '翠鸟', predictedCount: 4, correctedAwayCount: 1, accuracy: 0.75 },
+  { birdName: '麻雀', predictedCount: 2, correctedAwayCount: 2, accuracy: 0 },
+]
+
+/** mock 高频鸟种：SPECIES_MOCK 按张数降序（后端同序）；limit 截断 */
+function mockFrequentSpecies(limit: number): string[] {
+  return [...SPECIES_MOCK]
+    .sort((a, b) => b.count - a.count)
+    .slice(0, limit)
+    .map((s) => s.bird)
+}
+
+// ── T1 批次（ImportRebuild）：导入 mock 数据与计划模拟 ────────
+
+/** mock 可移动驱动器（假 SD 卡 / U 盘，列表入口可见） */
+const MOCK_IMPORT_DRIVES: ImportDrive[] = [
+  { path: 'E:\\', label: 'Canon EOS' },
+  { path: 'F:\\', label: 'SANDISK' },
+]
+
+/**
+ * mock 导入候选：确定性生成 4 个日期 × 每组 3-4 张（DCIM 形态路径）。
+ * 每组首张带 `dup_` 前缀，模拟「目标已存在且大小相同」去重命中，
+ * 便于验证干跑预览的跳过清单展示。
+ */
+function mockImportCandidates(source: string): ImportCandidate[] {
+  const dates = ['2024-05-01', '2024-06-02', '2024-07-15', '2024-08-03']
+  const perGroup = [4, 3, 4, 3]
+  const out: ImportCandidate[] = []
+  let seq = 1000
+  dates.forEach((date, gi) => {
+    for (let i = 0; i < perGroup[gi]; i++) {
+      seq += 1
+      const dup = i === 0 && gi > 0 ? 'dup_' : ''
+      out.push({
+        path: `${source}/DCIM/100CANON/${dup}IMG_${seq}.jpg`,
+        date,
+        size: 3_500_000 + seq,
+      })
+    }
+  })
+  return out
+}
+
+/** mock 计划：按日期分组（保持候选顺序）；dup_ 前缀 = 跳过（模拟目标去重命中） */
+function mockPlanImport(candidates: ImportCandidate[]): ImportPlan {
+  const groups: ImportPlan['groups'] = []
+  const skipped: ImportPlan['skipped'] = []
+  for (const c of candidates) {
+    const name = c.path.split(/[\\/]/).pop() ?? c.path
+    if (name.startsWith('dup_')) {
+      skipped.push({ path: c.path, reason: '目标已存在且大小相同' })
+      continue
+    }
+    let g = groups.find((x) => x.dateDir === c.date)
+    if (!g) {
+      g = { dateDir: c.date, files: [] }
+      groups.push(g)
+    }
+    g.files.push(c.path)
+  }
+  return { groups, skipped }
+}
+/** mock 当前扫描目录（scanDirectory 按入参更新，scan:done 携带它供侧栏切换） */
+let mockCurrentDir: string = MOCK_DIR
+/** mock 目录树数据：MOCK_DIR 一层子目录 + 二级示例（验证侧栏懒加载逐层展开） */
+const MOCK_SUBDIRS: Record<string, SubdirInfo[]> = {
+  [MOCK_DIR]: [
+    { name: '2026-07 春迁记录', path: `${MOCK_DIR}/2026-07 春迁记录`, photoCount: 42 },
+    { name: '2026-06 繁殖季', path: `${MOCK_DIR}/2026-06 繁殖季`, photoCount: 18 },
+    { name: 'RAW 归档', path: `${MOCK_DIR}/RAW 归档`, photoCount: 0 },
+  ],
+  [`${MOCK_DIR}/2026-07 春迁记录`]: [
+    { name: '湿地', path: `${MOCK_DIR}/2026-07 春迁记录/湿地`, photoCount: 12 },
+    { name: '林缘', path: `${MOCK_DIR}/2026-07 春迁记录/林缘`, photoCount: 30 },
+  ],
+}
 let appConfig: AppConfig = {
   thumbnailSize: 220,
   favoriteDirs: [],
@@ -286,6 +652,8 @@ let appConfig: AppConfig = {
   rightPanelWidth: 200,
   fontFamily: 'Segoe UI',
   recognitionThreadCount: 2,
+  includeSubdirectories: false,
+  exportPresets: [{ name: '原图', longEdge: null, quality: 95, template: '{name}' }],
 }
 
 function sleep(ms: number): Promise<void> {

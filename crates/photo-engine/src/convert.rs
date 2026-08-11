@@ -31,30 +31,31 @@ pub fn export_adjusted(
     params: &AdjustParams,
     output_path: &Path,
 ) -> Result<PathBuf, ConvertError> {
+    // 原尺寸 + 质量 95 即预设导出的特例（保持既有行为与命名）
+    export_with_preset(source, params, None, 95, output_path)
+}
+
+/// 预设导出（T1 批次）：源图 → 可选长边缩放 → 色调调整 → JPEG 写出。
+///
+/// - `long_edge`：输出长边像素上限（None = 原尺寸）。RAW 走全尺寸 16-bit quality
+///   解码后缩放（三角形滤波，保持导出高质量语义）；常规图原图解码后缩放。
+/// - `quality`：JPEG 质量（1-100，内部钳制；0/越界值不产生非法编码器状态）
+/// - `output_path` 的命名/防覆盖由调用方保证（模板渲染 + 序号去重）
+/// - 全同步，调用方负责 worker 线程
+pub fn export_with_preset(
+    source: &SourceFile,
+    params: &AdjustParams,
+    long_edge: Option<u32>,
+    quality: u8,
+    output_path: &Path,
+) -> Result<PathBuf, ConvertError> {
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let rgb8 = match &source.format {
-        ImageFormat::Raw(_) => {
-            let img16 = decode_raw16_with_options(
-                &source.path,
-                &rawlib::DecodeOptions::quality(),
-                None,
-            )
-            .map_err(|e| ConvertError::Raw(e.to_string()))?;
-            let tone: crate::adjustments::ToneParams = params.into();
-            let toned = apply_tone16(&img16, &tone);
-            rgb16_to_rgb8(&toned)
-        }
-        _ => {
-            let img = image::open(&source.path)?;
-            let rgb8 = img.to_rgb8();
-            let tone: crate::adjustments::ToneParams = params.into();
-            apply_tone8(&rgb8, &tone)
-        }
-    };
+    let rgb8 = bake_rgb8(source, params, long_edge)?;
     let mut buf = Cursor::new(Vec::new());
-    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 95);
+    let mut encoder =
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality.clamp(1, 100));
     encoder.encode(
         rgb8.as_raw(),
         rgb8.width(),
@@ -63,6 +64,64 @@ pub fn export_adjusted(
     )?;
     std::fs::write(output_path, buf.into_inner())?;
     Ok(output_path.to_path_buf())
+}
+
+/// 解码 + 色调调整 → 8-bit RGB（导出用）：RAW 全尺寸 quality 解码，长边缩放。
+/// 与 `render_adjusted`（预览 half_size 语义）分离，导出始终走全尺寸解码。
+fn bake_rgb8(
+    source: &SourceFile,
+    params: &AdjustParams,
+    long_edge: Option<u32>,
+) -> Result<image::RgbImage, ConvertError> {
+    let tone: crate::adjustments::ToneParams = params.into();
+    match &source.format {
+        ImageFormat::Raw(_) => {
+            let img16 = decode_raw16_with_options(
+                &source.path,
+                &rawlib::DecodeOptions::quality(),
+                None,
+            )
+            .map_err(|e| ConvertError::Raw(e.to_string()))?;
+            let (w, h) = img16.dimensions();
+            let scale = scale_for_long_edge(w, h, long_edge);
+            let toned = if scale < 1.0 {
+                let nw = ((w as f32 * scale).round().max(1.0)) as u32;
+                let nh = ((h as f32 * scale).round().max(1.0)) as u32;
+                let small = image::imageops::resize(
+                    &img16,
+                    nw,
+                    nh,
+                    image::imageops::FilterType::Triangle,
+                );
+                apply_tone16(&small, &tone)
+            } else {
+                apply_tone16(&img16, &tone)
+            };
+            Ok(rgb16_to_rgb8(&toned))
+        }
+        _ => {
+            let img = image::open(&source.path)?;
+            let (w, h) = img.dimensions();
+            let scale = scale_for_long_edge(w, h, long_edge);
+            let rgb8 = if scale < 1.0 {
+                let nw = ((w as f32 * scale).round().max(1.0)) as u32;
+                let nh = ((h as f32 * scale).round().max(1.0)) as u32;
+                img.resize_exact(nw, nh, image::imageops::FilterType::Triangle)
+                    .to_rgb8()
+            } else {
+                img.to_rgb8()
+            };
+            Ok(apply_tone8(&rgb8, &tone))
+        }
+    }
+}
+
+/// 长边缩放系数：`long_edge` 为 None 或大于原长边时返回 1.0（不放大）。
+fn scale_for_long_edge(w: u32, h: u32, long_edge: Option<u32>) -> f32 {
+    match long_edge {
+        Some(m) if m > 0 => (m as f32 / w.max(h) as f32).min(1.0),
+        _ => 1.0,
+    }
 }
 
 /// 16-bit RGB 缓冲降为 8-bit（sRGB 编码值直接截高 8 位，语义一致）
@@ -185,6 +244,59 @@ mod tests {
             file_size: Some(0),
         };
         let result = export_adjusted(&source, &AdjustParams::default(), &out).unwrap();
+        let loaded = image::open(result).unwrap();
+        assert_eq!(loaded.dimensions(), (400, 300));
+    }
+
+    #[test]
+    fn test_export_with_preset_long_edge_scales_down() {
+        let dir = TempDir::new().unwrap();
+        let input = create_test_jpeg(&dir, "big.jpg", 1200, 800);
+        let out_dir = TempDir::new().unwrap();
+        let out = out_dir.path().join("out.jpg");
+        let source = SourceFile {
+            path: input,
+            format: ImageFormat::Jpeg,
+            file_size: Some(0),
+        };
+        // 长边 600 → 等比缩到 600×400
+        let result =
+            export_with_preset(&source, &AdjustParams::default(), Some(600), 90, &out).unwrap();
+        let loaded = image::open(result).unwrap();
+        assert_eq!(loaded.dimensions(), (600, 400));
+    }
+
+    #[test]
+    fn test_export_with_preset_no_upscale() {
+        let dir = TempDir::new().unwrap();
+        let input = create_test_jpeg(&dir, "small.jpg", 200, 100);
+        let out_dir = TempDir::new().unwrap();
+        let out = out_dir.path().join("out.jpg");
+        let source = SourceFile {
+            path: input,
+            format: ImageFormat::Jpeg,
+            file_size: Some(0),
+        };
+        // 长边限制大于原尺寸 → 不放大
+        let result =
+            export_with_preset(&source, &AdjustParams::default(), Some(1000), 90, &out).unwrap();
+        let loaded = image::open(result).unwrap();
+        assert_eq!(loaded.dimensions(), (200, 100));
+    }
+
+    #[test]
+    fn test_export_with_preset_none_long_edge_original_size() {
+        let dir = TempDir::new().unwrap();
+        let input = create_test_jpeg(&dir, "orig.jpg", 400, 300);
+        let out_dir = TempDir::new().unwrap();
+        let out = out_dir.path().join("out.jpg");
+        let source = SourceFile {
+            path: input,
+            format: ImageFormat::Jpeg,
+            file_size: Some(0),
+        };
+        let result =
+            export_with_preset(&source, &AdjustParams::default(), None, 80, &out).unwrap();
         let loaded = image::open(result).unwrap();
         assert_eq!(loaded.dimensions(), (400, 300));
     }

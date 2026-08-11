@@ -14,11 +14,12 @@ export type KeymapAction =
   | 'rate4'
   | 'rate5'
   | 'rate0'
-  // 色标（6红 7黄 8绿 9蓝）
+  // 色标（6红 7黄 8绿 9蓝，Ctrl+6 紫）
   | 'labelRed'
   | 'labelYellow'
   | 'labelGreen'
   | 'labelBlue'
+  | 'labelPurple'
   // 旗标（P/X 标记，U 清除）
   | 'flagPick'
   | 'flagReject'
@@ -29,7 +30,18 @@ export type KeymapAction =
   | 'recognizeAll'
   // 预览 / 视图
   | 'toggleBbox'
+  | 'toggleClipping'
   | 'toggleGridPreview'
+  // 缩放（= 放大 / - 缩小；预览/对比态生效，网格态 no-op）
+  | 'zoomIn'
+  | 'zoomOut'
+  // 幻灯片（s 进入；空格暂停/继续）
+  | 'slideshow'
+  | 'slideshowTogglePlay'
+  // 对比（前端新增，GPUI 版无此键）：C 进入/聚焦对比模式
+  | 'compare'
+  // 统计视图（T1 批次，SpeciesIndex）：t 进入/退出
+  | 'stats'
   // 导航（方向键 / Home / End）
   | 'prev'
   | 'next'
@@ -37,6 +49,8 @@ export type KeymapAction =
   | 'last'
   // 文件操作
   | 'delete'
+  // 撤销（Ctrl+Z：撤销最近一次批量移动/复制）
+  | 'undoBatch'
   // 选择（Ctrl+A 全选 / Ctrl+D 取消选择）
   | 'selectAll'
   | 'deselectAll'
@@ -72,11 +86,12 @@ export const BINDINGS: readonly KeyBinding[] = [
   { key: '4', ctrl: false, action: 'rate4' },
   { key: '5', ctrl: false, action: 'rate5' },
   { key: '0', ctrl: false, action: 'rate0' },
-  // 色标：6红 7黄 8绿 9蓝
+  // 色标：6红 7黄 8绿 9蓝，Ctrl+6 紫（Ctrl 修饰区分 6=红，对齐 GPUI label 键区）
   { key: '6', ctrl: false, action: 'labelRed' },
   { key: '7', ctrl: false, action: 'labelYellow' },
   { key: '8', ctrl: false, action: 'labelGreen' },
   { key: '9', ctrl: false, action: 'labelBlue' },
+  { key: '6', ctrl: true, action: 'labelPurple' },
   // 旗标：P/X 标记，U 清除
   { key: 'p', ctrl: false, action: 'flagPick' },
   { key: 'x', ctrl: false, action: 'flagReject' },
@@ -88,8 +103,21 @@ export const BINDINGS: readonly KeyBinding[] = [
   { key: 'b', ctrl: true, shift: true, action: 'recognizeAll' },
   // 预览：V 检测框开关
   { key: 'v', ctrl: false, action: 'toggleBbox' },
+  // 剪切警告叠加：O 开关（红 = 高光溢出、蓝 = 死黑；仅预览态生效）
+  { key: 'o', ctrl: false, action: 'toggleClipping' },
   // 视图：G 网格/预览切换
   { key: 'g', ctrl: false, action: 'toggleGridPreview' },
+  // 对比：C 进入对比模式（多选 2–4 张，或当前项属连拍组取组内前 4 张；
+  // 前端新增键，GPUI 版 layout.rs 无对应分支）
+  { key: 'c', ctrl: false, action: 'compare' },
+  // 统计视图：t 进入/退出（T1 批次 SpeciesIndex 分配键）
+  { key: 't', ctrl: false, action: 'stats' },
+  // 缩放：= 放大 / - 缩小（预览/对比态，视图/聚焦格中心锚点；网格/幻灯片态 no-op）
+  { key: '=', ctrl: false, action: 'zoomIn' },
+  { key: '-', ctrl: false, action: 'zoomOut' },
+  // 幻灯片：s 进入（从当前选中张开始，按筛选结果顺序）/ 空格 暂停/继续
+  { key: 's', ctrl: false, action: 'slideshow' },
+  { key: ' ', ctrl: false, action: 'slideshowTogglePlay' },
   // 导航：左右方向键 / Home / End
   { key: 'left', ctrl: false, action: 'prev' },
   { key: 'right', ctrl: false, action: 'next' },
@@ -97,6 +125,8 @@ export const BINDINGS: readonly KeyBinding[] = [
   { key: 'end', ctrl: false, action: 'last' },
   // 删除：Delete（GPUI 不区分修饰键，(key, _) 通配）
   { key: 'delete', action: 'delete' },
+  // 撤销批量操作：Ctrl+Z（shift: false 精确匹配，Ctrl+Shift+Z 不触发；对齐 b 键三态模式）
+  { key: 'z', ctrl: true, shift: false, action: 'undoBatch' },
   // 选择：Ctrl+A 全选 / Ctrl+D 取消选择
   { key: 'a', ctrl: true, action: 'selectAll' },
   { key: 'd', ctrl: true, action: 'deselectAll' },

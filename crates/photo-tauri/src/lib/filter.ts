@@ -62,6 +62,16 @@ function parseDateTaken(dateStr: string): string | null {
 }
 
 /**
+ * 焦距字符串 → 毫米数值（如 "600mm" → 600、"840mm" → 840）。
+ * 变焦镜头取首个数值（广角端，如 "70-200mm" → 70）——对"焦距≥X"的鸟类拍摄
+ * 场景判界保守且可预期。解析失败返回 null（设了焦距区间时按"不匹配"排除）。
+ */
+export function parseFocalLengthMm(s: string): number | null {
+  const m = /(\d+(?:\.\d+)?)/.exec(s)
+  return m ? parseFloat(m[1]) : null
+}
+
+/**
  * 过滤：返回通过全部条件的下标数组（升序）。边界与 filter.rs 逐一对应：
  * - dateTaken 为 null 且设了日期范围 → 排除；dateTaken 存在但解析失败 → 保留
  *   （Rust 的 `if let Ok` 无 else 分支，解析失败直接落到下一条件）；
@@ -103,6 +113,28 @@ export function filterCaptures(items: CaptureMeta[], criteria: FilterCriteria): 
     if (criteria.colorLabel !== null && meta.colorLabel !== criteria.colorLabel) continue
     // flag_filter：旗标精确匹配（Pick/Reject）
     if (criteria.flagFilter !== null && meta.flag !== criteria.flagFilter) continue
+    // iso 区间（闭区间 [isoMin, isoMax]；无 ISO 数据且设了区间 → 排除）
+    if (criteria.isoMin !== null || criteria.isoMax !== null) {
+      if (meta.iso === null) continue
+      if (criteria.isoMin !== null && meta.iso < criteria.isoMin) continue
+      if (criteria.isoMax !== null && meta.iso > criteria.isoMax) continue
+    }
+    // 焦距区间（闭区间 [focalMin, focalMax]，mm 数值；无焦距或解析失败 → 排除）
+    if (criteria.focalMin !== null || criteria.focalMax !== null) {
+      if (meta.focalLength === null) continue
+      const mm = parseFocalLengthMm(meta.focalLength)
+      if (mm === null) continue // 解析失败 = 不匹配（有筛选时排除）
+      if (criteria.focalMin !== null && mm < criteria.focalMin) continue
+      if (criteria.focalMax !== null && mm > criteria.focalMax) continue
+    }
+    // 镜头多选（精确匹配 EXIF lens 串；空 = 不限）
+    if (criteria.lensFilter.length > 0) {
+      if (meta.lens === null || !criteria.lensFilter.includes(meta.lens)) continue
+    }
+    // 关键词筛选：包含任一选中关键词即中（空 = 不限）
+    if (criteria.keywordFilter.length > 0) {
+      if (!meta.keywords.some((k) => criteria.keywordFilter.includes(k))) continue
+    }
     // recognition_filter
     switch (criteria.recognitionFilter) {
       case 'Confirmed':
@@ -134,7 +166,8 @@ function cmpStr(a: string, b: string): number {
  * 两拍摄的排序比较（对齐 filter.rs 的 sort_by 比较器）。
  * Modified 以 dateTaken 为 mtime 代理：浏览器端无 fs::metadata，拍摄时间为空
  * = None 排最前（模拟 Rust Option<SystemTime> 的 None < Some 语义）。
- * Rust SortBy 无鸟种排序（仅 FileName/DateTaken/FileSize/Rating/Modified），照搬。
+ * EyeSharpness 为 T0 新增（Rust 侧无比较器，纯前端实现）：None 语义对齐 Modified
+ * （None 排最前），有值按数值升序；降序由 applyFilterAndSort 外层反转统一处理。
  */
 export function compareCaptures(sortBy: SortBy, a: CaptureMeta, b: CaptureMeta): number {
   switch (sortBy) {
@@ -146,6 +179,14 @@ export function compareCaptures(sortBy: SortBy, a: CaptureMeta, b: CaptureMeta):
       return (a.fileSize ?? 0) - (b.fileSize ?? 0) // 对齐 unwrap_or(0)
     case 'Rating':
       return ratingValue(a.rating) - ratingValue(b.rating)
+    case 'EyeSharpness': {
+      const sa = a.eyeSharpness
+      const sb = b.eyeSharpness
+      if (sa === null && sb === null) return 0
+      if (sa === null) return -1 // None 排最前（对齐 Modified 分支的 Option 语义）
+      if (sb === null) return 1
+      return sa - sb // 数值升序；降序由外层 sortDirection 处理
+    }
     case 'Modified': {
       const ta = a.dateTaken
       const tb = b.dateTaken
@@ -186,6 +227,12 @@ export function defaultFilterCriteria(): FilterCriteria {
     flagFilter: null,
     unflaggedFilter: false,
     recognitionFilter: 'All',
+    isoMin: null,
+    isoMax: null,
+    focalMin: null,
+    focalMax: null,
+    lensFilter: [],
+    keywordFilter: [],
   }
 }
 
@@ -204,6 +251,12 @@ export function hasActiveFilters(criteria: FilterCriteria): boolean {
     criteria.colorLabel !== null ||
     criteria.flagFilter !== null ||
     criteria.unflaggedFilter ||
-    criteria.recognitionFilter !== 'All'
+    criteria.recognitionFilter !== 'All' ||
+    criteria.isoMin !== null ||
+    criteria.isoMax !== null ||
+    criteria.focalMin !== null ||
+    criteria.focalMax !== null ||
+    criteria.lensFilter.length > 0 ||
+    criteria.keywordFilter.length > 0
   )
 }

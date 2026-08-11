@@ -9,6 +9,7 @@ import { useCapturesStore } from './captures'
 import { useSelectionStore } from './selection'
 import { usePreviewStore } from './preview'
 import { useRecognitionStore } from './recognition'
+import { useExportStore } from './export'
 
 /** 菜单项（GPUI menu 变体映射） */
 export type ContextMenuItem =
@@ -148,6 +149,12 @@ export function captureMenuItems(opts: {
     { kind: 'submenu', label: '评分', items: ratingSubmenu(meta, paths) },
     { kind: 'submenu', label: '颜色标签', items: colorLabelSubmenu(meta, paths) },
     { kind: 'submenu', label: '标记', items: flagSubmenu(meta, paths) },
+    { kind: 'sep' },
+    {
+      kind: 'item',
+      label: selectedCount > 1 ? `导出所选照片 (${selectedCount}张)…` : '导出此照片…',
+      action: () => void useExportStore().openDialog(paths),
+    },
   )
   if (inPreview && zoom) {
     items.push(

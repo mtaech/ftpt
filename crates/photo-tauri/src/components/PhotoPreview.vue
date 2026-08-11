@@ -9,7 +9,8 @@ import { useCapturesStore } from '@/stores/captures'
 import { useSelectionStore } from '@/stores/selection'
 import { usePreviewStore } from '@/stores/preview'
 import { useContextMenuStore, captureMenuItems } from '@/stores/contextMenu'
-import { ptimgUrl } from '@/lib/ipc'
+import { getClippingMask, ptimgUrl } from '@/lib/ipc'
+import { registerZoomHost } from '@/lib/zoomHost'
 import { displayName } from '@/lib/format'
 import type { BBox } from '@/lib/bindings'
 import type { Vec2 } from '@/lib/previewMath'
@@ -123,6 +124,39 @@ function onImgLoad(e: Event) {
   loading.value = false
 }
 
+// ── 剪切警告叠加（'o' 键；红 = 高光溢出、蓝 = 死黑）──────────────────
+/** 叠加图 Blob URL（PNG，与主图同宽高比；null = 无叠加/未加载） */
+const clipUrl = ref<string | null>(null)
+/** 加载序号：切图/关叠加后旧请求结果直接丢弃（防异步串图） */
+let clipLoadSeq = 0
+
+/**
+ * 开启叠加或切图时异步拉取剪切叠加 PNG——不阻塞主图加载，
+ * 失败（解码异常等）保持无叠加；后端按 (路径, 文件大小) 内存缓存复用。
+ */
+watch(
+  [() => current.value?.primaryPath, () => preview.clipOverlayVisible],
+  ([path, on]) => {
+    const seq = ++clipLoadSeq
+    if (clipUrl.value) {
+      URL.revokeObjectURL(clipUrl.value)
+      clipUrl.value = null
+    }
+    if (!on || !path) return
+    void getClippingMask(path)
+      .then((bytes) => {
+        if (seq !== clipLoadSeq || !preview.clipOverlayVisible || current.value?.primaryPath !== path) return
+        if (!bytes.length) return
+        clipUrl.value = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: 'image/png' }))
+      })
+      .catch(() => {
+        // 拉取失败不阻塞预览：保持无叠加
+        if (seq !== clipLoadSeq) return
+        clipUrl.value = null
+      })
+  },
+)
+
 // 切图：复位缩放平移 + 重新加载（待确认框属于当前图，一并清空）
 watch(
   () => current.value?.primaryPath,
@@ -155,11 +189,18 @@ onMounted(() => {
   resizeObserver.observe(el)
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('keyup', onKeyUp)
+  // 缩放键（=/−）宿主：以视图中心为锚点（对齐工具条 ± 按钮，App.vue 键位层分发）
+  registerZoomHost({ zoomIn: () => zoomStep(1), zoomOut: () => zoomStep(-1) })
 })
 onUnmounted(() => {
   resizeObserver?.disconnect()
   window.removeEventListener('keydown', onKeyDown)
   window.removeEventListener('keyup', onKeyUp)
+  registerZoomHost(null)
+  if (clipUrl.value) {
+    URL.revokeObjectURL(clipUrl.value)
+    clipUrl.value = null
+  }
 })
 
 /** Shift 光标提示 + Esc 清除待确认框（App.vue 键位层的 Esc 逻辑幂等兼容） */
@@ -322,6 +363,21 @@ function onImageContextMenu(e: MouseEvent) {
           transform: `translate3d(${origin[0] + PAD}px, ${origin[1] + PAD}px, 0)`,
         }"
         @load="onImgLoad"
+      />
+
+      <!-- 剪切警告叠加（'o' 键开关；红 = 高光溢出、蓝 = 死黑，其余透明；
+           与主图同 disp/origin 定位，缩放平移跟随；pointer-events-none 不挡拖拽） -->
+      <img
+        v-if="clipUrl"
+        :src="clipUrl"
+        alt=""
+        draggable="false"
+        class="pointer-events-none absolute top-0 left-0 max-w-none opacity-70"
+        :style="{
+          width: `${disp[0]}px`,
+          height: `${disp[1]}px`,
+          transform: `translate3d(${origin[0] + PAD}px, ${origin[1] + PAD}px, 0)`,
+        }"
       />
 
       <!-- 检测框叠加（birdBbox 归一化 × 显示尺寸，随缩放平移跟随） -->

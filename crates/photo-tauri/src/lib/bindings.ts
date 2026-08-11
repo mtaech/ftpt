@@ -25,6 +25,12 @@ export const commands = {
 	setFlag: (paths: string[], flag: "Pick" | "Reject" | null) => typedError<null, string>(__TAURI_INVOKE("set_flag", { paths, flag })),
 	/**  设置颜色标签（None = 清除） */
 	setColorLabel: (paths: string[], label: "None" | "Red" | "Yellow" | "Green" | "Blue" | "Purple" | null) => typedError<null, string>(__TAURI_INVOKE("set_color_label", { paths, label })),
+	/**
+	 *  设置关键词标签（全量替换语义）：写 folder_db keywords 真相表 + 更新内存副本。
+	 *  关键词归一化（去首尾空白/去空串/去重）与 set_rating 同语义：失败返回 Err，
+	 *  前端重拉回滚（乐观更新回滚语义由前端承担）。空数组 = 清空全部关键词。
+	 */
+	setKeywords: (paths: string[], keywords: string[]) => typedError<null, string>(__TAURI_INVOKE("set_keywords", { paths, keywords })),
 	/**  列出收藏目录（AppConfig.favorite_dirs） */
 	listFavorites: () => __TAURI_INVOKE<string[]>("list_favorites"),
 	/**  添加收藏目录（已存在则忽略；保存配置） */
@@ -34,11 +40,29 @@ export const commands = {
 	/**  列出最近打开的目录（最新在前，最多 10 个；scan_impl 扫描时维护） */
 	listRecent: () => __TAURI_INVOKE<string[]>("list_recent"),
 	/**
+	 *  列出 path 的一层子目录（侧栏目录树数据源；逐层展开逐层调本命令）。
+	 *  photo_count 只统计每个子目录**直接**包含的照片数（单层语义，与扫描一致），
+	 *  不做递归——目录树按需懒加载，避免一次遍历全树。
+	 *  跳过 `.pt` 元数据目录（缩略图/中心库，非照片目录）。
+	 */
+	listSubdirs: (path: string) => typedError<SubdirInfo[], string>(__TAURI_INVOKE("list_subdirs", { path })),
+	/**
 	 *  名录库全量鸟种（拼音排序，筛选下拉数据源）。
 	 *  名录库在 exe 同级 data/pica_ref.db（与 Recognizer 同路径约定）；
 	 *  photo-recognize 的 list_all_species 已按 cn_name_pinyin 排序（缺失回退中文名）。
 	 */
 	listBirdSpecies: () => typedError<string[], string>(__TAURI_INVOKE("list_bird_species")),
+	/**
+	 *  计算直方图（预览尺寸解码，JPEG DCT 降采样 / RAW half_size 预览，不解 24MP 全尺寸）。
+	 *  内存缓存按 (路径, 文件大小)（InfoPanel 切图回来复用；文件覆盖自动失效）；
+	 *  失败返回文案（如 RAW 解码异常）。
+	 */
+	getHistogram: (path: string) => typedError<HistogramPayload, string>(__TAURI_INVOKE("get_histogram", { path })),
+	/**
+	 *  剪切叠加图（RGBA PNG 字节：红 = 高光溢出、蓝 = 死黑，其余透明；长边 ~800）。
+	 *  加载不阻塞主图：前端异步拉取后以主图同尺寸叠放；内存缓存按 (路径, 文件大小)。
+	 */
+	getClippingMask: (path: string) => typedError<number[], string>(__TAURI_INVOKE("get_clipping_mask", { path })),
 	/**
 	 *  批量识别：spawn_blocking 后台逐张识别（多线程分块，每线程独占 Recognizer——
 	 *  Session 需 &mut，不可跨线程共享，照 GPUI spawn_batch_recognize）。
@@ -66,6 +90,15 @@ export const commands = {
 	 *     （前端会重调 scan_directory，本命令不触发）
 	 */
 	batchOpExecute: (op: BatchOpType, options: BatchOpOptions) => typedError<BatchOpResult, string>(__TAURI_INVOKE("batch_op_execute", { op, options })),
+	/**
+	 *  撤销最近一次批量操作（移动/复制/模板重命名；删除走回收站不在范围）：
+	 *  1. 取走内存日志（单槽：撤销后即空，再次 Ctrl+Z 报「没有可撤销的批量操作」）
+	 *  2. 逐条执行逆操作（move 回移 / rename 改回 / copy 删副本），跳过/失败不中止后续
+	 *  3. 成功撤销的 Move/Rename 逆向同步 xmp_meta/识别/调整行（复用 sync_move_xmp /
+	 *     sync_rename_xmp 反向调用；正向批次未做 sidecar 同步时为空操作，幂等无害）
+	 *  4. scan_impl 全量重扫（更新内存 captures + emit scan:done 驱动前端 reload）
+	 */
+	undoBatchOperation: () => typedError<UndoBatchResult, string>(__TAURI_INVOKE("undo_batch_operation")),
 	/**  读取单张调整参数（ADR 0007；无记录返回全零 = 无调整） */
 	getAdjustments: (path: string) => __TAURI_INVOKE<AdjustParams>("get_adjustments", { path }),
 	/**
@@ -140,6 +173,73 @@ export const commands = {
 	 *  越界值钳到合理区间，与 GPUI 设置语义一致，非法输入不报错）。
 	 */
 	setAppConfig: (config: AppConfig) => typedError<null, string>(__TAURI_INVOKE("set_app_config", { config })),
+	/**
+	 *  全局鸟种统计（统计视图汇总条 + 左栏列表）：全库聚合、张数降序。
+	 *  数据源 = 启动时打开的 exe 同级 data/global.db；打开失败（降级 None）返回空概览。
+	 */
+	getSpeciesStats: () => typedError<SpeciesOverview, string>(__TAURI_INVOKE("get_species_stats")),
+	/**
+	 *  某鸟种全部照片定位（统计视图右栏网格）：folder + rel_path，前端拼绝对路径后
+	 *  经 ptimgUrl('thumb', 绝对路径) 渲染缩略图。
+	 */
+	getSpeciesPhotos: (birdName: string) => typedError<SpeciesPhoto[], string>(__TAURI_INVOKE("get_species_photos", { birdName })),
+	/**
+	 *  全局识别命中率（统计视图「识别命中率」区块）：按鸟种聚合 predicted /
+	 *  corrected_away / accuracy（accuracy = 1 - corrected_away/predicted）。
+	 *  数据源 = 启动时打开的 exe 同级 data/global.db；打开失败（降级 None）返回空。
+	 */
+	getCorrectionStats: () => typedError<CorrectionStat[], string>(__TAURI_INVOKE("get_correction_stats")),
+	/**
+	 *  高频鸟种（修正鸟种下拉「常用」分组）：species_index 按张数降序、去 NULL/空名。
+	 *  本机使用频次即区域相关性代理（离线替代区域名录）。
+	 */
+	getFrequentSpecies: (limit: number) => typedError<string[], string>(__TAURI_INVOKE("get_frequent_species", { limit })),
+	/**
+	 *  检测可移动驱动器（Windows 原生 API：GetLogicalDrives + GetDriveTypeW +
+	 *  GetVolumeInformationW；非 Windows 返回空）。SD 卡/U 盘即 DRIVE_REMOVABLE。
+	 */
+	listImportDrives: () => __TAURI_INVOKE<ImportDrive[]>("list_import_drives"),
+	/**
+	 *  递归扫描导入源（整棵子树，不限 DCIM）：EXIF 拍摄日期优先，回退 mtime。
+	 *  返回候选列表（前端据此展示「N 张」并送入 plan_import 干跑）。
+	 */
+	scanImportSource: (path: string) => typedError<ImportCandidate[], string>(__TAURI_INVOKE("scan_import_source", { path })),
+	/**
+	 *  生成导入计划（干跑）：按日期分组建 destRoot/YYYY-MM-DD/ + 目标去重
+	 *  （目标已存在同名同大小 = 已完成导入跳过；同名不同大小 = 防覆盖跳过）。
+	 *  不碰任何文件；跳过清单供前端预览前 20 条。
+	 */
+	planImport: (candidates: ImportCandidate[], destRoot: string) => typedError<ImportPlan, string>(__TAURI_INVOKE("plan_import", { candidates, destRoot })),
+	/**
+	 *  执行导入：spawn_blocking 内逐文件委托 engine 复制/移动，逐文件 emit
+	 *  import:progress，完成 emit import:done。返回 ImportResult（= done 负载）。
+	 *  完成后若目标根目录处于当前打开目录之内 → 触发重扫（scan_impl），
+	 *  新导入的照片立即出现在网格；否则不动当前目录。
+	 */
+	executeImport: (plan: ImportPlan, destRoot: string, mode: ImportMode) => typedError<ImportResult, string>(__TAURI_INVOKE("execute_import", { plan, destRoot, mode })),
+	/**
+	 *  批量重命名（模板模式，T1 批次）：对 `paths`（前端按筛选结果主路径传入，
+	 *  顺序即序号顺序）应用命名模板。占位符数据从内存 CaptureMeta 取——鸟种
+	 *  `bird_name`、拍摄日期 `date_taken`、相机型号 `camera_model`，序号从
+	 *  `start_seq` 递增（补零 3 位，template.rs 渲染）。
+	 * 
+	 *  重扫源目录取完整 Capture（ops 层需要 source_files 全列表同步改名兄弟文件）；
+	 *  成功后同步 folder_db 三表键（recognition/adjustments 相对路径、xmp_meta 完整
+	 *  路径）。逐张 emit `batch:progress`，完成 emit `batch:done`（复用批量操作进度
+	 *  通道，与 batch_op_execute 语义一致）。返回 `BatchOpResult` 形态汇总。
+	 */
+	batchRename: (paths: string[], template: string, startSeq: number) => typedError<BatchOpResult, string>(__TAURI_INVOKE("batch_rename", { paths, template, startSeq })),
+	/**
+	 *  批量导出（预设模式，T1 批次）：对 `paths`（顺序即序号顺序）逐张按命名模板渲染
+	 *  输出基名，`convert::export_with_preset` 渲染（长边限制 + JPEG 质量 + 色调调整）。
+	 *  占位符数据从内存 CaptureMeta 取（鸟种/日期/相机），序号从 `start_seq` 递增；
+	 *  调整参数从 folder_db 读取（与 export_adjusted 同源）。同名输出已存在时自动追加
+	 *  `_1/_2` 序号（照 export_adjusted 防覆盖语义，不覆盖原文件）。
+	 * 
+	 *  逐张 emit `export:progress`，完成 emit `export:done`（独立通道，避免与批量操作
+	 *  进度互踩）。返回 `BatchOpResult` 形态汇总。
+	 */
+	exportCaptures: (paths: string[], outputDir: string, longEdge: number | null, quality: number, template: string, startSeq: number) => typedError<BatchOpResult, string>(__TAURI_INVOKE("export_captures", { paths, outputDir, longEdge, quality, template, startSeq })),
 };
 
 /* Types */
@@ -169,6 +269,13 @@ export type AppConfig = {
 	fontFamily?: string,
 	/**  批量识别线程数（1-4）。低配设备减小，高配设备加大。默认 4（8 核以上 CPU）。 */
 	recognitionThreadCount?: number,
+	/**  导出预设列表（T1 批次：命名模板/长边/质量组合）。旧配置无此字段时为空。 */
+	exportPresets?: ExportPreset[],
+	/**
+	 *  扫描是否包含子目录（递归扫描全部子层）。默认 false = 单层扫描（保持现状）。
+	 *  布尔字段无需钳制；改动后需重新扫描生效（scan 编排处按此值选单层/递归）。
+	 */
+	includeSubdirectories?: boolean,
 };
 
 /**  检测框：归一化坐标 [x1, y1, x2, y2]（0–1，相对图像宽高） */
@@ -285,23 +392,160 @@ export type CaptureMeta = {
 	focalLength: string | null,
 	imageWidth: number | null,
 	imageHeight: number | null,
+	/**  GPS 纬度（十进制度；南纬为负；EXIF 无 GPS 为 None） */
+	gpsLat: number | null,
+	/**  GPS 经度（十进制度；西经为负；EXIF 无 GPS 为 None） */
+	gpsLon: number | null,
 	rating: Rating,
 	colorLabel: ColorLabel,
 	flag: Flag | null,
+	keywords: string[],
 	birdName: string | null,
 	birdConfidence: number | null,
 	recognitionStatus: RecognitionStatus | null,
 	birdBbox: BBox | null,
+	/**  鸟眼锐度分（与 Recognition::eye_sharpness 同源；无识别记录/无眼/评分失败为 None） */
+	eyeSharpness: number | null,
 };
 
 /**  颜色标签 */
 export type ColorLabel = "None" | "Red" | "Yellow" | "Green" | "Blue" | "Purple";
 
+/**
+ *  单鸟种识别命中率（get_correction_stats 返回项；与 engine global_db::CorrectionStat
+ *  同构，核心层不含 serde，边界层在此补 serde + specta）。按 species_index 当前鸟种
+ *  聚合：predicted = 被预测张数，corrected_away = 其中被人工改成别种的张数，
+ *  accuracy = 1 - corrected_away/predicted。specta 对浮点导出 number|null（防御性
+ *  NaN/Infinity 序列化），前端按 null 兜底。
+ */
+export type CorrectionStat = {
+	birdName: string,
+	predictedCount: number,
+	correctedAwayCount: number,
+	accuracy: number | null,
+};
+
+/**  `export:done` 事件负载：批量导出汇总（T1 批次） */
+export type ExportDone = {
+	success: number,
+	failed: number,
+};
+
+/**  导出预设（T1 批次）：导出对话框的可复用组合（预设名 + 长边 + JPEG 质量 + 命名模板）。 */
+export type ExportPreset = {
+	/**  预设名（对话框下拉显示） */
+	name?: string,
+	/**  长边像素上限（None = 原尺寸；0 在钳制时归一为 None） */
+	longEdge?: number | null,
+	/**  JPEG 质量 1-100（保存/使用时钳制） */
+	quality?: number,
+	/**  命名模板（占位符语法见 engine template.rs：{name}/{species}/{date}/{seq}/{camera}） */
+	template?: string,
+};
+
+/**
+ *  `export:progress` 事件负载：批量导出逐张进度（T1 批次，与 batch:progress 同形态，
+ *  独立通道避免与批量操作进度互相覆盖）
+ */
+export type ExportProgress = {
+	done: number,
+	total: number,
+	currentPath: string,
+};
+
 /**  Pick/Reject 旗标 */
 export type Flag = "Pick" | "Reject";
 
+/**
+ *  `get_histogram` 返回：256 级 luma（BT.601 加权）+ RGB 三通道计数 + 剪切统计。
+ *  各通道 Vec 恒为 256 个元素；totalPixels = 任一通道 bin 之和。
+ */
+export type HistogramPayload = {
+	luma: number[],
+	r: number[],
+	g: number[],
+	b: number[],
+	/**  高光溢出像素数（luma >= 250） */
+	clipHighCount: number,
+	/**  死黑像素数（luma <= 5） */
+	clipLowCount: number,
+	/**  参与统计的总像素数 */
+	totalPixels: number,
+};
+
 /**  图片格式枚举 */
 export type ImageFormat = "Jpeg" | "Png" | "Tiff" | "Heif" | "WebP" | "Bmp" | "Gif" | { Raw: string } | "Other";
+
+/**  导入候选（`scan_import_source` 返回 / `plan_import` 输入） */
+export type ImportCandidate = {
+	/**  源文件完整路径 */
+	path: string,
+	/**  拍摄日期 YYYY-MM-DD（EXIF 优先，回退 mtime） */
+	date: string,
+	/**  文件大小（字节，去重用） */
+	size: number,
+};
+
+/**  `import:done` 事件负载：导入汇总 */
+export type ImportDone = {
+	imported: number,
+	skipped: number,
+	failed: number,
+};
+
+/**  可移动驱动器（`list_import_drives` 返回） */
+export type ImportDrive = {
+	/**  根路径（Windows 如 "E:\\"，Linux 为挂载点如 "/run/media/user/CANON"） */
+	path: string,
+	/**  卷标（读取失败/空卷标为 None） */
+	label: string | null,
+};
+
+/**  导入计划组（目标目录 = destRoot/dateDir/） */
+export type ImportGroup = {
+	/**  日期目录名（YYYY-MM-DD，相对 destRoot） */
+	dateDir: string,
+	/**  组内源文件完整路径 */
+	files: string[],
+};
+
+/**  导入执行模式 */
+export type ImportMode = 
+/**  复制（源保留） */
+"Copy" | 
+/**  移动（源删除；跨文件系统走 copy + delete 回退） */
+"Move";
+
+/**  导入计划（`plan_import` 返回 / `execute_import` 输入；干跑不碰文件） */
+export type ImportPlan = {
+	/**  按日期分组（YYYY-MM-DD） */
+	groups: ImportGroup[],
+	/**  跳过清单 */
+	skipped: ImportSkipped[],
+};
+
+/**  `import:progress` 事件负载：逐文件进度 */
+export type ImportProgress = {
+	done: number,
+	total: number,
+	/**  当前处理的源文件路径 */
+	current: string,
+};
+
+/**  `execute_import` 返回（与 import:done 同内容，供 invoke 调用方直接使用） */
+export type ImportResult = {
+	imported: number,
+	skipped: number,
+	failed: number,
+};
+
+/**  计划阶段被跳过的文件 */
+export type ImportSkipped = {
+	/**  源文件完整路径 */
+	path: string,
+	/**  跳过原因（目标已存在且大小相同 / 同名冲突等） */
+	reason: string,
+};
 
 /**  评分 */
 export type Rating = "None" | "One" | "Two" | "Three" | "Four" | "Five";
@@ -372,11 +616,55 @@ export type ScanProgress = {
 /**  扫描进度阶段：scan = 目录扫描 + DB 三表同步；exif = EXIF 增量提取；thumb = 缩略图预生成 */
 export type ScanStage = "scan" | "exif" | "thumb";
 
+/**  统计概览（get_species_stats 返回）：鸟种列表（张数降序）+ 覆盖文件夹数（汇总条用） */
+export type SpeciesOverview = {
+	stats: SpeciesStat[],
+	folderCount: number,
+};
+
+/**  单张照片定位（get_species_photos 返回项；前端拼绝对路径 = folder + '/' + rel_path） */
+export type SpeciesPhoto = {
+	folder: string,
+	relPath: string,
+};
+
+/**
+ *  单鸟种聚合统计（get_species_stats 返回项；与 engine global_db::SpeciesStat 同构，
+ *  核心层不含 serde，边界层在此补 serde + specta）
+ */
+export type SpeciesStat = {
+	birdName: string,
+	photoCount: number,
+	firstDate: string | null,
+	lastDate: string | null,
+	avgSharpness: number | null,
+};
+
+/**
+ *  侧栏目录树节点：name = 目录名，path = 完整路径，photoCount = 该目录**一层**
+ *  直接包含的照片数（与 scanner 单层扫描同判据：viewable 扩展名，不含更深层）。
+ *  更深层的子目录由前端在展开该节点时再调 list_subdirs 懒加载。
+ */
+export type SubdirInfo = {
+	name: string,
+	path: string,
+	photoCount: number,
+};
+
 export type Theme = "Light" | "Dark";
 
 /**  `thumb:ready` 事件负载：某张缩略图缓存已就绪（前端据此刷新对应 cell） */
 export type ThumbReady = {
 	path: string,
+};
+
+/**
+ *  `undo_batch_operation` 返回：reverted = 成功撤销的文件数；
+ *  skipped = (路径, 原因) 列表，原因区分「条件不满足跳过」与「执行失败」。
+ */
+export type UndoBatchResult = {
+	reverted: number,
+	skipped: ([string, string])[],
 };
 
 /* Tauri Specta runtime */
@@ -389,6 +677,7 @@ async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; dat
     }
 }
 
+
 // ============================================================================
 // 手写补充类型（specta 生成物不含）：FilterCriteria/SortBy/SortDirection/
 // RecognitionFilter 仅被前端筛选逻辑使用，Rust 侧无 command 引用它们，specta
@@ -396,8 +685,8 @@ async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; dat
 // 注意：重新运行 export-bindings 会覆盖此段，需手动保留。
 // ============================================================================
 
-/** 排序方式（domain.rs SortBy） */
-export type SortBy = 'FileName' | 'DateTaken' | 'FileSize' | 'Rating' | 'Modified'
+/** 排序方式（domain.rs SortBy；EyeSharpness = 鸟眼锐度，T0 批次新增） */
+export type SortBy = 'FileName' | 'DateTaken' | 'FileSize' | 'Rating' | 'Modified' | 'EyeSharpness'
 
 /** 排序方向（domain.rs SortDirection） */
 export type SortDirection = 'Ascending' | 'Descending'
@@ -405,7 +694,8 @@ export type SortDirection = 'Ascending' | 'Descending'
 /** 识别状态筛选（domain.rs RecognitionFilter；NotRecognized = 从未识别） */
 export type RecognitionFilter = 'All' | 'Confirmed' | 'NeedsReview' | 'Unrecognized' | 'NotRecognized'
 
-/** 筛选条件（domain.rs FilterCriteria，camelCase；sort 单独成字段见 filter store） */
+/** 筛选条件（domain.rs FilterCriteria，camelCase；sort 单独成字段见 filter store；
+ *  iso/focal 区间为闭区间数值（mm/ISO），lens/keyword 空数组 = 不限） */
 export type FilterCriteria = {
   formatFilter: ImageFormat | null
   birdNames: string[]
@@ -416,6 +706,10 @@ export type FilterCriteria = {
   flagFilter: Flag | null
   unflaggedFilter: boolean
   recognitionFilter: RecognitionFilter
+  isoMin: number | null
+  isoMax: number | null
+  focalMin: number | null
+  focalMax: number | null
+  lensFilter: string[]
+  keywordFilter: string[]
 }
-
-

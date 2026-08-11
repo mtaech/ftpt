@@ -3,9 +3,10 @@
 //! - **exif_cache**：缓存表，EXIF 元数据的 LRU 风格缓存。
 //!   缓存表**可被清除**（清空释放空间）——丢失后只会触发重新提取。
 //!
-//! - **xmp_meta** / **recognition**：真相表，存储 XMP 元数据与鸟类识别结果。
-//!   **任何清理缓存的操作都不得触碰 xmp_meta 与 recognition 表**——
-//!   识别结果不可重新计算（需要 YOLO + 模型推理），XMP 元数据为用户手动编辑。
+//! - **xmp_meta** / **recognition** / **keywords**：真相表，存储 XMP 元数据、鸟类识别结果
+//!   与用户关键词标签。
+//!   **任何清理缓存的操作都不得触碰 xmp_meta、recognition 与 keywords 表**——
+//!   识别结果不可重新计算（需要 YOLO + 模型推理），XMP 元数据与关键词为用户手动编辑。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -86,6 +87,14 @@ fn folder_migrations() -> Migrations<'static> {
                 contrast    INTEGER NOT NULL DEFAULT 0,
                 saturation  INTEGER NOT NULL DEFAULT 0,
                 crop        TEXT
+            );",
+        ),
+        // keywords 真相表：用户手动编辑的关键词标签，键为完整路径（与 xmp_meta 同键约定）
+        M::up(
+            "CREATE TABLE IF NOT EXISTS keywords (
+                path    TEXT NOT NULL,
+                keyword TEXT NOT NULL,
+                PRIMARY KEY (path, keyword)
             );",
         ),
     ])
@@ -585,6 +594,87 @@ impl FolderDb {
         }
         Ok(())
     }
+
+    // ── keywords 真相表（用户关键词标签，键为完整路径，不可当缓存清除）──
+
+    /// 全量替换某路径的关键词集合：先删后插（原子语义由 conn 互斥保证，
+    /// 无其他线程可穿插）。关键词归一化：去首尾空白、去空串、去重（保序）。
+    pub fn set_keywords(&self, path: &str, keywords: &[String]) -> Result<(), FolderDbError> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM keywords WHERE path = ?1", rusqlite::params![path])?;
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for kw in keywords {
+            let trimmed = kw.trim();
+            if trimmed.is_empty() || !seen.insert(trimmed) {
+                continue;
+            }
+            conn.execute(
+                "INSERT INTO keywords (path, keyword) VALUES (?1, ?2)",
+                rusqlite::params![path, trimmed],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// 全量读取 keywords 真相表（扫描闭包一次性载入内存，键为完整路径字符串，
+    /// 与 set_keywords 一致）。每个路径的关键词按插入序返回。
+    pub fn all_keywords(&self) -> Result<HashMap<String, Vec<String>>, FolderDbError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT path, keyword FROM keywords ORDER BY path, rowid",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for row in rows {
+            let (path, keyword) = row?;
+            map.entry(path).or_default().push(keyword);
+        }
+        Ok(map)
+    }
+
+    /// 批量删除关键词行（文件删除后同步，对齐 delete_xmp_rows）。
+    pub fn delete_keyword_rows(&self, paths: &[String]) -> Result<(), FolderDbError> {
+        let conn = self.conn.lock();
+        for p in paths {
+            conn.execute("DELETE FROM keywords WHERE path = ?1", rusqlite::params![p])?;
+        }
+        Ok(())
+    }
+
+    /// 重命名关键词行的键（文件移动/重命名后同步，对齐 rename_xmp）。
+    pub fn rename_keywords(&self, old_path: &str, new_path: &str) -> Result<(), FolderDbError> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE keywords SET path = ?1 WHERE path = ?2",
+            rusqlite::params![new_path, old_path],
+        )?;
+        Ok(())
+    }
+
+    /// 将一批 keywords 行复制到目标库（跨文件夹移动/复制用，对齐 copy_xmp_rows_to）。
+    /// entries: (源路径, 目标路径)。目标键已有关键词时整体替换（复制覆盖语义）。
+    pub fn copy_keywords_to(
+        &self,
+        target_db: &mut FolderDb,
+        entries: &[(String, String)],
+    ) -> Result<(), FolderDbError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT keyword FROM keywords WHERE path = ?1 ORDER BY rowid",
+        )?;
+        for (src, dst) in entries {
+            let keywords: Vec<String> = stmt
+                .query_map(rusqlite::params![src], |row| row.get::<_, String>(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            if !keywords.is_empty() {
+                target_db.set_keywords(dst, &keywords)?;
+            }
+        }
+        Ok(())
+    }
 }
 /// exif_cache 单行：指纹 + 解析后的 EXIF（供扫描批量载入后内存校验/查表）。
 pub struct ExifCacheRow {
@@ -597,7 +687,10 @@ pub struct ExifCacheRow {
 /// 文件条目信息（由 app 层扫描产生，传给 sync_with_scan 做三表同步）。
 pub struct FileEntry {
     pub full_path: PathBuf,
-    /// 相对目录的正斜杠路径（用于 recognition 表键）
+    /// 相对目录的正斜杠路径（用于 recognition 表键）。
+    /// 递归扫描时含子目录分隔符（`sub/deep/bird.jpg`）：recognition/adjustments
+    /// 表的 rel_path 主键存储即正斜杠相对路径，upsert/get/sync 均做 `\`→`/`
+    /// 归一化比较（见 upsert_recognition），子目录键天然兼容，无需按目录拆分表。
     pub rel_path: String,
     pub file_size: u64,
     pub mtime_ns: i64,
@@ -660,6 +753,18 @@ impl FolderDb {
             for p in &db_paths {
                 if !entry_paths.contains(p.as_str()) {
                     conn.execute("DELETE FROM xmp_meta WHERE path = ?1", rusqlite::params![p])?;
+                }
+            }
+        }
+        {
+            // keywords 与 xmp_meta 同键约定（完整路径）：文件已不存在的行一并清理，
+            // 防孤儿行；仍存在的文件其关键词行**保留**（真相表，随文件走）
+            let mut stmt = conn.prepare_cached("SELECT DISTINCT path FROM keywords")?;
+            let db_paths: Vec<String> = stmt.query_map([], |row| row.get(0))?
+                .filter_map(|r| r.ok()).collect();
+            for p in &db_paths {
+                if !entry_paths.contains(p.as_str()) {
+                    conn.execute("DELETE FROM keywords WHERE path = ?1", rusqlite::params![p])?;
                 }
             }
         }
@@ -1342,5 +1447,190 @@ mod tests {
         let stats = db.sync_with_scan(&entries, &|_, _| {}).unwrap();
         assert_eq!(stats.adjustments_deleted, 1);
         assert!(db.get_adjustments("gone.jpg").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_keywords_table_exists_and_set() {
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        db.set_keywords("a.jpg", &["鸟".into(), "天空".into()]).unwrap();
+        let all = db.all_keywords().unwrap();
+        let kws = all.get("a.jpg").expect("应有 a.jpg 的关键词");
+        assert_eq!(kws, &["鸟".to_string(), "天空".to_string()]);
+    }
+
+    #[test]
+    fn test_keywords_set_normalizes_and_overwrites() {
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        // 去空白/去空串/去重（保序），且全量替换语义：第二次 set 覆盖第一次
+        db.set_keywords("a.jpg", &[" 鸟 ".into(), "".into(), "鸟".into(), "天空".into()])
+            .unwrap();
+        let kws = db.all_keywords().unwrap().get("a.jpg").cloned().unwrap_or_default();
+        assert_eq!(kws, vec!["鸟".to_string(), "天空".to_string()]);
+        db.set_keywords("a.jpg", &["新标签".into()]).unwrap();
+        let kws = db.all_keywords().unwrap().get("a.jpg").cloned().unwrap_or_default();
+        assert_eq!(kws, vec!["新标签".to_string()]);
+    }
+
+    #[test]
+    fn test_keywords_all_keywords_multi_path() {
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        db.set_keywords("a.jpg", &["鸟".into()]).unwrap();
+        db.set_keywords("b.jpg", &["鸟".into(), "天空".into()]).unwrap();
+        let all = db.all_keywords().unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all.get("a.jpg").unwrap(), &["鸟".to_string()]);
+        assert_eq!(all.get("b.jpg").unwrap(), &["鸟".to_string(), "天空".to_string()]);
+    }
+
+    #[test]
+    fn test_keywords_delete_and_rename() {
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        db.set_keywords("old.jpg", &["鸟".into()]).unwrap();
+        db.rename_keywords("old.jpg", "new.jpg").unwrap();
+        let all = db.all_keywords().unwrap();
+        assert!(all.get("old.jpg").is_none());
+        assert_eq!(all.get("new.jpg").unwrap(), &["鸟".to_string()]);
+        db.delete_keyword_rows(&["new.jpg".into()]).unwrap();
+        assert!(db.all_keywords().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_keywords_copy_to_target_db() {
+        let tmp = TempDir::new().unwrap();
+        let src = FolderDb::open_in_dir(tmp.path()).unwrap();
+        let dst_dir = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst_dir).unwrap();
+        let mut dst = FolderDb::open_in_dir(&dst_dir).unwrap();
+        src.set_keywords("a.jpg", &["鸟".into(), "天空".into()]).unwrap();
+        src.copy_keywords_to(&mut dst, &[("a.jpg".into(), "b.jpg".into())]).unwrap();
+        let got = dst.all_keywords().unwrap().get("b.jpg").cloned().unwrap_or_default();
+        assert_eq!(got, vec!["鸟".to_string(), "天空".to_string()]);
+        // 源库行保留（复制语义）
+        assert!(src.all_keywords().unwrap().contains_key("a.jpg"));
+        // 源无关键词的条目不产生空行
+        src.copy_keywords_to(&mut dst, &[("nope.jpg".into(), "c.jpg".into())]).unwrap();
+        assert!(dst.all_keywords().unwrap().get("c.jpg").is_none());
+    }
+
+    #[test]
+    fn test_keywords_sync_with_scan_cleanup() {
+        // 文件删除后重扫：gone 的关键词行清理，keep 的关键词行保留（真相表随文件走）
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        let keep = tmp.path().join("keep.jpg");
+        std::fs::write(&keep, b"fake").unwrap();
+        db.set_keywords(&keep.to_string_lossy(), &["鸟".into()]).unwrap();
+        let gone = tmp.path().join("gone.jpg");
+        std::fs::write(&gone, b"fake").unwrap();
+        db.set_keywords(&gone.to_string_lossy(), &["旧标签".into()]).unwrap();
+        std::fs::remove_file(&gone).unwrap();
+
+        let (ksize, kmtime) = file_fingerprint(&keep).unwrap();
+        let entries = vec![FileEntry {
+            full_path: keep.clone(),
+            rel_path: "keep.jpg".into(),
+            file_size: ksize,
+            mtime_ns: kmtime as i64,
+            format: ImageFormat::Jpeg,
+        }];
+        db.sync_with_scan(&entries, &|_, _| {}).unwrap();
+        let all = db.all_keywords().unwrap();
+        assert!(all.get(&gone.to_string_lossy().to_string()).is_none(), "gone 的关键词行应被清理");
+        assert!(all.get(&keep.to_string_lossy().to_string()).is_some(), "keep 的关键词行应保留");
+    }
+
+    #[test]
+    fn test_keywords_survive_cache_cleanup() {
+        // 清理缓存语义：exif_cache 行可清（gone 文件的缓存行被删除），
+        // keywords 真相表不得被当作缓存触碰——仍存在文件的关键词行必须保留
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        let f = tmp.path().join("f.jpg");
+        std::fs::write(&f, b"fake").unwrap();
+        db.put_exif(&f, &make_exif()).unwrap();
+        db.set_keywords(&f.to_string_lossy(), &["鸟".into()]).unwrap();
+        let gone = tmp.path().join("gone.jpg");
+        std::fs::write(&gone, b"fake").unwrap();
+        db.put_exif(&gone, &make_exif()).unwrap();
+        std::fs::remove_file(&gone).unwrap();
+
+        let (fsize, fmtime) = file_fingerprint(&f).unwrap();
+        let entries = vec![FileEntry {
+            full_path: f.clone(),
+            rel_path: "f.jpg".into(),
+            file_size: fsize,
+            mtime_ns: fmtime as i64,
+            format: ImageFormat::Jpeg,
+        }];
+        let stats = db.sync_with_scan(&entries, &|_, _| {}).unwrap();
+        // gone 的 exif 缓存行被清理；f 的关键词行原样保留
+        assert_eq!(stats.cache_deleted, 1);
+        let all = db.all_keywords().unwrap();
+        assert_eq!(all.get(&f.to_string_lossy().to_string()).unwrap(), &["鸟".to_string()]);
+    }
+
+    #[test]
+    fn test_keywords_migration_old_db() {
+        // 模拟旧版库（user_version = 5，仅到 adjustments 迁移）：打开后应追加 keywords 表
+        let tmp = TempDir::new().unwrap();
+        let pt_dir = tmp.path().join(".pt");
+        std::fs::create_dir_all(&pt_dir).unwrap();
+        let db_path = pt_dir.join("data.db");
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS adjustments (
+                    rel_path TEXT PRIMARY KEY,
+                    exposure REAL NOT NULL DEFAULT 0,
+                    contrast INTEGER NOT NULL DEFAULT 0,
+                    saturation INTEGER NOT NULL DEFAULT 0,
+                    crop TEXT
+                );",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 5i64).unwrap();
+        }
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        db.set_keywords("a.jpg", &["鸟".into()]).unwrap();
+        let all = db.all_keywords().unwrap();
+        assert_eq!(all.get("a.jpg").unwrap(), &["鸟".to_string()]);
+    }
+
+    #[test]
+    fn test_sync_with_scan_nested_rel_path_keys() {
+        // 递归扫描模式下 FileEntry.rel_path 含子目录分隔符（sub/deep/bird.jpg），
+        // 三表键按正斜杠相对路径存储，天然兼容；本测试验证 sync 按嵌套键对齐
+        // （保留匹配行、删除孤儿行），证明单层/递归切换不破坏 DB 键约定
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        let rec = make_recognition();
+        let params = make_adjustments();
+        db.upsert_recognition("sub/deep/bird.jpg", &rec).unwrap();
+        db.put_adjustments("sub/deep/bird.jpg", &params).unwrap();
+        // 孤儿行：不在本次扫描条目内
+        db.upsert_recognition("gone/nested.jpg", &rec).unwrap();
+
+        let f = tmp.path().join("sub").join("deep").join("bird.jpg");
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(&f, b"fake").unwrap();
+        let (ksize, kmtime) = file_fingerprint(&f).unwrap();
+        let entries = vec![FileEntry {
+            full_path: f.clone(),
+            rel_path: "sub/deep/bird.jpg".into(),
+            file_size: ksize,
+            mtime_ns: kmtime as i64,
+            format: ImageFormat::Jpeg,
+        }];
+        let stats = db.sync_with_scan(&entries, &|_, _| {}).unwrap();
+        // 匹配嵌套键：无删除；孤儿行被清
+        assert_eq!(stats.recognition_deleted, 1);
+        assert_eq!(stats.adjustments_deleted, 0);
+        assert!(db.get_recognition("sub/deep/bird.jpg").unwrap().is_some());
+        assert!(db.get_adjustments("sub/deep/bird.jpg").unwrap().is_some());
+        assert!(db.get_recognition("gone/nested.jpg").unwrap().is_none());
     }
 }

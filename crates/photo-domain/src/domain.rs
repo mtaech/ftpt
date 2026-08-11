@@ -148,15 +148,23 @@ pub struct CaptureMeta {
     pub focal_length: Option<String>,
     pub image_width: Option<u32>,
     pub image_height: Option<u32>,
+    /// GPS 纬度（十进制度；南纬为负；EXIF 无 GPS 为 None）
+    pub gps_lat: Option<f64>,
+    /// GPS 经度（十进制度；西经为负；EXIF 无 GPS 为 None）
+    pub gps_lon: Option<f64>,
     // --- 评分/色标/旗标字段（从文件夹数据库 xmp_meta 表填充） ---
     pub rating: Rating,
     pub color_label: ColorLabel,
     pub flag: Option<Flag>,
+    // --- 关键词标签字段（从文件夹数据库 keywords 真相表填充，空 = 无标签） ---
+    pub keywords: Vec<String>,
     // --- 识别摘要字段（从文件夹数据目录的 recognition 表填充，None = 未识别） ---
     pub bird_name: Option<String>,
     pub bird_confidence: Option<f32>,
     pub recognition_status: Option<RecognitionStatus>,
     pub bird_bbox: Option<BBox>,
+    /// 鸟眼锐度分（与 Recognition::eye_sharpness 同源；无识别记录/无眼/评分失败为 None）
+    pub eye_sharpness: Option<f32>,
 }
 
 /// 从 Capture 构造 CaptureMeta。注意 index 固定为 0（历史调用约定，
@@ -218,13 +226,17 @@ impl CaptureMeta {
             focal_length: None,
             image_width: None,
             image_height: None,
+            gps_lat: None,
+            gps_lon: None,
             rating: Rating::None,
             color_label: ColorLabel::None,
             flag: None,
+            keywords: Vec::new(),
             bird_name: None,
             bird_confidence: None,
             recognition_status: None,
             bird_bbox: None,
+            eye_sharpness: None,
         }
     }
 
@@ -240,6 +252,10 @@ impl CaptureMeta {
         self.image_width = exif.image_width;
         self.image_height = exif.image_height;
         self.date_taken = exif.date_time_original.clone();
+        // GPS：EXIF 存 DMS 元组（南纬/西经符号已由提取层施加在度分量上），
+        // 此处统一转十进制度供前端展示/地图链接
+        self.gps_lat = exif.gps.latitude.map(|(d, m, s)| dms_to_decimal(d, m, s));
+        self.gps_lon = exif.gps.longitude.map(|(d, m, s)| dms_to_decimal(d, m, s));
         // 如果 EXIF 没有文件大小，回退到 fs::metadata
         if self.file_size.is_none() {
             self.file_size = std::fs::metadata(std::path::Path::new(&self.primary_path))
@@ -255,12 +271,18 @@ impl CaptureMeta {
         self.flag = xmp.flag();
     }
 
+    /// 填充关键词标签（由调用方负责从文件夹数据库 keywords 真相表读取）
+    pub fn enrich_with_keywords(&mut self, keywords: &[String]) {
+        self.keywords = keywords.to_vec();
+    }
+
     /// 填充识别摘要字段（由调用方负责从文件夹数据目录读取 Recognition）
     pub fn enrich_with_recognition(&mut self, recognition: &Recognition) {
         self.bird_name = recognition.bird.as_ref().map(|b| b.cn_name.clone());
         self.bird_confidence = recognition.confidence;
         self.recognition_status = Some(recognition.status);
         self.bird_bbox = recognition.bbox;
+        self.eye_sharpness = recognition.eye_sharpness;
     }
 }
 
@@ -347,6 +369,8 @@ pub enum SortBy {
     FileSize,
     Rating,
     Modified,
+    /// 鸟眼锐度分排序（None 排最前；排序逻辑在前端 filter.ts，Rust 侧仅做序列化传递）
+    EyeSharpness,
 }
 
 /// 排序方向
@@ -426,6 +450,19 @@ pub struct GpsInfo {
     pub latitude: Option<(f64, f64, f64)>,
     pub longitude: Option<(f64, f64, f64)>,
     pub altitude: Option<f64>,
+}
+
+/// 度分秒 → 十进制度。
+/// 南纬/西经的负号约定由 EXIF 提取层施加在度分量上（deg 为负）；分/秒恒为正，
+/// 因此符号施加在整体结果上：-116°23'29" → -(116 + 23/60 + 29/3600) ≈ -116.3914
+/// （直接 deg + min/60 + sec/3600 会把 -116°23' 算成 -115.6°，西半球严重偏移）。
+pub fn dms_to_decimal(deg: f64, min: f64, sec: f64) -> f64 {
+    let magnitude = deg.abs() + min / 60.0 + sec / 3600.0;
+    if deg < 0.0 {
+        -magnitude
+    } else {
+        magnitude
+    }
 }
 
 /// 完整的 EXIF 元数据
@@ -822,13 +859,17 @@ mod tests {
             focal_length: None,
             image_width: None,
             image_height: None,
+            gps_lat: None,
+            gps_lon: None,
             rating: Rating::None,
             color_label: ColorLabel::None,
             flag: None,
+            keywords: Vec::new(),
             bird_name: None,
             bird_confidence: None,
             recognition_status: None,
             bird_bbox: None,
+            eye_sharpness: None,
         };
         cm.enrich_with_xmp(&xmp);
         assert_eq!(cm.rating, Rating::Three);
@@ -881,6 +922,42 @@ mod tests {
         assert!(meta.image_width.is_none());
         assert!(meta.image_height.is_none());
         assert!(meta.file_size.is_none());
+    }
+
+    #[test]
+    fn test_dms_to_decimal_conversion() {
+        // 东经 116°23'45" ≈ 116.39583；南纬/西经负号由提取层施加在度分量上
+        let d = dms_to_decimal(116.0, 23.0, 45.0);
+        assert!((d - 116.39583).abs() < 1e-4, "实际 {d}");
+        // 符号只来自度分量（模拟 S/W 已施加负号）
+        let s = dms_to_decimal(-30.0, 30.0, 0.0);
+        assert!((s - (-30.5)).abs() < 1e-9);
+        // 整度/整分边界
+        assert_eq!(dms_to_decimal(10.0, 0.0, 0.0), 10.0);
+        assert!((dms_to_decimal(0.0, 30.0, 0.0) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_enrich_with_exif_fills_gps_decimal() {
+        let mut exif = ExifMetadata::default();
+        // 北纬 39°54'26"、西经 116°23'29"（西经符号在度分量上，模拟 exif.rs 施加）
+        exif.gps.latitude = Some((39.0, 54.0, 26.0));
+        exif.gps.longitude = Some((-116.0, 23.0, 29.0));
+        let mut cm = CaptureMeta::from_capture(
+            &Capture {
+                base_name: "G".into(),
+                source_files: vec![],
+                primary_index: 0,
+            },
+            0,
+        );
+        assert!(cm.gps_lat.is_none(), "默认无 GPS");
+        cm.enrich_with_exif(&exif);
+        let lat = cm.gps_lat.expect("回填后应有纬度");
+        let lon = cm.gps_lon.expect("回填后应有经度");
+        assert!((lat - (39.0 + 54.0 / 60.0 + 26.0 / 3600.0)).abs() < 1e-9);
+        assert!(lon < 0.0, "西经应为负: {lon}");
+        assert!((lon - (-(116.0 + 23.0 / 60.0 + 29.0 / 3600.0))).abs() < 1e-9);
     }
 
     #[test]
@@ -1012,6 +1089,7 @@ mod tests {
         assert_eq!(cm.bird_confidence, Some(85.3));
         assert_eq!(cm.recognition_status, Some(RecognitionStatus::Confirmed));
         assert!(cm.bird_bbox.is_some());
+        assert_eq!(cm.eye_sharpness, Some(2.35));
     }
 
     #[test]
@@ -1041,6 +1119,20 @@ mod tests {
         assert_eq!(cm.bird_name, None);
         assert_eq!(cm.recognition_status, Some(RecognitionStatus::Unrecognized));
         assert_eq!(cm.bird_bbox, None);
+        assert_eq!(cm.eye_sharpness, None);
     }
 
+    #[test]
+    fn test_sort_by_eye_sharpness_serde_roundtrip() {
+        // 外部标签枚举：EyeSharpness ↔ "EyeSharpness"（前端 bindings.ts 手写段同步维护）
+        let json = serde_json::to_string(&SortBy::EyeSharpness).expect("序列化失败");
+        assert_eq!(json, "\"EyeSharpness\"");
+        let back: SortBy = serde_json::from_str(&json).expect("反序列化失败");
+        assert_eq!(back, SortBy::EyeSharpness);
+        // 顺带验证既有变体不受影响
+        assert_eq!(
+            serde_json::from_str::<SortBy>("\"Modified\"").expect("反序列化失败"),
+            SortBy::Modified
+        );
+    }
 }

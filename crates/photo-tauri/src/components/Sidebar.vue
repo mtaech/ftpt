@@ -1,16 +1,18 @@
 <script setup lang="ts">
 // 左栏「目录」tab 内容：打开目录 / 收藏当前目录 / 当前目录卡片 / 收藏列表 / 最近打开列表。
 // 收藏与最近经 '@/lib/ipc' 命令读取（mock 模式走内存态）；外壳（宽度/拖宽/tab 头）在 LeftPanel.vue。
-import { computed, onMounted, ref } from 'vue'
-import { ClockIcon, FolderOpenIcon, StarIcon, XIcon } from '@lucide/vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { ChevronRightIcon, ClockIcon, FolderIcon, FolderOpenIcon, StarIcon, XIcon } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { useCapturesStore } from '@/stores/captures'
 import { useContextMenuStore, type ContextMenuItem } from '@/stores/contextMenu'
+import type { SubdirInfo } from '@/lib/bindings'
 import {
   addFavorite,
   getAppConfig,
   listFavorites,
   listRecent,
+  listSubdirs,
   removeFavorite,
   setAppConfig,
 } from '@/lib/ipc'
@@ -144,6 +146,48 @@ async function openPath(dir: string) {
     console.error('listRecent 失败', e)
   }
 }
+
+// ── 子目录树（当前目录卡片下，一层懒加载；点击目录 = 走现有 openPath 扫描流程） ──
+
+/** 当前目录的一层子目录（null = 尚未展开/加载） */
+const subdirs = ref<SubdirInfo[] | null>(null)
+/** 树是否展开 */
+const subdirExpanded = ref(false)
+const subdirLoading = ref(false)
+const subdirError = ref('')
+
+/** 懒加载当前目录的一层子目录（list_subdirs；更深层在切换目录后再展开） */
+async function loadSubdirs() {
+  const dir = captures.directory
+  if (!dir) return
+  subdirLoading.value = true
+  subdirError.value = ''
+  try {
+    subdirs.value = await listSubdirs(dir)
+  } catch (e) {
+    subdirError.value = '子目录加载失败'
+    console.error('listSubdirs 失败', e)
+  } finally {
+    subdirLoading.value = false
+  }
+}
+
+/** 展开/收起箭头：首次展开才请求（懒加载）；收起不清缓存，再展开直接渲染 */
+async function toggleSubdirs() {
+  if (!captures.directory) return
+  subdirExpanded.value = !subdirExpanded.value
+  if (subdirExpanded.value && subdirs.value === null) await loadSubdirs()
+}
+
+// 目录切换后重置树（子目录树属于当前目录；点击子目录 → openPath → directory 变化触发）
+watch(
+  () => captures.directory,
+  () => {
+    subdirExpanded.value = false
+    subdirs.value = null
+    subdirError.value = ''
+  },
+)
 </script>
 
 <template>
@@ -173,6 +217,54 @@ async function openPath(dir: string) {
             class="truncate text-[0.625rem] text-muted-foreground tabular-nums"
           >
             {{ captures.count }} 张
+          </div>
+        </div>
+      </div>
+
+      <!-- 子目录树：当前目录的一层子目录，箭头懒加载（list_subdirs）；点击行 = 走现有扫描流程 -->
+      <div v-if="captures.directory" class="mb-2">
+        <div
+          class="flex cursor-pointer select-none items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent"
+          role="button"
+          :aria-expanded="subdirExpanded"
+          @click="toggleSubdirs"
+        >
+          <ChevronRightIcon
+            class="size-3 shrink-0 transition-transform"
+            :class="subdirExpanded ? 'rotate-90' : ''"
+          />
+          <FolderIcon class="size-3 shrink-0" />
+          <span>子目录</span>
+          <span v-if="subdirs" class="tabular-nums">({{ subdirs.length }})</span>
+        </div>
+        <div
+          v-if="subdirExpanded"
+          class="mt-0.5 ml-2 space-y-0.5 border-l border-border pl-1.5"
+        >
+          <div v-if="subdirLoading" class="px-2 py-0.5 text-xs text-muted-foreground/70">
+            加载中…
+          </div>
+          <div v-else-if="subdirError" class="px-2 py-0.5 text-xs text-destructive">
+            {{ subdirError }}
+          </div>
+          <div
+            v-else-if="subdirs && subdirs.length === 0"
+            class="px-2 py-0.5 text-xs text-muted-foreground/70"
+          >
+            无子目录
+          </div>
+          <div
+            v-for="s in subdirs ?? []"
+            :key="s.path"
+            class="group flex cursor-pointer items-center gap-1 rounded-md border border-transparent px-2 py-1 hover:border-border hover:bg-accent"
+            :title="s.path"
+            @click="openPath(s.path)"
+          >
+            <FolderIcon class="size-3 shrink-0 text-muted-foreground" />
+            <span class="min-w-0 flex-1 truncate text-xs">{{ s.name }}</span>
+            <span class="tabular-nums text-[0.625rem] text-muted-foreground">
+              {{ s.photoCount }} 张
+            </span>
           </div>
         </div>
       </div>
