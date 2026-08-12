@@ -347,7 +347,7 @@ const aboutRows = computed(
                 v-model.number="uiScale"
                 class="h-8 w-40 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
-                <option v-for="n in [90, 100, 110, 120, 150, 200]" :key="n" :value="n">{{ n }}%</option>
+                <option v-for="n in [75, 100, 125, 150, 175, 200]" :key="n" :value="n">{{ n }}%</option>
               </select>
               <p class="text-xs text-muted-foreground">
                 整体界面等比缩放（100% = 基准 15px）；即时生效
