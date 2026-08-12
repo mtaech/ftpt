@@ -13,12 +13,6 @@ const selection = useSelectionStore()
 const recognition = useRecognitionStore()
 const batch = useBatchStore()
 
-/** 目录显示名（路径末段，对齐 App.vue dirName） */
-function dirName(dir: string | null): string {
-  if (!dir) return ''
-  return dir.split(/[\\/]/).filter(Boolean).pop() ?? dir
-}
-
 /** 扫描阶段文案（对齐顶栏进度条措辞） */
 const stageText = computed(() => {
   const stage = captures.progress?.stage
@@ -97,16 +91,16 @@ watch(
   <footer
     class="flex h-6 shrink-0 items-center gap-3 border-t bg-card px-3 text-xs text-muted-foreground"
   >
-    <!-- 左段：当前目录（截断，悬停显示完整路径） -->
+    <!-- 左段：当前目录路径（截断，悬停显示完整路径） -->
     <div class="flex min-w-0 flex-1 items-center gap-1.5">
       <FolderIcon class="size-3 shrink-0" />
       <span class="truncate" :title="captures.directory ?? ''">
-        {{ captures.directory ? dirName(captures.directory) : '无目录' }}
+        {{ captures.directory ?? '无目录' }}
       </span>
     </div>
 
-    <!-- 中段：项数 + 选中数（等宽数字，对齐 GPUI status_bar 计数区） -->
-    <div class="flex shrink-0 items-center gap-1 tabular-nums">
+    <!-- 中段：项数 + 选中数（等宽字体，对齐 GPUI status_bar 计数区） -->
+    <div class="flex shrink-0 items-center gap-1 font-mono tabular-nums">
       <span>{{ captures.count }}</span>
       <span class="text-muted-foreground/70">项</span>
       <span class="text-muted-foreground/70">·</span>

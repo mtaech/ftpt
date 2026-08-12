@@ -336,7 +336,7 @@ watch(
 <template>
   <div v-if="preview.isGrid" class="shrink-0 border-b border-border bg-card">
     <!-- 折叠行：切换按钮 + 摘要 chips + 排序控件（横向滚动） -->
-    <div class="flex items-center gap-1.5 overflow-x-auto px-2 py-1">
+    <div class="flex h-9 items-center gap-1.5 overflow-x-auto px-2">
       <button
         type="button"
         class="flex shrink-0 items-center gap-0.5 text-xs select-none"
@@ -369,7 +369,7 @@ watch(
 
       <!-- 排序下拉 + 方向（折叠态常驻，对齐 GPUI 折叠行） -->
       <select
-        class="h-8 shrink-0 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
+        class="h-7 shrink-0 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
         :value="filter.sortBy"
         aria-label="排序方式"
         @change="onSortByChange"
@@ -379,7 +379,7 @@ watch(
         </option>
       </select>
       <select
-        class="h-8 shrink-0 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
+        class="h-7 shrink-0 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
         :value="filter.sortDirection"
         aria-label="排序方向"
         @change="onSortDirChange"
@@ -508,7 +508,7 @@ watch(
           日期 从
           <input
             type="date"
-            class="h-8 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
+            class="h-7 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
             :value="filter.criteria.dateFrom ?? ''"
             @change="onDateChange('from', $event)"
           />
@@ -517,7 +517,7 @@ watch(
           至
           <input
             type="date"
-            class="h-8 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
+            class="h-7 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
             :value="filter.criteria.dateTo ?? ''"
             @change="onDateChange('to', $event)"
           />
@@ -531,7 +531,7 @@ watch(
           type="number"
           min="0"
           placeholder="最小"
-          class="h-8 w-16 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+          class="h-7 w-16 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
           :value="filter.criteria.isoMin ?? ''"
           @change="onIsoChange('min', $event)"
         />
@@ -540,7 +540,7 @@ watch(
           type="number"
           min="0"
           placeholder="最大"
-          class="h-8 w-16 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+          class="h-7 w-16 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
           :value="filter.criteria.isoMax ?? ''"
           @change="onIsoChange('max', $event)"
         />
@@ -553,7 +553,7 @@ watch(
           type="number"
           min="0"
           placeholder="最小"
-          class="h-8 w-16 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+          class="h-7 w-16 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
           :value="filter.criteria.focalMin ?? ''"
           @change="onFocalChange('min', $event)"
         />
@@ -562,7 +562,7 @@ watch(
           type="number"
           min="0"
           placeholder="最大"
-          class="h-8 w-16 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+          class="h-7 w-16 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
           :value="filter.criteria.focalMax ?? ''"
           @change="onFocalChange('max', $event)"
         />
@@ -573,7 +573,7 @@ watch(
       <div ref="lensBoxEl" class="relative shrink-0">
         <button
           type="button"
-          class="flex h-8 min-w-36 max-w-56 items-center gap-1 rounded-sm border px-2 text-xs transition-colors select-none"
+          class="flex h-7 min-w-36 max-w-56 items-center gap-1 rounded-sm border px-2 text-xs transition-colors select-none"
           :class="
             filter.criteria.lensFilter.length > 0
               ? 'border-primary bg-primary/10 text-primary'
@@ -629,7 +629,7 @@ watch(
           v-model="keywordInput"
           type="text"
           placeholder="输入后回车添加..."
-          class="h-8 w-40 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+          class="h-7 w-40 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
           :class="
             filter.criteria.keywordFilter.length > 0
               ? 'border-primary bg-primary/10 text-primary'
@@ -643,7 +643,7 @@ watch(
       <div ref="birdBoxEl" class="relative shrink-0">
         <button
           type="button"
-          class="flex h-8 min-w-36 max-w-56 items-center gap-1 rounded-sm border px-2 text-xs transition-colors select-none"
+          class="flex h-7 min-w-36 max-w-56 items-center gap-1 rounded-sm border px-2 text-xs transition-colors select-none"
           :class="
             filter.criteria.birdNames.length > 0
               ? 'border-primary bg-primary/10 text-primary'

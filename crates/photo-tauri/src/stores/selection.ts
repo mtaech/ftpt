@@ -3,6 +3,7 @@
 import { defineStore } from 'pinia'
 import type { CaptureMeta } from '@/lib/bindings'
 import { useCapturesStore } from './captures'
+import { useFilterStore } from './filter'
 
 /** 下标合法性检查：越界返回 null（单击/切换/范围共用） */
 function validIndex(i: number): number | null {
@@ -35,6 +36,10 @@ export const useSelectionStore = defineStore('selection', {
       return this.selectedIndices
         .map((i) => captures.items[i]?.primaryPath)
         .filter((p): p is string => Boolean(p))
+    },
+    /** 堆叠组总数（网格显示项数；Home/End 导航上界） */
+    stackCount(): number {
+      return useFilterStore().stackGroups.length
     },
   },
   actions: {
@@ -103,6 +108,33 @@ export const useSelectionStore = defineStore('selection', {
     clear() {
       this.selectedIndices = []
       this.anchorIndex = null
+    },
+    /**
+     * 堆叠切换：以指定成员所在堆叠组为上下文循环切换激活成员并选中（±1 循环）。
+     * 网格堆叠徽标点击与预览工具条共用；组不存在/单成员组 no-op。
+     */
+    cycleStackFrom(i: number, direction: 1 | -1) {
+      const filter = useFilterStore()
+      const g = filter.stackGroups.find((gr) => gr.members.includes(i))
+      if (!g) return
+      const next = filter.cycleStack(g.key, direction)
+      if (next !== null) this.select(next)
+    },
+    /** 方向键组间导航：±1 移动一个堆叠组（选中目标组主成员/激活成员） */
+    moveInStacks(delta: number) {
+      const filter = useFilterStore()
+      const groups = filter.stackGroups
+      if (groups.length === 0) return
+      const cur = this.selectedIndex
+      let pos = cur === null ? -1 : filter.stackPositionOf(cur)
+      if (pos < 0) pos = delta > 0 ? -1 : 0
+      this.moveToStack(pos + delta)
+    },
+    /** 绝对组导航（Home/End 共用）：跳到第 pos 个堆叠组并选中其激活成员，越界钳制 */
+    moveToStack(pos: number) {
+      const groups = useFilterStore().stackGroups
+      if (groups.length === 0) return
+      this.select(groups[Math.min(Math.max(pos, 0), groups.length - 1)].active)
     },
   },
 })

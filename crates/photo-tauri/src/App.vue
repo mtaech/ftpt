@@ -178,6 +178,10 @@ const keymapHandlers: KeymapHandlers = {
   recognizeAll: () => recognition.recognizeAll(),
   // 预览：V 检测框开关
   toggleBbox: () => preview.toggleBbox(),
+  // 预览：F 对焦点叠加开关（仅预览态生效，独立于 V 检测框；对比视图无叠加体系）
+  toggleFocus: () => {
+    if (preview.isPreview) preview.toggleFocus()
+  },
   // 剪切警告叠加：'o' 键（仅预览态生效；红 = 高光溢出、蓝 = 死黑）
   toggleClipping: () => {
     if (preview.isPreview) preview.toggleClipOverlay()
@@ -226,7 +230,8 @@ const keymapHandlers: KeymapHandlers = {
   slideshowTogglePlay: () => {
     if (preview.isSlideshow) preview.toggleSlideshowPlay()
   },
-  // 导航：方向键扁平 ±1 移动（4 列网格下跨行自然发生，对齐 GPUI）；Home/End 跳首尾。
+  // 导航：方向键在堆叠组间 ±1 移动（堆叠后网格显示项 = 堆叠组，方向键移动到目标组
+  // 激活成员；对齐 GPUI 扁平移动的「网格可见项逐个走」语义）；Home/End 跳首尾组。
   // 对比模式下 ←/→ 改为移动聚焦格（网格选择不可见，移动无意义）；
   // 幻灯片模式下 ←/→ 改为切张（切换即重置计时，见 SlideshowView watch）。
   prev: () => {
@@ -235,7 +240,7 @@ const keymapHandlers: KeymapHandlers = {
       return
     }
     if (preview.isCompare) compare.setFocus(compare.focus - 1)
-    else selection.move(-1)
+    else selection.moveInStacks(-1)
   },
   next: () => {
     if (preview.isSlideshow) {
@@ -243,10 +248,10 @@ const keymapHandlers: KeymapHandlers = {
       return
     }
     if (preview.isCompare) compare.setFocus(compare.focus + 1)
-    else selection.move(1)
+    else selection.moveInStacks(1)
   },
-  first: () => selection.moveTo(0),
-  last: () => selection.moveTo(captures.count - 1),
+  first: () => selection.moveToStack(0),
+  last: () => selection.moveToStack(selection.stackCount - 1),
   // 删除：Delete 单张/所选进回收站，无确认（对齐 GPUI layout.rs Delete 键）。
   // 后端 delete_captures 删除后 emit scan:done，captures store 自动 reload，这里不重复拉取；
   // 对比模式下删聚焦格后对比集失效，直接退出对比。
@@ -347,51 +352,109 @@ function toPreview() {
   }
   preview.openPreview()
 }
+
+/**
+ * 顶栏「网格」tab：从任意非网格视图回网格。
+ * 退出分支复用 G 键 handler（toggleGridPreview）同款 store 调用与 closeToGrid，不引入新状态。
+ */
+function showGrid() {
+  if (preview.isGrid) return
+  if (preview.isStats) {
+    stats.clear()
+    preview.closeStats()
+    return
+  }
+  if (preview.isSlideshow) {
+    preview.closeSlideshow()
+    if (preview.isGrid) return
+  }
+  closeToGrid()
+}
+
+/**
+ * 顶栏「预览」tab：进入单图预览（无选中先选首项，对齐 G 键/左 rail 语义）。
+ * 从统计/幻灯片/对比进入时先走 G 键同款退出分支，再复用 toPreview 打开预览。
+ */
+function showPreview() {
+  if (preview.isPreview) return
+  if (preview.isStats) {
+    stats.clear()
+    preview.closeStats()
+  }
+  if (preview.isSlideshow) preview.closeSlideshow()
+  if (preview.isCompare) {
+    compare.close()
+    preview.closeCompare()
+  }
+  toPreview()
+}
 </script>
 
 <template>
   <div class="flex h-screen flex-col overflow-hidden bg-background text-foreground">
-    <!-- 顶栏（全宽，对齐 GPUI toolbar 置顶）：打开目录 / 目录名 / 计数 / 扫描进度 -->
-    <header class="flex h-10 shrink-0 items-center gap-2 border-b bg-card px-2">
-      <Button size="sm" :disabled="captures.scanning" @click="captures.openDirectory()">
-        <FolderOpenIcon data-icon="inline-start" />
-        打开目录
-      </Button>
-      <!-- 导入（T1 批次 ImportRebuild：SD 卡 → 按日期建目录 → 去重 → 复制/移动） -->
-      <Button size="sm" variant="outline" @click="importOpen = true">
-        <ImportIcon data-icon="inline-start" />
-        导入
-      </Button>
-      <!-- 批量操作：左栏 tab 切换（目录 / 批量，对齐右栏 tabs 模式） -->
-      <Button
-        size="sm"
-        variant="ghost"
-        :class="{ 'bg-accent text-accent-foreground': sidebarVisible && leftTab === 'batch' }"
-        @click="toggleBatchTab"
-      >
-        <ListChecksIcon data-icon="inline-start" />
-        批量操作
-      </Button>
-      <!-- 刷新目录（对齐 GPUI toolbar refresh-btn；无目录/扫描中禁用，F5 同义） -->
-      <Button
-        size="icon-sm"
-        variant="ghost"
-        :disabled="!captures.directory || captures.scanning"
-        title="刷新目录 (F5)"
-        aria-label="刷新目录"
-        @click="captures.rescan()"
-      >
-        <RefreshCwIcon :class="{ 'animate-spin': captures.scanning }" />
-      </Button>
-      <span v-if="captures.directory" class="truncate text-sm" :title="captures.directory">
-        {{ dirName(captures.directory) }}
-      </span>
-      <span v-else class="truncate text-sm text-muted-foreground">未打开目录</span>
-      <span v-if="captures.count > 0" class="shrink-0 text-xs text-muted-foreground tabular-nums">
-        {{ captures.count }} 项
-      </span>
-      <!-- 扫描进度条（细条，吸顶栏右侧） -->
-      <div v-if="captures.scanning" class="ml-auto flex items-center gap-2">
+    <!-- 顶栏（全宽，对齐 GPUI toolbar 置顶，高 44px）：左 = 操作按钮 + 目录名/计数；中央 = 网格/预览下划线 tab；右 = 扫描进度/刷新/设置 -->
+    <header class="flex h-11 shrink-0 items-center gap-2 border-b bg-card px-2">
+      <!-- 左组：操作按钮 + 目录名（粗体截断，max-w 11rem）+ 计数（等宽 muted） -->
+      <div class="flex min-w-0 flex-1 items-center gap-2">
+        <Button size="xs" class="shadow-none" :disabled="captures.scanning" @click="captures.openDirectory()">
+          <FolderOpenIcon data-icon="inline-start" />
+          打开目录
+        </Button>
+        <!-- 导入（T1 批次 ImportRebuild：SD 卡 → 按日期建目录 → 去重 → 复制/移动） -->
+        <Button size="xs" variant="ghost" @click="importOpen = true">
+          <ImportIcon data-icon="inline-start" />
+          导入
+        </Button>
+        <!-- 批量操作：左栏 tab 切换（目录 / 批量，对齐右栏 tabs 模式） -->
+        <Button
+          size="xs"
+          variant="ghost"
+          :class="{ 'bg-accent text-accent-foreground': sidebarVisible && leftTab === 'batch' }"
+          @click="toggleBatchTab"
+        >
+          <ListChecksIcon data-icon="inline-start" />
+          批量操作
+        </Button>
+        <span v-if="captures.directory" class="max-w-44 truncate font-semibold" :title="captures.directory">
+          {{ dirName(captures.directory) }}
+        </span>
+        <span v-else class="truncate font-semibold text-muted-foreground">未打开目录</span>
+        <span v-if="captures.count > 0" class="shrink-0 font-mono text-xs text-muted-foreground tabular-nums">
+          {{ captures.count }} 项
+        </span>
+      </div>
+
+      <!-- 中央：网格/预览 下划线 tab（GPUI toolbar 签名元素；点击走 G 键同款视图切换路径） -->
+      <div class="flex h-full shrink-0 items-stretch" role="tablist" aria-label="视图切换">
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="preview.isGrid"
+          class="relative flex h-full items-center px-3 text-sm transition-colors"
+          :class="preview.isGrid ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'"
+          @click="showGrid"
+        >
+          网格
+          <!-- 底部 2px 下划线；未激活 = 透明占位，防跳动 -->
+          <span class="absolute inset-x-0 bottom-0 h-0.5" :class="preview.isGrid ? 'bg-primary' : 'bg-transparent'" />
+        </button>
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="preview.isPreview"
+          class="relative flex h-full items-center px-3 text-sm transition-colors"
+          :class="preview.isPreview ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'"
+          @click="showPreview"
+        >
+          预览
+          <span class="absolute inset-x-0 bottom-0 h-0.5" :class="preview.isPreview ? 'bg-primary' : 'bg-transparent'" />
+        </button>
+      </div>
+
+      <!-- 右组：扫描进度 + 刷新（outline 小按钮）+ 设置（ghost 吸最右） -->
+      <div class="flex min-w-0 flex-1 items-center justify-end gap-2">
+        <!-- 扫描进度条（细条，吸右组） -->
+        <div v-if="captures.scanning" class="flex items-center gap-2">
         <span class="text-xs text-muted-foreground">
           {{ captures.progress?.stage === 'scan' ? '扫描' : captures.progress?.stage === 'exif' ? 'EXIF' : '缩略图' }}
           <template v-if="captures.progress && captures.progress.total > 0">
@@ -411,26 +474,39 @@ function toPreview() {
           />
         </div>
       </div>
-      <!-- 设置入口（齿轮按钮，吸顶栏最右；对齐 GPUI rail 设置按钮，入口放顶栏右侧） -->
-      <Button
-        size="icon-sm"
-        variant="ghost"
-        class="ml-auto"
-        title="设置"
-        aria-label="设置"
-        @click="settingsOpen = true"
-      >
-        <SettingsIcon />
-      </Button>
+        <!-- 刷新目录（对齐 GPUI toolbar refresh-btn；无目录/扫描中禁用，F5 同义） -->
+        <Button
+          size="icon-sm"
+          variant="outline"
+          class="shadow-none"
+          :disabled="!captures.directory || captures.scanning"
+          title="刷新目录 (F5)"
+          aria-label="刷新目录"
+          @click="captures.rescan()"
+        >
+          <RefreshCwIcon :class="{ 'animate-spin': captures.scanning }" />
+        </Button>
+        <!-- 设置入口（齿轮按钮，吸最右；对齐 GPUI rail 设置按钮） -->
+        <Button
+          size="icon-sm"
+          variant="ghost"
+          title="设置"
+          aria-label="设置"
+          @click="settingsOpen = true"
+        >
+          <SettingsIcon />
+        </Button>
+      </div>
     </header>
 
     <!-- 主区三栏：左 rail | 左栏 | 内容区 | 右栏 | 右 rail（对齐 GPUI layout.rs h_resizable） -->
     <div class="flex min-h-0 flex-1">
       <!-- 左 Activity Rail：48px 竖排图标（对齐 GPUI RAIL_WIDTH；打开目录只保留顶栏主按钮，不重复） -->
-      <nav class="flex w-12 shrink-0 flex-col items-center gap-1 border-r bg-sidebar pt-2">
+      <nav class="flex w-12 shrink-0 flex-col items-center gap-1 border-r bg-card pt-2">
         <Button
           size="icon-sm"
           variant="ghost"
+          class="text-muted-foreground hover:bg-accent"
           title="浏览 / 网格"
           :class="{ 'bg-accent text-accent-foreground': !preview.isPreview }"
           @click="closeToGrid"
@@ -440,6 +516,7 @@ function toPreview() {
         <Button
           size="icon-sm"
           variant="ghost"
+          class="text-muted-foreground hover:bg-accent"
           title="预览"
           :class="{ 'bg-accent text-accent-foreground': preview.isPreview }"
           @click="toPreview"
@@ -449,6 +526,7 @@ function toPreview() {
         <Button
           size="icon-sm"
           variant="ghost"
+          class="text-muted-foreground hover:bg-accent"
           title="识别所选 (B)"
           :disabled="recognition.running || captures.count === 0"
           @click="recognition.recognize(selection.selectedPaths)"

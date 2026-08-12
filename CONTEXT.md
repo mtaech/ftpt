@@ -9,9 +9,16 @@
 
 ### Capture（拍摄）
 
-一个图片文件即一个 Capture。JPG 与 RAW 不再按 stem 堆叠，各自独立成项。
+一个图片文件即一个 Capture。**扫描模型**下 JPG 与 RAW 各自独立成项（每文件一个 Capture，
+不配对）；**显示层**按配置的堆叠模式分组（`photo-config StackMode`，设置弹窗可切换）：
+- `ByTime`（默认，同组照片堆叠）：拍摄时间差 ≤2s 的连拍合并为一个堆叠卡片
+- `ByFileName`（同文件名堆叠）：同 stem 文件合并（JPG/NEF 同画面）
+- `None`：不堆叠，每文件一项
 
-- 示例：`DSC_0001.jpg` → 一个 Capture；`DSC_0001.NEF` → 另一个 Capture
+堆叠卡片显示主格式缩略图 + ×N 徽标（点击循环切换激活成员，预览工具条「格式 n/m」），
+分组纯逻辑见 `photo-tauri/src/lib/stacks.ts`。
+
+- 示例：`DSC_0001.jpg` → 一个 Capture；`DSC_0001.NEF` → 另一个 Capture；ByFileName 模式下两者合并为一个堆叠项（默认显示 JPG）
 
 ### SourceFile（源文件）
 
@@ -28,8 +35,9 @@
 ### CaptureMeta（拍摄摘要）
 
 
-- 包含：base_name, primary_path, primary_format, stack_count, file_size, date_taken, extensions
+- 包含：base_name, primary_path, primary_format, file_size, date_taken, extensions
 - 设计目的：避免 UI 层加载完整文件路径列表（批量展示 5000+ 条目时节省内存和 FFI 开销）
+- 堆叠分组键 = `base_name`（无扩展名）；`extensions` 供格式徽标/兄弟格式展示
 
 ---
 
@@ -50,8 +58,7 @@ Pick（入选）或 Reject（淘汰）。持久化到 `xmp_meta` 表。
 
 同一目录下、文件名主干（stem）相同的一组 Capture，代表**同一次拍摄的不同格式记录**（如 `IMG_001.JPG` + `IMG_001.NEF`）。用户视角下它们是同一张照片（“兄弟文件也是同样的画面”）。
 
-- 画面是**派生概念**：按 stem 对目录内文件分组得出，不是存储实体（scanner 仍按单文件生成 Capture，不堆叠配对）
-- 批量文件操作可选择**画面粒度**（连同兄弟文件一起操作）或**单文件粒度**（只操作筛选出的格式）
+- 画面是**派生概念**：按 stem 对目录内文件分组得出，不是存储实体（scanner 仍按单文件生成 Capture）；网格**显示层**可配置堆叠（`ByFileName` 按画面合并 / `ByTime` 按连拍时间合并 / `None` 关闭，`stacks.ts`），批量文件操作可选择**画面粒度**（连同兄弟文件一起操作）或**单文件粒度**（只操作筛选出的格式）
 
 ### 兄弟文件（Sibling Files）
 

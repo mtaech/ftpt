@@ -22,6 +22,7 @@ import {
   ratingToNumber,
 } from '@/lib/format'
 import type { CaptureMeta, ColorLabel } from '@/lib/bindings'
+import type { StackGroup } from '@/lib/stacks'
 
 const captures = useCapturesStore()
 const filter = useFilterStore()
@@ -30,11 +31,12 @@ const preview = usePreviewStore()
 const contextMenu = useContextMenuStore()
 const config = useConfigStore()
 
-/** 网格布局常量：行高跟随后端配置 thumbnailSize（cell = thumbnailSize + 56，对齐 GPUI grid.rs cell_size），行距 gap-1.5（6px）、容器内边距 6px */
+/** 网格布局常量：行高跟随后端配置 thumbnailSize（cell = thumbnailSize + 56，对齐 GPUI grid.rs cell_size），
+ * 行距 8px、容器内边距 4px（对齐 GPUI p_1；值与模板 gap-[8px]/px-[4px] 保持一致，保证滚动定位精确） */
 const ROW_HEIGHT = computed(() => config.rowHeight)
-const ROW_GAP = 6
+const ROW_GAP = 8
 const ROW_STEP = computed(() => ROW_HEIGHT.value + ROW_GAP)
-const PAD = 6
+const PAD = 4
 /** 可见行窗口的缓冲行数（拖动滚动条时即将进入视口的行提前就绪） */
 const BUFFER_ROWS = 2
 /** 网格容器可视宽度（ResizeObserver 测量，列数计算依据） */
@@ -62,10 +64,16 @@ const scrollEl = ref<HTMLElement | null>(null)
 const scrollTop = ref(0)
 const viewportH = ref(0)
 
-/** 显示序：过滤+排序后的 captures.items 下标（对齐 Rust display_order），缓存避免重复计算 */
-const displayIndices = computed(() => filter.filteredIndices)
+/** 显示堆叠组：filteredIndices 按 stem 分组（同 stem 文件合并为一个网格项，见 stacks.ts） */
+const stackGroups = computed(() => filter.stackGroups)
 
-const rowCount = computed(() => Math.ceil(displayIndices.value.length / COLS.value))
+/** 网格 cell 视图模型：堆叠组 + 其激活成员（模板消费 c 免去重复下标解引用） */
+interface GridCell {
+  g: StackGroup
+  c: CaptureMeta
+}
+
+const rowCount = computed(() => Math.ceil(stackGroups.value.length / COLS.value))
 /** 撑出滚动高度的占位容器（rows 绝对定位在其中） */
 const spacerH = computed(() =>
   rowCount.value === 0 ? 0 : PAD * 2 + rowCount.value * ROW_STEP.value - ROW_GAP,
@@ -82,11 +90,14 @@ const visibleRowList = computed(() => {
   return out
 })
 
-/** 行下标 → 该行实际存在的 cell（captures.items 下标；末行可能不满 COLS 个） */
-function rowCells(r: number): number[] {
-  const end = Math.min((r + 1) * COLS.value, displayIndices.value.length)
-  const out: number[] = []
-  for (let p = r * COLS.value; p < end; p++) out.push(displayIndices.value[p])
+/** 行下标 → 该行实际存在的 cell（堆叠组；末行可能不满 COLS 个） */
+function rowCells(r: number): GridCell[] {
+  const end = Math.min((r + 1) * COLS.value, stackGroups.value.length)
+  const out: GridCell[] = []
+  for (let p = r * COLS.value; p < end; p++) {
+    const g = stackGroups.value[p]
+    out.push({ g, c: captures.items[g.active] })
+  }
   return out
 }
 
@@ -120,12 +131,12 @@ function thumbSrc(c: CaptureMeta): string {
   return ptimgUrl('thumb', c.primaryPath, captures.thumbVersions[c.primaryPath])
 }
 
-/** cell 选中态：选中集高亮，锚点项额外 ring 强调 */
+/** cell 选中态：选中集高亮（对齐 GPUI：2px primary 边框 + element-hover 底），锚点项额外 ring 供范围选择定位；
+ * 未选中 = 透明边框占位（border-2 防跳动），悬停显示弱边框 */
 function cellClass(i: number): string {
-  // 原生文件管理器语义：选中 = 主题色发丝边框 + 浅色 wash；锚点多一层 ring 供范围选择定位
   if (!selection.isSelected(i)) return 'border-transparent hover:border-border'
-  if (selection.anchorIndex === i) return 'border-primary bg-primary/10 ring-1 ring-primary/60'
-  return 'border-primary bg-primary/10'
+  if (selection.anchorIndex === i) return 'border-primary bg-element-hover ring-1 ring-primary/60'
+  return 'border-primary bg-element-hover'
 }
 
 /** 连拍组信息（filter store 按显示序分组，key = captures.items 下标；仅 size≥2 的组） */
@@ -133,13 +144,34 @@ function burstOf(i: number) {
   return filter.burstGroups.get(i)
 }
 
-/** 鸟种 chip 文本：已确认 → 鸟名 + 置信度（mock 层为 0–1 小数、真实后端 0–100，统一归一化） */
-function birdText(c: CaptureMeta): string {
-  const conf = c.birdConfidence
-  const name = c.birdName ?? '未知'
-  if (conf === null) return name
-  const pct = conf <= 1 ? conf * 100 : conf
-  return `${name} · ${pct.toFixed(1)}%`
+/**
+ * 堆叠徽标 tooltip：成员格式列表（「点击切换格式」提示）。
+ * 单成员组返回 undefined（无堆叠 UI）。
+ */
+function stackTitle(g: StackGroup): string | undefined {
+  if (g.members.length < 2) return undefined
+  const names = g.members.map((i) => displayName(captures.items[i])).join(' / ')
+  return `${names}（点击切换格式）`
+}
+
+/** 堆叠徽标点击：循环切换该组激活成员并选中（±1；单成员组 no-op） */
+function cycleStackOf(g: StackGroup) {
+  selection.cycleStackFrom(g.active, 1)
+}
+
+/** 五星逐位彩虹色（GPUI RATING 数组原值）：第 i 颗已填星颜色，仅着色用 */
+const RATING_COLORS = ['#ef4444', '#f97316', '#e8ab07', '#22c55e', '#3b82f6']
+
+/** 置信度归一化到 0–100（mock 层为 0–1 小数、真实后端 0–100），无置信度返回 null */
+function confPct(conf: number | null): number | null {
+  if (conf === null) return null
+  return conf <= 1 ? conf * 100 : conf
+}
+
+/** Confirmed 鸟名着色（GPUI 置信度三档）：≥80 success / ≥50 warning / 否则 primary（无置信度回退 primary） */
+function confColor(pct: number | null): string {
+  if (pct === null) return 'text-primary'
+  return pct >= 80 ? 'text-success' : pct >= 50 ? 'text-warning' : 'text-primary'
 }
 
 function onCellClick(i: number, e: MouseEvent) {
@@ -182,7 +214,7 @@ watch(
     const el = scrollEl.value
     if (!el) return
     // 选中项不在显示序中（被筛选掉）时不滚动
-    const pos = displayIndices.value.indexOf(i)
+    const pos = filter.stackPositionOf(i)
     if (pos < 0) return
     const rowTop = PAD + Math.floor(pos / COLS.value) * ROW_STEP.value
     const rowBottom = rowTop + ROW_HEIGHT.value
@@ -223,7 +255,7 @@ watch([rowCount, ROW_STEP], () => {
 
     <!-- 空态：筛选无匹配项 -->
     <div
-      v-else-if="displayIndices.length === 0 && !captures.scanning"
+      v-else-if="stackGroups.length === 0 && !captures.scanning"
       class="flex h-full items-center justify-center text-sm text-muted-foreground"
     >
       没有符合筛选条件的照片
@@ -234,7 +266,7 @@ watch([rowCount, ROW_STEP], () => {
       <div
         v-for="r in visibleRowList"
         :key="r"
-        class="absolute inset-x-0 grid gap-1.5 px-1.5"
+        class="absolute inset-x-0 grid gap-[8px] px-[4px]"
         :style="{
           top: PAD + r * ROW_STEP + 'px',
           height: ROW_HEIGHT + 'px',
@@ -242,30 +274,30 @@ watch([rowCount, ROW_STEP], () => {
         }"
       >
         <div
-          v-for="i in rowCells(r)"
-          :key="captures.items[i].primaryPath"
-          :data-grid-cell="i"
-          class="group relative flex flex-col overflow-hidden rounded-md border bg-card shadow-sm transition-colors select-none"
-          :class="cellClass(i)"
+          v-for="cell in rowCells(r)"
+          :key="cell.g.key"
+          :data-grid-cell="cell.g.active"
+          class="group relative flex flex-col overflow-hidden rounded-md border-2 bg-card transition-colors select-none"
+          :class="cellClass(cell.g.active)"
           :style="{ contentVisibility: 'auto', containIntrinsicSize: 'auto ' + ROW_HEIGHT + 'px' }"
-          @click="onCellClick(i, $event)"
-          @dblclick="onCellDblClick(i)"
-          @contextmenu.prevent="onCellContextMenu(i, $event)"
+          @click="onCellClick(cell.g.active, $event)"
+          @dblclick="onCellDblClick(cell.g.active)"
+          @contextmenu.prevent="onCellContextMenu(cell.g.active, $event)"
         >
           <!-- 缩略图区（占满剩余高度，作为徽标/旗标定位容器） -->
-          <div class="relative min-h-0 flex-1 overflow-hidden bg-muted">
+          <div class="relative min-h-0 flex-1 overflow-hidden bg-element">
             <!-- 非图片格式（OTHER）：无缩略图，居中显示格式徽标 -->
-            <div v-if="isOtherFormat(captures.items[i])" class="flex size-full items-center justify-center">
+            <div v-if="isOtherFormat(cell.c)" class="flex size-full items-center justify-center">
               <span
                 class="rounded border border-border bg-card px-2 py-0.5 text-xs font-medium text-primary"
               >
-                {{ formatBadgeLabel(captures.items[i]) }}
+                {{ formatBadgeLabel(cell.c) }}
               </span>
             </div>
             <img
               v-else
-              :src="thumbSrc(captures.items[i])"
-              :alt="displayName(captures.items[i])"
+              :src="thumbSrc(cell.c)"
+              :alt="displayName(cell.c)"
               loading="lazy"
               draggable="false"
               class="size-full object-cover"
@@ -273,72 +305,93 @@ watch([rowCount, ROW_STEP], () => {
 
             <!-- 格式徽标（左上，半透明黑底，对齐 GPUI BADGE_BG） -->
             <span
-              class="absolute top-1 left-1 rounded-sm bg-black/70 px-1 text-[0.625rem] leading-4 text-white"
+              class="absolute top-1 left-1 rounded-sm bg-black/70 px-1 text-[10px] leading-4 text-white"
             >
-              {{ formatBadgeLabel(captures.items[i]) }}
+              {{ formatBadgeLabel(cell.c) }}
             </span>
 
-            <!-- 旗标角标（右上，半透明黑底） -->
+            <!-- 旗标角标（右上 18px 圆，Pick 绿底白勾 / Reject 红底白叉，对齐 GPUI flag 覆层） -->
             <div
-              v-if="captures.items[i].flag"
-              class="absolute top-1 right-1 rounded bg-black/70 p-0.5"
+              v-if="cell.c.flag"
+              class="absolute top-1 right-1 flex size-[18px] items-center justify-center rounded-full"
               :class="
-                captures.items[i].flag === 'Pick' ? 'text-pick' : 'text-reject'
+                cell.c.flag === 'Pick' ? 'bg-pick' : 'bg-reject'
               "
             >
-              <CheckIcon v-if="captures.items[i].flag === 'Pick'" class="size-3" />
-              <XIcon v-else class="size-3" />
+              <CheckIcon v-if="cell.c.flag === 'Pick'" class="size-3 text-white" />
+              <XIcon v-else class="size-3 text-white" />
             </div>
 
             <!-- 连拍组徽标（左下，半透明黑底，对齐格式/旗标徽标风格；仅 size≥2 显示） -->
             <div
-              v-if="burstOf(i)"
+              v-if="burstOf(cell.g.active)"
               class="absolute bottom-1 left-1 flex items-center gap-0.5 rounded-sm bg-black/70 px-1 text-[0.625rem] leading-4 text-white"
             >
               <LayersIcon class="size-3" />
-              <span class="tabular-nums">{{ burstOf(i)!.size }}</span>
+              <span class="tabular-nums">{{ burstOf(cell.g.active)!.size }}</span>
             </div>
+
+            <!-- 堆叠徽标（右下，仅同 stem 多成员组；点击循环切换激活格式并选中） -->
+            <button
+              v-if="cell.g.members.length > 1"
+              class="absolute right-1 bottom-1 cursor-pointer rounded-sm bg-black/70 px-1 text-[10px] leading-4 text-white transition-colors hover:bg-black/90"
+              :title="stackTitle(cell.g)"
+              @click.stop="cycleStackOf(cell.g)"
+            >
+              ×{{ cell.g.members.length }}
+            </button>
           </div>
 
-          <!-- 信息区：文件名 / 大小+星级 / 鸟种状态 chip（常驻等高占位） -->
-          <div class="shrink-0 space-y-0.5 px-1.5 py-1">
+          <!-- 信息区：文件名 / 大小+五星 / 鸟种状态行（常驻等高占位） -->
+          <div class="shrink-0 space-y-0.5 bg-card px-2 py-1.5">
             <div class="flex items-center gap-1">
               <span
-                class="min-w-0 flex-1 truncate text-xs"
-                :title="displayName(captures.items[i])"
+                class="min-w-0 flex-1 truncate text-[13px]"
+                :title="displayName(cell.c)"
               >
-                {{ displayName(captures.items[i]) }}
+                {{ displayName(cell.c) }}
               </span>
             </div>
             <div class="flex items-center justify-between">
-              <span class="text-[0.625rem] text-muted-foreground tabular-nums">
-                {{ formatBytes(captures.items[i].fileSize) }}
+              <span class="font-mono text-xs text-muted-foreground tabular-nums">
+                {{ formatBytes(cell.c.fileSize) }}
               </span>
-              <span
-                v-if="ratingToNumber(captures.items[i].rating) > 0"
-                class="shrink-0 text-[0.625rem] text-rating"
-              >
-                {{ '★'.repeat(ratingToNumber(captures.items[i].rating)) }}
+              <!-- 五星（GPUI 逐位彩虹色）：第 i 颗已填星 = RATING_COLORS[i]，未填星 muted -->
+              <span class="flex shrink-0 items-center gap-px">
+                <span
+                  v-for="s in 5"
+                  :key="s"
+                  class="text-[10px] leading-none select-none"
+                  :class="s > ratingToNumber(cell.c.rating) ? 'text-muted-foreground' : ''"
+                  :style="
+                    s <= ratingToNumber(cell.c.rating)
+                      ? { color: RATING_COLORS[s - 1] }
+                      : undefined
+                  "
+                >★</span>
               </span>
             </div>
-            <!-- 鸟种状态 chip：Confirmed 绿 / NeedsReview 黄 / Unrecognized 灰；无记录空行占位 -->
-            <div class="flex h-[1.125rem] items-center">
-              <span
-                v-if="captures.items[i].recognitionStatus === 'Confirmed'"
-                class="max-w-full truncate rounded bg-label-green/10 px-1 text-[0.625rem] text-label-green"
-              >
-                {{ birdText(captures.items[i]) }}
-              </span>
-              <span
-                v-else-if="captures.items[i].recognitionStatus === 'NeedsReview'"
-                class="rounded bg-label-yellow/10 px-1 text-[0.625rem] text-label-yellow"
-              >
+            <!-- 鸟种状态行常驻 h-[18px]：Confirmed 名按置信度着色 + 右侧 mono 百分比 /
+                 NeedsReview 待复核 / Unrecognized 未检测到鸟类 / 无记录空占位 -->
+            <div class="flex h-[18px] items-center gap-1 text-xs">
+              <template v-if="cell.c.recognitionStatus === 'Confirmed'">
+                <span
+                  class="min-w-0 flex-1 truncate"
+                  :class="confColor(confPct(cell.c.birdConfidence))"
+                >
+                  {{ cell.c.birdName ?? '未知' }}
+                </span>
+                <span
+                  v-if="confPct(cell.c.birdConfidence) !== null"
+                  class="shrink-0 font-mono text-muted-foreground tabular-nums"
+                >
+                  {{ confPct(cell.c.birdConfidence)!.toFixed(1) }}%
+                </span>
+              </template>
+              <span v-else-if="cell.c.recognitionStatus === 'NeedsReview'" class="text-warning">
                 待复核
               </span>
-              <span
-                v-else-if="captures.items[i].recognitionStatus === 'Unrecognized'"
-                class="rounded bg-muted px-1 text-[0.625rem] text-muted-foreground"
-              >
+              <span v-else-if="cell.c.recognitionStatus === 'Unrecognized'" class="text-muted-foreground">
                 未检测到鸟类
               </span>
             </div>
@@ -346,9 +399,9 @@ watch([rowCount, ROW_STEP], () => {
 
           <!-- 色标条（cell 底缘 3px） -->
           <div
-            v-if="captures.items[i].colorLabel !== 'None'"
+            v-if="cell.c.colorLabel !== 'None'"
             class="absolute inset-x-0 bottom-0 h-[3px]"
-            :class="LABEL_BAR[captures.items[i].colorLabel]"
+            :class="LABEL_BAR[cell.c.colorLabel]"
           />
         </div>
       </div>

@@ -5,91 +5,108 @@
 
 /*
  * 双主题 → shadcn 语义变量全套映射。
- * 亮色（默认，:root）：专业简洁风格——明亮冷灰底 + 纯白卡片、强线条（高对比边框）、
- * 弱圆角（--radius 4px）、蓝色主题色。深色 = Catppuccin Mocha（html.dark，设置里切换）。
- * 取色分层：background(网格区底色) < sidebar(侧栏) < card(卡片/面板，纯白)。
+ * 配色逐值移植自 GPUI 版 theme.rs（git 历史 545921a:crates/photo-tool-app/src/ui/theme.rs）：
+ * 亮色 = 灰阶层次（gray-100 底 / 白面板 / gray-200 弱边框 / blue-500 accent），
+ * 深色 = 交易终端式近黑（#0b0d11 底 / #12151b 面板 / 近不可见边框 / cyan accent）。
+ * 取色分层：background(网格区画布) < sidebar/card(面板，白) < element(面板内卡片)。
  */
 
-/* ── 亮色（默认）：专业简洁 · 强线条 · 卡片 · 蓝 ────── */
+/* ── 亮色（默认）：GPUI theme.rs ThemeColors::light() 原值 ────── */
 :root {
-  --background: #ebeef3; /* 冷灰画布：衬托纯白卡片与白色 chrome */
-  --foreground: #1e293b; /* slate-800：高对比正文 */
-  --card: #ffffff; /* 纯白卡片 */
-  --card-foreground: #1e293b;
-  --popover: #ffffff;
-  --popover-foreground: #1e293b;
-  --primary: #2563eb; /* blue-600：主题蓝 */
+  --background: #f3f4f6; /* gray-100：网格区画布，衬托白色面板与卡片 */
+  --foreground: #111827; /* gray-900 */
+  --card: #ffffff; /* surface_background：面板/工具栏/网格卡片 */
+  --card-foreground: #111827;
+  --popover: #ffffff; /* elevated_surface_background */
+  --popover-foreground: #111827;
+  --primary: #3b82f6; /* blue-500：text_accent */
   --primary-foreground: #ffffff;
-  --secondary: #e8edf4;
-  --secondary-foreground: #1e293b;
-  --muted: #edf1f6;
-  --muted-foreground: #64748b; /* slate-500 */
-  --accent: #e2e9f2; /* 悬浮底 */
-  --accent-foreground: #1e293b;
-  --destructive: #dc2626;
-  --border: #c2cbd8; /* 强线条：亮底下清晰可辨的分隔线 */
-  --input: #b9c3d2;
-  --ring: #2563eb;
-  --chart-1: #2563eb;
-  --chart-2: #0d9488;
-  --chart-3: #16a34a;
-  --chart-4: #d97706;
-  --chart-5: #dc2626;
-  --sidebar: #e9edf3; /* 侧栏：介于底与卡片之间 */
-  --sidebar-foreground: #1e293b;
-  --sidebar-primary: #2563eb;
+  --secondary: #f9fafb; /* element_background */
+  --secondary-foreground: #111827;
+  --muted: #f9fafb;
+  --muted-foreground: #6b7280; /* gray-500 */
+  --accent: #f3f4f6; /* element_hover：悬浮底 */
+  --accent-foreground: #111827;
+  --destructive: #ef4444;
+  --border: #e5e7eb; /* border_variant：弱边框（卡片/分隔线主力） */
+  --input: #d1d5db; /* border：强边框（输入控件） */
+  --ring: #3b82f6;
+  --chart-1: #3b82f6;
+  --chart-2: #10b981;
+  --chart-3: #22c55e;
+  --chart-4: #f59e0b;
+  --chart-5: #ef4444;
+  --sidebar: #ffffff; /* 侧栏 = surface 白 */
+  --sidebar-foreground: #111827;
+  --sidebar-primary: #3b82f6;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #dde4ee;
-  --sidebar-accent-foreground: #1e293b;
-  --sidebar-border: #c2cbd8;
-  --sidebar-ring: #2563eb;
-  /* 弱圆角：sm=0 / md=2px / lg=4px / xl=8px */
-  --radius: 0.25rem;
+  --sidebar-accent: #f3f4f6;
+  --sidebar-accent-foreground: #111827;
+  --sidebar-border: #e5e7eb;
+  --sidebar-ring: #3b82f6;
+  /* GPUI 元素层（element_*，面板内卡片/悬浮/选中） */
+  --element-background: #f9fafb; /* gray-50 */
+  --element-hover: #f3f4f6; /* gray-100 */
+  --element-active: #e5e7eb; /* gray-200 */
+  --element-selected: #eff6ff; /* blue-50 */
+  --accent-dim: rgb(59 130 246 / 0.1); /* accent_dim()：选中行弱化底 */
+  /* 状态色（识别置信度等） */
+  --success: #10b981;
+  --warning: #f59e0b;
+  /* 圆角对齐 GPUI rounded_md=6px：sm=4 / md=6 / lg=8 / xl=12 */
+  --radius: 0.5rem;
 }
 
-/* ── Mocha（暗，设置里切换；圆角继承 :root 弱圆角） ────── */
+/* ── 深色：GPUI theme.rs ThemeColors::dark() 原值（交易终端式近黑 + cyan） ────── */
 .dark {
-  --background: #181825; /* mantle：网格区最暗一档 */
-  --foreground: #cdd6f4; /* text */
-  --card: #1e1e2e; /* base：面板 */
-  --card-foreground: #cdd6f4;
-  --popover: #1e1e2e;
-  --popover-foreground: #cdd6f4;
-  --primary: #89b4fa; /* blue：主 accent */
-  --primary-foreground: #11111b; /* crust */
-  --secondary: #313244; /* surface0 */
-  --secondary-foreground: #cdd6f4;
-  --muted: #313244;
-  --muted-foreground: #a6adc8; /* subtext0 */
-  --accent: #45475a; /* surface1：悬浮底 */
-  --accent-foreground: #cdd6f4;
-  --destructive: #f38ba8; /* red */
-  --border: #313244; /* surface0：近不可见细边框，对齐 theme.rs dark 分层 */
-  --input: #45475a;
-  --ring: #89b4fa;
-  --chart-1: #89b4fa;
-  --chart-2: #94e2d5;
-  --chart-3: #a6e3a1;
-  --chart-4: #f9e2af;
-  --chart-5: #f38ba8;
-  --sidebar: #11111b; /* crust */
-  --sidebar-foreground: #cdd6f4;
-  --sidebar-primary: #89b4fa;
-  --sidebar-primary-foreground: #11111b;
-  --sidebar-accent: #313244;
-  --sidebar-accent-foreground: #cdd6f4;
-  --sidebar-border: #313244;
-  --sidebar-ring: #89b4fa;
+  --background: #0b0d11; /* 网格区最暗一档 */
+  --foreground: #f9fafb;
+  --card: #12151b; /* surface_background：面板 */
+  --card-foreground: #f9fafb;
+  --popover: #1a1e26; /* elevated_surface_background */
+  --popover-foreground: #f9fafb;
+  --primary: #22d3ee; /* cyan-400：text_accent */
+  --primary-foreground: #0b0d11;
+  --secondary: #171b22;
+  --secondary-foreground: #f9fafb;
+  --muted: #171b22;
+  --muted-foreground: #9ca3af;
+  --accent: #1c212b; /* element_hover */
+  --accent-foreground: #f9fafb;
+  --destructive: #f87171;
+  --border: #1b1f27; /* border_variant：近不可见细边框 */
+  --input: #23272f; /* border */
+  --ring: #22d3ee;
+  --chart-1: #22d3ee;
+  --chart-2: #34d399;
+  --chart-3: #a3e635;
+  --chart-4: #fbbf24;
+  --chart-5: #f87171;
+  --sidebar: #12151b;
+  --sidebar-foreground: #f9fafb;
+  --sidebar-primary: #22d3ee;
+  --sidebar-primary-foreground: #0b0d11;
+  --sidebar-accent: #1c212b;
+  --sidebar-accent-foreground: #f9fafb;
+  --sidebar-border: #1b1f27;
+  --sidebar-ring: #22d3ee;
+  --element-background: #171b22;
+  --element-hover: #1c212b;
+  --element-active: #262c38;
+  --element-selected: #14202c;
+  --accent-dim: rgb(34 211 238 / 0.1);
+  --success: #34d399;
+  --warning: #fbbf24;
   /* 暗色阴影：深黑加重，暗底上才有可见层次 */
-  --shadow-2xs: 0 1px 2px 0 rgb(0 0 0 / 0.40);
+  --shadow-2xs: 0 1px 2px 0 rgb(0 0 0 / 0.4);
   --shadow-xs: 0 1px 3px 0 rgb(0 0 0 / 0.45), 0 1px 2px -1px rgb(0 0 0 / 0.45);
-  --shadow-sm: 0 2px 6px -1px rgb(0 0 0 / 0.50), 0 1px 3px -1px rgb(0 0 0 / 0.45);
+  --shadow-sm: 0 2px 6px -1px rgb(0 0 0 / 0.5), 0 1px 3px -1px rgb(0 0 0 / 0.45);
   --shadow-md: 0 6px 14px -3px rgb(0 0 0 / 0.55), 0 2px 6px -2px rgb(0 0 0 / 0.45);
-  --shadow-lg: 0 14px 30px -6px rgb(0 0 0 / 0.60), 0 4px 10px -4px rgb(0 0 0 / 0.50);
+  --shadow-lg: 0 14px 30px -6px rgb(0 0 0 / 0.6), 0 4px 10px -4px rgb(0 0 0 / 0.5);
   --shadow-xl: 0 24px 48px -10px rgb(0 0 0 / 0.65), 0 8px 16px -6px rgb(0 0 0 / 0.55);
 }
 
-/* ── 领域色（评分/色标/旗标，取 theme.rs colors 模块原值） ── */
+/* ── 领域色（评分/色标/旗标，取 GPUI theme.rs colors 模块原值，双主题通用） ── */
 @theme {
   --color-label-red: #ef4444;
   --color-label-yellow: #e8ab07;
@@ -99,15 +116,8 @@
   --color-pick: #22c55e;
   --color-reject: #ef4444;
   --color-rating: #e8ab07;
-  /* 全局边框加粗：border/border-x/border-b 等不写宽度时一律 2px（细线条 = 廉价感） */
-  --default-border-width: 2px;
-  /* 抬阴影层级：卡片/按钮/浮层分层更明确（暗色在 .dark 覆盖为深黑版） */
-  --shadow-2xs: 0 1px 2px 0 rgb(15 23 42 / 0.08);
-  --shadow-xs: 0 1px 3px 0 rgb(15 23 42 / 0.10), 0 1px 2px -1px rgb(15 23 42 / 0.10);
-  --shadow-sm: 0 2px 6px -1px rgb(15 23 42 / 0.12), 0 1px 3px -1px rgb(15 23 42 / 0.10);
-  --shadow-md: 0 6px 14px -3px rgb(15 23 42 / 0.16), 0 2px 6px -2px rgb(15 23 42 / 0.10);
-  --shadow-lg: 0 14px 30px -6px rgb(15 23 42 / 0.20), 0 4px 10px -4px rgb(15 23 42 / 0.12);
-  --shadow-xl: 0 24px 48px -10px rgb(15 23 42 / 0.26), 0 8px 16px -6px rgb(15 23 42 / 0.14);
+  /* 数字/计数等宽字体（GPUI MONO_FONT_FAMILY = Cascadia Mono） */
+  --font-mono: 'Cascadia Mono', 'Cascadia Code', Consolas, 'Courier New', monospace;
 }
 
 @theme inline {
@@ -142,10 +152,49 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+  /* GPUI 元素层与状态色 → bg-element / bg-element-hover / text-success 等 */
+  --color-element: var(--element-background);
+  --color-element-hover: var(--element-hover);
+  --color-element-active: var(--element-active);
+  --color-element-selected: var(--element-selected);
+  --color-accent-dim: var(--accent-dim);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* ── 共享组件类（GPUI 设计系统移植，组件内直接用，避免各文件重复定义） ── */
+@layer components {
+  /* 分区标题（GPUI controls.rs section_header）：小号半粗 muted */
+  .section-header {
+    @apply pb-1 text-[11px] font-semibold text-muted-foreground;
+  }
+  /* 面板卡片（GPUI info_panel.rs panel_card / theme.rs card()）：
+     element 底 + 1px 弱边框 + 圆角，用于右栏分区卡片、侧栏文件夹卡片 */
+  .panel-card {
+    background: var(--element-background);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+  }
+  /* 当前目录行（GPUI sidebar.rs 目录卡片）：accent_dim 底 + 左缘 2px accent 竖条 */
+  .dir-card-active {
+    position: relative;
+    background: var(--accent-dim);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+  }
+  .dir-card-active::before {
+    content: '';
+    position: absolute;
+    inset-block: 0;
+    left: 0;
+    width: 2px;
+    background: var(--primary);
+  }
 }
 
 @layer base {
@@ -155,8 +204,9 @@
   html {
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
-    /* 全局界面缩放基准：Tailwind 工具类全 rem，调这里等比放大整体 UI（默认 16 → 18 = +12.5%） */
-    font-size: 18px;
+    /* 全局界面缩放基准：Tailwind 工具类全 rem，调这里等比缩放整体 UI。
+       14px 对齐 GPUI 默认文本尺寸的紧凑密度 */
+    font-size: 14px;
   }
   body {
     @apply bg-background text-foreground;
@@ -186,7 +236,7 @@
   label {
     cursor: default;
   }
-  /* 原生表单控件染主题蓝（checkbox/radio/range/progress） */
+  /* 原生表单控件染主题色（checkbox/radio/range/progress） */
   input,
   select {
     accent-color: var(--primary);
@@ -199,8 +249,6 @@
   ::selection {
     background: color-mix(in srgb, var(--primary) 25%, transparent);
   }
-  /* 数字对齐用 Tailwind 内建 tabular-nums（font-variant-numeric）——只切换数字字形，
-     字体本身始终跟随 --font-family-app 全局设置，不再有硬编码字体栈 */
 }
 
 /* 常驻细滚动条（WebView2/Chromium + Firefox）；滑块平时隐匿、悬停滚动区才显现（Win11 覆盖式滚动条语义） */

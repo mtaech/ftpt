@@ -1,9 +1,8 @@
 <script setup lang="ts">
-// 左栏容器：目录 / 批量 双 tab（tab 头对齐右栏 InfoPanel 的下划线式 Tabs）。
+// 左栏容器：文件树 / 文件操作 双 tab（GPUI sidebar 药丸式 tab，激活 = element-hover 底）。
 // 拖宽把手与宽度持久化（localStorage，200–480）自 Sidebar 上移至此，两个 tab 共享宽度。
 import { computed } from 'vue'
 import { useStorage } from '@vueuse/core'
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import Sidebar from '@/components/Sidebar.vue'
 import BatchOpsPanel from '@/components/BatchOpsPanel.vue'
 
@@ -29,9 +28,6 @@ function onHandleMove(e: PointerEvent) {
 /** 拖拽结束：指针捕获在 pointerup 后由浏览器自动释放，无需清理 */
 function onHandleUp() {}
 
-/** tab 头样式（与 InfoPanel 头完全一致：下划线选中态） */
-const triggerCls =
-  'h-full rounded-none border-b-2 border-transparent px-2 text-xs data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:font-medium data-[state=active]:text-foreground data-[state=active]:shadow-none'
 </script>
 
 <template>
@@ -39,14 +35,34 @@ const triggerCls =
     class="relative flex h-full shrink-0 flex-col border-r bg-card"
     :style="{ width: `${clampedWidth}px` }"
   >
-    <!-- tab 头：目录 / 批量（对齐 InfoPanel 头部） -->
-    <div class="flex h-10 shrink-0 items-center border-b border-border px-2">
-      <Tabs v-model="tab" class="h-full">
-        <TabsList class="h-full items-stretch rounded-none bg-transparent p-0 text-muted-foreground">
-          <TabsTrigger value="dir" :class="triggerCls">目录</TabsTrigger>
-          <TabsTrigger value="batch" :class="triggerCls">批量</TabsTrigger>
-        </TabsList>
-      </Tabs>
+    <!-- tab 头：文件树 / 文件操作（GPUI sidebar 药丸式 tab：激活 = bg-element-hover） -->
+    <div class="flex shrink-0 gap-1 border-b border-border p-1.5">
+      <button
+        type="button"
+        class="flex-1 rounded-sm py-1 text-center text-xs transition-colors select-none"
+        :class="
+          tab === 'dir'
+            ? 'bg-element-hover font-medium text-foreground'
+            : 'text-muted-foreground hover:text-foreground'
+        "
+        :aria-pressed="tab === 'dir'"
+        @click="tab = 'dir'"
+      >
+        文件树
+      </button>
+      <button
+        type="button"
+        class="flex-1 rounded-sm py-1 text-center text-xs transition-colors select-none"
+        :class="
+          tab === 'batch'
+            ? 'bg-element-hover font-medium text-foreground'
+            : 'text-muted-foreground hover:text-foreground'
+        "
+        :aria-pressed="tab === 'batch'"
+        @click="tab = 'batch'"
+      >
+        文件操作
+      </button>
     </div>
 
     <!-- tab 内容（v-show 保状态：目录列表/批量表单互切不丢；包裹 div 承载显隐，BatchOpsPanel 为多根组件） -->

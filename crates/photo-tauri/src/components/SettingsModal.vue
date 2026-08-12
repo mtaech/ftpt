@@ -14,7 +14,7 @@ import { useConfigStore } from '@/stores/config'
 import { useCapturesStore } from '@/stores/captures'
 import { listSystemFonts } from '@/lib/ipc'
 import { BINDINGS, type KeyBinding, type KeymapAction } from '@/keymap'
-import type { Theme } from '@/lib/bindings'
+import type { StackMode, Theme } from '@/lib/bindings'
 
 /** 弹窗开关（App.vue v-model 控制：顶栏齿轮按钮打开、keymap Esc 分支 / 弹窗自身 × 关闭） */
 const open = defineModel<boolean>('open', { default: false })
@@ -71,6 +71,17 @@ const thumbnailSize = computed({
   set: (v: number) => void config.update({ thumbnailSize: v }),
 })
 
+/** 网格堆叠模式选项（对齐 photo-config StackMode 三态；改动即保存，网格即时重排） */
+const STACK_MODES: { value: StackMode; label: string; desc: string }[] = [
+  { value: 'None', label: '不堆叠', desc: '每个文件独立显示' },
+  { value: 'ByFileName', label: '同文件名', desc: 'JPG/NEF 等同画面合并（同 stem）' },
+  { value: 'ByTime', label: '同组照片', desc: '连拍照片按拍摄时间合并（≤2 秒）' },
+]
+const stackMode = computed({
+  get: () => config.stackMode,
+  set: (v: StackMode) => void config.update({ stackMode: v }),
+})
+
 /** 扫描包含子目录开关：改动即保存（setAppConfig → save_config）；有打开目录时立即重扫按新设置生效 */
 const includeSubdirectories = computed(() => config.includeSubdirectories)
 async function toggleIncludeSubdirectories() {
@@ -110,6 +121,7 @@ const ACTION_DESC: Record<KeymapAction, string> = {
   recognizeUnrecognized: '识别未识别的',
   recognizeAll: '重新识别全部',
   toggleBbox: '切换检测框',
+  toggleFocus: '切换对焦点叠加（预览）',
   toggleClipping: '切换剪切警告叠加（预览）',
   toggleGridPreview: '切换网格/预览',
   zoomIn: '放大（预览/对比）',
@@ -324,6 +336,23 @@ const aboutRows = computed(
               />
               <p class="text-xs text-muted-foreground">
                 即时调整网格 cell（对齐 GPUI）；缩略图缓存按需重新生成
+              </p>
+            </div>
+
+            <!-- 堆叠模式：网格合并策略（改动即保存，网格即时重排） -->
+            <div class="space-y-1.5">
+              <label for="settings-stack" class="text-sm font-medium">堆叠模式</label>
+              <select
+                id="settings-stack"
+                v-model="stackMode"
+                class="h-8 w-40 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <option v-for="m in STACK_MODES" :key="m.value" :value="m.value">
+                  {{ m.label }}
+                </option>
+              </select>
+              <p class="text-xs text-muted-foreground">
+                {{ STACK_MODES.find((m) => m.value === stackMode)?.desc }}（改动即生效）
               </p>
             </div>
 

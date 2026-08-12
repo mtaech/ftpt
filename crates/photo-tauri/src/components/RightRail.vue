@@ -15,14 +15,16 @@ const emit = defineEmits<{ toggle: []; stats: [] }>()
 
 <template>
   <nav
-    class="flex w-12 shrink-0 flex-col items-center gap-1 border-l bg-sidebar pt-2"
+    class="flex w-12 shrink-0 flex-col items-center gap-1 border-l bg-card pt-2"
     aria-label="右侧活动栏"
   >
     <Button
       size="icon-sm"
       variant="ghost"
+      class="text-muted-foreground hover:bg-accent"
       :title="visible ? '隐藏右侧面板' : '显示右侧面板'"
       :aria-pressed="visible"
+      :class="{ 'bg-accent text-accent-foreground': visible }"
       @click="emit('toggle')"
     >
       <PanelRightIcon v-if="visible" class="size-4" />
@@ -31,6 +33,7 @@ const emit = defineEmits<{ toggle: []; stats: [] }>()
     <Button
       size="icon-sm"
       variant="ghost"
+      class="text-muted-foreground hover:bg-accent"
       title="统计视图 (t)"
       aria-label="统计视图"
       @click="emit('stats')"

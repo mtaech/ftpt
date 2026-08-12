@@ -193,7 +193,7 @@ watch(
 <template>
   <div class="flex min-h-0 flex-1 flex-col">
     <!-- 操作区：收藏当前目录（打开目录统一收归顶栏主按钮，此处不重复；无目录时整块隐藏） -->
-    <div v-if="captures.directory" class="flex flex-col gap-1.5 border-b p-2">
+    <div v-if="captures.directory" class="flex flex-col gap-1.5 border-b px-3 py-2">
       <Button size="sm" variant="ghost" @click="toggleFavorite">
         <StarIcon data-icon="inline-start" :class="isFav ? 'fill-current text-primary' : ''" />
         {{ isFav ? '取消收藏' : '收藏当前目录' }}
@@ -201,20 +201,20 @@ watch(
     </div>
 
     <!-- 滚动列表区 -->
-    <div class="min-h-0 flex-1 overflow-y-auto p-2">
+    <div class="min-h-0 flex-1 overflow-y-auto px-3 py-2">
       <!-- 当前目录卡片：目录名 + 照片计数（对齐 GPUI sidebar 目录行；右键收藏切换） -->
       <div
-        class="mb-2 flex items-center gap-1 rounded-md border bg-card px-2 py-1.5"
+        class="dir-card-active mb-2 flex items-center gap-1 px-2.5 py-2"
         @contextmenu.prevent="onCurrentDirContextMenu($event)"
       >
         <div class="min-w-0 flex-1">
-          <div v-if="captures.directory" class="truncate text-sm" :title="captures.directory">
+          <div v-if="captures.directory" class="truncate text-[13px]" :title="captures.directory">
             {{ dirName(captures.directory) }}
           </div>
-          <div v-else class="text-sm text-muted-foreground">未打开目录</div>
+          <div v-else class="text-[13px] text-muted-foreground">未打开目录</div>
           <div
             v-if="captures.directory"
-            class="truncate text-[0.625rem] text-muted-foreground tabular-nums"
+            class="truncate font-mono text-xs text-muted-foreground tabular-nums"
           >
             {{ captures.count }} 张
           </div>
@@ -269,54 +269,58 @@ watch(
         </div>
       </div>
 
-      <!-- 收藏列表 -->
-      <div class="px-1 pb-1 text-[0.6875rem] font-medium text-muted-foreground">收藏</div>
-      <div v-if="favorites.length === 0" class="px-1 pb-1 text-[0.6875rem] text-muted-foreground/70">
-        点「收藏当前目录」加入
-      </div>
-      <div
-        v-for="dir in favorites"
-        :key="dir"
-        class="group mb-0.5 flex items-center gap-1 rounded-md border border-transparent px-2 py-1 hover:border-border hover:bg-accent"
-        :title="dir"
-        @click="openPath(dir)"
-        @contextmenu.prevent="onFolderContextMenu(dir, $event)"
-      >
-        <StarIcon class="size-3 shrink-0 text-primary" />
-        <div class="min-w-0 flex-1">
-          <div class="truncate text-xs">{{ dirName(dir) }}</div>
-          <div class="truncate text-[0.625rem] text-muted-foreground tabular-nums">{{ dir }}</div>
+      <!-- 收藏分区（分隔线 + 分区标题 + panel-card 文件夹行） -->
+      <div class="mt-3 border-t border-border pt-3">
+        <div class="section-header">收藏</div>
+        <div v-if="favorites.length === 0" class="text-xs text-muted-foreground">
+          点「收藏当前目录」加入
         </div>
-        <!-- 移除按钮（悬浮显现） -->
-        <button
-          class="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:bg-muted hover:text-foreground"
-          title="移除收藏"
-          @click.stop="removeFav(dir)"
+        <div
+          v-for="dir in favorites"
+          :key="dir"
+          class="panel-card group mb-1 flex items-center gap-1 px-2 py-1 hover:bg-accent"
+          :title="dir"
+          @click="openPath(dir)"
+          @contextmenu.prevent="onFolderContextMenu(dir, $event)"
         >
-          <XIcon class="size-3" />
-        </button>
+          <StarIcon class="size-3 shrink-0 text-primary" />
+          <div class="min-w-0 flex-1">
+            <div class="truncate text-xs">{{ dirName(dir) }}</div>
+            <div class="truncate text-[0.625rem] text-muted-foreground tabular-nums">{{ dir }}</div>
+          </div>
+          <!-- 移除按钮（悬浮显现） -->
+          <button
+            class="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:bg-muted hover:text-foreground"
+            title="移除收藏"
+            @click.stop="removeFav(dir)"
+          >
+            <XIcon class="size-3" />
+          </button>
+        </div>
       </div>
 
-      <!-- 最近打开列表 -->
-      <div class="mt-3 flex items-center gap-1 px-1 pb-1 text-[0.6875rem] font-medium text-muted-foreground">
-        <ClockIcon class="size-3" />
-        最近打开
-      </div>
-      <div v-if="recents.length === 0" class="px-1 pb-1 text-[0.6875rem] text-muted-foreground/70">
-        暂无历史记录
-      </div>
-      <div
-        v-for="dir in recents"
-        :key="dir"
-        class="group mb-0.5 flex items-center gap-1 rounded-md border border-transparent px-2 py-1 hover:border-border hover:bg-accent"
-        :title="dir"
-        @click="openPath(dir)"
-        @contextmenu.prevent="onFolderContextMenu(dir, $event)"
-      >
-        <FolderOpenIcon class="size-3 shrink-0 text-muted-foreground" />
-        <div class="min-w-0 flex-1">
-          <div class="truncate text-xs">{{ dirName(dir) }}</div>
-          <div class="truncate text-[0.625rem] text-muted-foreground tabular-nums">{{ dir }}</div>
+      <!-- 最近打开分区（分隔线 + 分区标题 + panel-card 文件夹行） -->
+      <div class="mt-3 border-t border-border pt-3">
+        <div class="flex items-center gap-1 text-[11px] font-semibold text-muted-foreground">
+          <ClockIcon class="size-3" />
+          最近打开
+        </div>
+        <div v-if="recents.length === 0" class="text-xs text-muted-foreground">
+          暂无历史记录
+        </div>
+        <div
+          v-for="dir in recents"
+          :key="dir"
+          class="panel-card group mb-1 flex items-center gap-1 px-2 py-1 hover:bg-accent"
+          :title="dir"
+          @click="openPath(dir)"
+          @contextmenu.prevent="onFolderContextMenu(dir, $event)"
+        >
+          <FolderOpenIcon class="size-3 shrink-0 text-muted-foreground" />
+          <div class="min-w-0 flex-1">
+            <div class="truncate text-xs">{{ dirName(dir) }}</div>
+            <div class="truncate text-[0.625rem] text-muted-foreground tabular-nums">{{ dir }}</div>
+          </div>
         </div>
       </div>
     </div>

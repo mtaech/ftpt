@@ -19,7 +19,9 @@ import type {
 } from '@/lib/bindings'
 import { listBirdSpecies } from '@/lib/ipc'
 import { computeBurstGroups, type BurstEntry } from '@/lib/burst'
+import { groupByTime, groupSingles, groupStacks, type StackGroup } from '@/lib/stacks'
 import { useCapturesStore } from './captures'
+import { useConfigStore } from './config'
 
 export const useFilterStore = defineStore('filter', {
   state: () => ({
@@ -31,6 +33,8 @@ export const useFilterStore = defineStore('filter', {
     sortDirection: 'Ascending' as SortDirection,
     /** 鸟种多选下拉候选（listBirdSpecies，拼音排序；目录打开后刷新） */
     speciesOptions: [] as string[],
+    /** 堆叠激活覆盖：stem → 激活成员下标（用户手动切换；空对象 = 全部默认主格式） */
+    stackActive: {} as Record<string, number>,
   }),
   getters: {
     /** 过滤+排序后的下标数组（captures.items 下标，对齐 Rust display_order） */
@@ -59,6 +63,29 @@ export const useFilterStore = defineStore('filter', {
       const byIndex = new Map<number, BurstEntry>()
       groups.forEach((e, pos) => byIndex.set(order[pos], e))
       return byIndex
+    },
+    /**
+     * 显示堆叠组：filteredIndices 按配置的堆叠模式分组（网格渲染依据）。
+     * None = 每成员独立；ByFileName = 同 stem 合并；ByTime = 同组照片（连拍）合并。
+     * 组位置 = 组内成员在显示序中的最小位置；active 默认主格式，stackActive 覆盖
+     * （指向的成员不在组内时——如筛选变化——自动回退主格式，残留覆盖无害）。
+     */
+    stackGroups(): StackGroup[] {
+      const captures = useCapturesStore()
+      const config = useConfigStore()
+      const indices = this.filteredIndices
+      const mode = config.stackMode
+      const groups =
+        mode === 'None'
+          ? groupSingles(indices)
+          : mode === 'ByFileName'
+            ? groupStacks(indices, captures.items)
+            : groupByTime(indices, captures.items)
+      for (const g of groups) {
+        const override = this.stackActive[g.key]
+        if (override !== undefined && g.members.includes(override)) g.active = override
+      }
+      return groups
     },
     /** 是否有任一筛选条件生效（批量操作禁用依据） */
     hasActiveFilters(): boolean {
@@ -127,6 +154,30 @@ export const useFilterStore = defineStore('filter', {
     /** 清除全部筛选条件（保留排序，对齐 GPUI clear_filters） */
     clearAll() {
       this.criteria = defaultFilterCriteria()
+    },
+    /** 手动指定堆叠激活成员（分组键不存在时写入无害——getter 落不到组上） */
+    setStackActive(key: string, index: number) {
+      this.stackActive = { ...this.stackActive, [key]: index }
+    },
+    /**
+     * 堆叠内循环切换激活成员（±1 循环）。返回新激活成员下标（组不存在/单成员
+     * 组返回 null，调用方据此跳过选中联动）。成员下标以 items 下标为键。
+     */
+    cycleStack(key: string, direction: 1 | -1): number | null {
+      const g = this.stackGroups.find((x) => x.key === key)
+      if (!g || g.members.length < 2) return null
+      const pos = g.members.indexOf(g.active)
+      const next = g.members[(pos + direction + g.members.length) % g.members.length]
+      this.setStackActive(key, next)
+      return next
+    },
+    /** 成员下标 → 堆叠组位置（网格行定位用）；不在任何组返回 -1 */
+    stackPositionOf(i: number): number {
+      const groups = this.stackGroups
+      for (let p = 0; p < groups.length; p++) {
+        if (groups[p].members.includes(i)) return p
+      }
+      return -1
     },
     /** 拉取鸟种候选（listBirdSpecies 名录全量、拼音排序）；目录打开后调用 */
     async loadSpecies() {

@@ -18,6 +18,7 @@ const DEFAULT_CONFIG: AppConfig = {
   fontFamily: 'Segoe UI',
   recognitionThreadCount: 2,
   includeSubdirectories: false,
+  stackMode: 'ByTime',
 }
 
 export const useConfigStore = defineStore('config', {
@@ -38,6 +39,8 @@ export const useConfigStore = defineStore('config', {
     thumbnailSize: (s) => s.config.thumbnailSize ?? 220,
     /** 扫描包含子目录开关（回退 false = 单层扫描，对齐 photo-config 默认） */
     includeSubdirectories: (s) => s.config.includeSubdirectories ?? false,
+    /** 网格堆叠模式（回退 ByTime = 同组照片堆叠，对齐 photo-config 默认） */
+    stackMode: (s) => s.config.stackMode ?? 'ByTime',
     /** 网格 cell 高度 = thumbnailSize + 56（对齐 GPUI grid.rs cell_size 公式） */
     rowHeight: (s) => (s.config.thumbnailSize ?? 220) + 56,
   },

@@ -24,6 +24,23 @@ pub enum Theme {
     Dark,
 }
 
+/// 网格堆叠模式：None = 不堆叠（每文件一项）；ByFileName = 同文件名（stem）合并
+/// （JPG/NEF 同画面，前端 stacks.ts 按 baseName 分组）；ByTime = 同组照片堆叠
+/// （拍摄时间差 ≤2s 的连拍合并，前端按 dateTaken 聚类）。默认 ByTime。
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum StackMode {
+    None,
+    ByFileName,
+    ByTime,
+}
+
+impl Default for StackMode {
+    fn default() -> Self {
+        Self::ByTime
+    }
+}
+
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -50,6 +67,9 @@ pub struct AppConfig {
     /// 布尔字段无需钳制；改动后需重新扫描生效（scan 编排处按此值选单层/递归）。
     #[serde(default)]
     pub include_subdirectories: bool,
+    /// 网格堆叠模式（默认 ByTime = 同组照片堆叠；旧配置无此字段时回退默认）。
+    #[serde(default)]
+    pub stack_mode: StackMode,
 }
 
 /// 导出预设（T1 批次）：导出对话框的可复用组合（预设名 + 长边 + JPEG 质量 + 命名模板）。
@@ -116,6 +136,7 @@ impl Default for AppConfig {
             recognition_thread_count: default_recognition_threads(),
             include_subdirectories: false,
             export_presets: vec![ExportPreset::default()],
+            stack_mode: StackMode::default(),
         }
     }
 }
