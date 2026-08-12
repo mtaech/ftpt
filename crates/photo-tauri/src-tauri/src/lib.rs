@@ -3005,10 +3005,16 @@ async fn enrich_and_pregen_thumbs(app: AppHandle, generation: u64) {
 /// - Windows webview：`http://ptimg.localhost/<kind>/<urlencoded绝对路径>?v=<n>`
 /// - Linux webkitgtk：`ptimg://<kind>/<urlencoded绝对路径>?v=<n>`（host 段为 kind）
 /// `?v=` 为前端缓存失效参数，本 handler 忽略。
+///
+/// **异步协议**：tauri 同步版 uri scheme 回调在 WebView2 UI 线程执行，
+/// 而缩略图生成/RAW 母版解码是耗时 IO（全尺寸解码 3-5s）——同步解码会
+/// 卡死 UI（滚动/交互冻结，解码完才恢复）。这里只做 URL 解析（快），
+/// 实际解码/IO 经 spawn_blocking 后台执行，完成后 responder 异步响应。
 fn ptimg_handler(
     ctx: tauri::UriSchemeContext<'_, tauri::Wry>,
     request: tauri::http::Request<Vec<u8>>,
-) -> tauri::http::Response<std::borrow::Cow<'static, [u8]>> {
+    responder: tauri::UriSchemeResponder,
+) {
     use tauri::http::Response;
     let not_found = || {
         Response::builder()
@@ -3026,14 +3032,14 @@ fn ptimg_handler(
         _ if matches!(host, "thumb" | "master" | "full") => {
             (host.to_string(), raw_path.trim_start_matches('/'))
         }
-        _ => return not_found(),
+        _ => return responder.respond(not_found()),
     };
     let Ok(decoded) = percent_encoding::percent_decode_str(encoded_path).decode_utf8() else {
-        return not_found();
+        return responder.respond(not_found());
     };
     let path = PathBuf::from(decoded.as_ref());
     if !path.is_absolute() {
-        return not_found();
+        return responder.respond(not_found());
     }
 
     let ext = path
@@ -3042,95 +3048,116 @@ fn ptimg_handler(
         .unwrap_or("")
         .to_lowercase();
     let Some(format) = ImageFormat::from_extension(&ext) else {
-        return not_found();
+        return responder.respond(not_found());
     };
     // 视频/OTHER 格式不生成缩略图（网格统一徽标）
     if format.is_other() {
-        return not_found();
+        return responder.respond(not_found());
     }
 
-    // 克隆缓存句柄后即释放锁：生成是耗时 IO/解码，不能持锁阻塞 command
-    let (cache, thumbnail_size) = {
-        let state = ctx.app_handle().state::<Mutex<AppState>>();
-        let st = state.lock().expect("AppState 锁中毒");
-        (st.thumb_cache.clone(), st.config.thumbnail_size)
-    };
-    let file_size = std::fs::metadata(&path).ok().map(|m| m.len());
-    let source = SourceFile {
-        path: path.clone(),
-        format: format.clone(),
-        file_size,
-    };
+    // 解码/IO 全部后台执行（spawn_blocking），响应经 responder 异步返回，
+    // 不阻塞 WebView2 请求线程。ctx 是借用，先克隆 'static 的 AppHandle。
+    let app_handle = ctx.app_handle().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // 克隆缓存句柄后即释放锁：生成是耗时 IO/解码，不能持锁阻塞 command
+        let (cache, thumbnail_size) = {
+            let state = app_handle.state::<Mutex<AppState>>();
+            let st = state.lock().expect("AppState 锁中毒");
+            (st.thumb_cache.clone(), st.config.thumbnail_size)
+        };
+        let file_size = std::fs::metadata(&path).ok().map(|m| m.len());
+        let source = SourceFile {
+            path: path.clone(),
+            format: format.clone(),
+            file_size,
+        };
 
-    // 调整参数渲染（尽力而为，ADR 0007）：master 预览且该图存在非中性调整参数时，
-    // 经 engine 色调调整渲染输出（RAW 16-bit / 常规图 8-bit），供前端按 ?v= 刷新。
-    // 参数持久化在 folder_db adjustments 表（键为相对路径），get/set_adjustments 即读写该表。
-    const PREVIEW_LOAD_SIZE: u32 = 1600;
-    if kind == "master"
-        && let Some(params) = query_adjustments(ctx.app_handle(), &path)
-        && !params.is_neutral()
-    {
-        match photo_engine::convert::render_adjusted(&source, &params, PREVIEW_LOAD_SIZE) {
-            Ok(bytes) => {
-                return Response::builder()
-                    .status(200)
-                    .header("Content-Type", "image/jpeg")
-                    .header("Cache-Control", "no-cache")
-                    .body(std::borrow::Cow::Owned(bytes))
-                    .unwrap();
-            }
-            Err(e) => {
-                // 渲染失败（解码/编码异常）不阻塞预览：记录后回退现有路径
-                tracing::warn!("调整渲染失败，回退原图: {e}");
+        // 调整参数渲染（尽力而为，ADR 0007）：master 预览且该图存在非中性调整参数时，
+        // 经 engine 色调调整渲染输出（RAW 16-bit / 常规图 8-bit），供前端按 ?v= 刷新。
+        // 参数持久化在 folder_db adjustments 表（键为相对路径），get/set_adjustments 即读写该表。
+        const PREVIEW_LOAD_SIZE: u32 = 1600;
+        if kind == "master"
+            && let Some(params) = query_adjustments(&app_handle, &path)
+            && !params.is_neutral()
+        {
+            match photo_engine::convert::render_adjusted(&source, &params, PREVIEW_LOAD_SIZE) {
+                Ok(bytes) => {
+                    return responder.respond(
+                        Response::builder()
+                            .status(200)
+                            .header("Content-Type", "image/jpeg")
+                            .header("Cache-Control", "no-cache")
+                            .body(std::borrow::Cow::Owned(bytes))
+                            .unwrap(),
+                    );
+                }
+                Err(e) => {
+                    // 渲染失败（解码/编码异常）不阻塞预览：记录后回退现有路径
+                    tracing::warn!("调整渲染失败，回退原图: {e}");
+                }
             }
         }
-    }
 
-    // 常规图 webview 可直接解码的格式：master/full 直通原文件字节（零重编码，与 GPUI 一致）；
-    // tiff/heif webview 解不了，走缓存重编码为 JPEG
-    let passthrough_mime = match format {
-        ImageFormat::Jpeg => Some("image/jpeg"),
-        ImageFormat::Png => Some("image/png"),
-        ImageFormat::WebP => Some("image/webp"),
-        ImageFormat::Bmp => Some("image/bmp"),
-        ImageFormat::Gif => Some("image/gif"),
-        _ => None,
-    };
+        // 常规图 webview 可直接解码的格式：master/full 直通原文件字节（零重编码，与 GPUI 一致）；
+        // tiff/heif webview 解不了，走缓存重编码为 JPEG
+        let passthrough_mime = match format {
+            ImageFormat::Jpeg => Some("image/jpeg"),
+            ImageFormat::Png => Some("image/png"),
+            ImageFormat::WebP => Some("image/webp"),
+            ImageFormat::Bmp => Some("image/bmp"),
+            ImageFormat::Gif => Some("image/gif"),
+            _ => None,
+        };
 
-    let served: Option<(Vec<u8>, &'static str)> = match kind.as_str() {
-        "thumb" => cache
-            .and_then(|c| c.get_or_generate(&source, thumbnail_size * 2, None).ok())
-            .map(|b| (b, "image/jpeg")),
-        "master" => match (&format, passthrough_mime) {
-            (ImageFormat::Raw(_), _) => cache
-                .and_then(|c| c.get_or_generate(&source, u32::MAX, None).ok())
-                .map(|b| (b, "image/jpeg")),
-            (_, Some(mime)) => std::fs::read(&path).ok().map(|b| (b, mime)),
-            _ => cache
-                .and_then(|c| c.get_or_generate(&source, u32::MAX, None).ok())
-                .map(|b| (b, "image/jpeg")),
-        },
-        "full" => match (&format, passthrough_mime) {
-            (ImageFormat::Raw(_), _) => cache
-                .and_then(|c| c.get_or_generate_full(&source, None).ok())
-                .map(|b| (b, "image/jpeg")),
-            (_, Some(mime)) => std::fs::read(&path).ok().map(|b| (b, mime)),
-            _ => cache
-                .and_then(|c| c.get_or_generate(&source, u32::MAX, None).ok())
-                .map(|b| (b, "image/jpeg")),
-        },
-        _ => None,
-    };
+        let served: Option<(Vec<u8>, &'static str)> = match kind.as_str() {
+            "thumb" => {
+                // 滚动缩略图：RAW 优先内嵌 JPEG（~50ms 提取，不触发全尺寸解码）。
+                // 扫描时已用同键（std@size）预生成，命中直接读小文件；
+                // 未命中时这里回退到常规 get_or_generate（会建母版）——由异步协议保证不卡 UI。
+                match &format {
+                    ImageFormat::Raw(_) => cache
+                        .and_then(|c| {
+                            c.get_or_generate_embedded(&source, thumbnail_size * 2, None)
+                                .ok()
+                        })
+                        .map(|b| (b, "image/jpeg")),
+                    _ => cache
+                        .and_then(|c| c.get_or_generate(&source, thumbnail_size * 2, None).ok())
+                        .map(|b| (b, "image/jpeg")),
+                }
+            }
+            "master" => match (&format, passthrough_mime) {
+                (ImageFormat::Raw(_), _) => cache
+                    .and_then(|c| c.get_or_generate(&source, u32::MAX, None).ok())
+                    .map(|b| (b, "image/jpeg")),
+                (_, Some(mime)) => std::fs::read(&path).ok().map(|b| (b, mime)),
+                _ => cache
+                    .and_then(|c| c.get_or_generate(&source, u32::MAX, None).ok())
+                    .map(|b| (b, "image/jpeg")),
+            },
+            "full" => match (&format, passthrough_mime) {
+                (ImageFormat::Raw(_), _) => cache
+                    .and_then(|c| c.get_or_generate_full(&source, None).ok())
+                    .map(|b| (b, "image/jpeg")),
+                (_, Some(mime)) => std::fs::read(&path).ok().map(|b| (b, mime)),
+                _ => cache
+                    .and_then(|c| c.get_or_generate(&source, u32::MAX, None).ok())
+                    .map(|b| (b, "image/jpeg")),
+            },
+            _ => None,
+        };
 
-    match served {
-        Some((bytes, mime)) => Response::builder()
-            .status(200)
-            .header("Content-Type", mime)
-            .header("Cache-Control", "no-cache")
-            .body(std::borrow::Cow::Owned(bytes))
-            .unwrap(),
-        None => not_found(),
-    }
+        let response = match served {
+            Some((bytes, mime)) => Response::builder()
+                .status(200)
+                .header("Content-Type", mime)
+                .header("Cache-Control", "no-cache")
+                .body(std::borrow::Cow::Owned(bytes))
+                .unwrap(),
+            None => not_found(),
+        };
+        responder.respond(response);
+    });
 }
 
 // ============================================================================
@@ -3212,7 +3239,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(builder.invoke_handler())
-        .register_uri_scheme_protocol("ptimg", ptimg_handler)
+        .register_asynchronous_uri_scheme_protocol("ptimg", ptimg_handler)
         .manage(Mutex::new(AppState::new(config, config_path)))
         .setup(|app| {
             let app_handle = app.handle().clone();
