@@ -8,7 +8,7 @@ photo-domain = { path = "../photo-domain" }
 
 chrono.workspace = true
 image.workspace = true
-kamadak-exif.workspace = true
+
 parking_lot.workspace = true
 rawlib.workspace = true
 rusqlite.workspace = true
