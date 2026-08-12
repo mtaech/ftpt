@@ -6,7 +6,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { getVersion, getTauriVersion } from '@tauri-apps/api/app'
 import { version as vueVersion } from 'vue'
-import { BookOpenIcon, InfoIcon, SettingsIcon, XIcon } from '@lucide/vue'
+import { BookOpenIcon, InfoIcon, MoonIcon, SettingsIcon, SunIcon, XIcon } from '@lucide/vue'
 import { Dialog, DialogClose, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Button } from '@/components/ui/button'
@@ -40,9 +40,9 @@ watch(open, (v) => {
 
 // ── 通用页：主题 / 界面字体 / 识别线程数 / 缩略图尺寸（全部改动即保存） ──
 
-const THEMES: { value: Theme; label: string }[] = [
-  { value: 'Light', label: '亮色' },
-  { value: 'Dark', label: '暗色' },
+const THEMES: { value: Theme; label: string; icon: typeof SunIcon }[] = [
+  { value: 'Light', label: '亮色', icon: SunIcon },
+  { value: 'Dark', label: '暗色', icon: MoonIcon },
 ]
 /** 主题：即时切换 html.dark（GPUI 语义同 activity_rail 主题按钮） */
 const theme = computed<Theme>({
@@ -271,110 +271,144 @@ const aboutRows = computed(
           </TabsTrigger>
         </TabsList>
 
-        <div class="min-w-0 flex-1 overflow-y-auto p-4">
+        <div class="min-w-0 flex-1 overflow-y-auto p-5">
           <!-- ── 通用 ── -->
           <TabsContent value="general" class="mt-0 space-y-6">
-            <!-- 主题：亮/暗，即时切换（html.dark） -->
-            <div class="space-y-1.5">
-              <label class="text-sm font-medium">主题</label>
-              <div class="flex w-fit items-center rounded-md bg-muted p-0.5">
-                <button
-                  v-for="t in THEMES"
-                  :key="t.value"
-                  type="button"
-                  class="rounded-sm px-3 py-1 text-sm transition-colors"
-                  :class="
-                    theme === t.value
-                      ? 'bg-card text-foreground shadow-sm'
-                      : 'text-muted-foreground hover:text-foreground'
-                  "
-                  @click="theme = t.value"
-                >
-                  {{ t.label }}
-                </button>
+            <!-- 外观：主题 / 界面字体 / 界面缩放 -->
+            <section class="space-y-4">
+              <h3 class="section-header">外观</h3>
+
+              <!-- 主题：亮/暗分段，带图标，即时切换 -->
+              <div class="settings-row">
+                <div class="settings-row-label">
+                  <label class="text-sm font-medium">主题</label>
+                  <p class="mt-0.5 text-xs text-muted-foreground">即时切换界面配色</p>
+                </div>
+                <div class="flex shrink-0 items-center gap-0.5 rounded-lg bg-muted p-1">
+                  <button
+                    v-for="t in THEMES"
+                    :key="t.value"
+                    type="button"
+                    class="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors"
+                    :class="
+                      theme === t.value
+                        ? 'bg-card text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground'
+                    "
+                    @click="theme = t.value"
+                  >
+                    <component :is="t.icon" class="size-4" />
+                    {{ t.label }}
+                  </button>
+                </div>
               </div>
-              <p class="text-xs text-muted-foreground">即时切换界面配色（html.dark）</p>
-            </div>
 
-            <!-- 界面字体：改动即保存 + 即时应用 -->
-            <div class="space-y-1.5">
-              <label for="settings-font" class="text-sm font-medium">界面字体</label>
-              <select
-                id="settings-font"
-                v-model="fontFamily"
-                class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <option v-for="f in fonts" :key="f" :value="f">{{ f }}</option>
-              </select>
-              <p class="text-xs text-muted-foreground">应用界面字体（即时生效）</p>
-            </div>
+              <!-- 界面字体 -->
+              <div class="settings-row">
+                <div class="settings-row-label">
+                  <label for="settings-font" class="text-sm font-medium">界面字体</label>
+                  <p class="mt-0.5 text-xs text-muted-foreground">应用界面字体，即时生效</p>
+                </div>
+                <select
+                  id="settings-font"
+                  v-model="fontFamily"
+                  class="settings-select w-52 shrink-0"
+                >
+                  <option v-for="f in fonts" :key="f" :value="f">{{ f }}</option>
+                </select>
+              </div>
 
-            <!-- 识别线程数：1–4 -->
-            <div class="space-y-1.5">
-              <label for="settings-threads" class="text-sm font-medium">识别线程数</label>
-              <select
-                id="settings-threads"
-                v-model.number="threadCount"
-                class="h-8 w-24 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <option v-for="n in 4" :key="n" :value="n">{{ n }}</option>
-              </select>
-              <p class="text-xs text-muted-foreground">
-                批量识别时并发的线程数（1–4），线程越多占用内存越高
-              </p>
-            </div>
+              <!-- 界面缩放 -->
+              <div class="settings-row">
+                <div class="settings-row-label">
+                  <label for="settings-ui-scale" class="text-sm font-medium">界面缩放</label>
+                  <p class="mt-0.5 text-xs text-muted-foreground">
+                    整体界面等比缩放（100% = 基准 15px）
+                  </p>
+                </div>
+                <select
+                  id="settings-ui-scale"
+                  v-model.number="uiScale"
+                  class="settings-select w-24 shrink-0"
+                >
+                  <option v-for="n in [75, 100, 125, 150, 175, 200]" :key="n" :value="n">
+                    {{ n }}%
+                  </option>
+                </select>
+              </div>
+            </section>
 
-            <!-- 网格密度：每行图片数（固定列数 2-5，cell 宽由容器自适应；对齐顶栏右上角同选项） -->
-            <div class="space-y-1.5">
-              <label for="settings-grid-cols" class="text-sm font-medium">每行图片数</label>
-              <select
-                id="settings-grid-cols"
-                v-model.number="gridColumns"
-                class="h-8 w-40 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <option v-for="n in [2, 3, 4, 5]" :key="n" :value="n">{{ n }} 张</option>
-              </select>
-              <p class="text-xs text-muted-foreground">
-                固定列数，缩略图随容器宽度自适应；即时重排
-              </p>
-            </div>
+            <!-- 网格：每行图片数 / 堆叠模式 -->
+            <section class="space-y-4">
+              <h3 class="section-header">网格</h3>
 
-            <!-- 界面缩放：整体 UI 等比缩放（html font-size = 15px × scale/100，Tailwind 全 rem） -->
-            <div class="space-y-1.5">
-              <label for="settings-ui-scale" class="text-sm font-medium">界面缩放</label>
-              <select
-                id="settings-ui-scale"
-                v-model.number="uiScale"
-                class="h-8 w-40 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <option v-for="n in [75, 100, 125, 150, 175, 200]" :key="n" :value="n">{{ n }}%</option>
-              </select>
-              <p class="text-xs text-muted-foreground">
-                整体界面等比缩放（100% = 基准 15px）；即时生效
-              </p>
-            </div>
+              <div class="settings-row">
+                <div class="settings-row-label">
+                  <label for="settings-grid-cols" class="text-sm font-medium">每行图片数</label>
+                  <p class="mt-0.5 text-xs text-muted-foreground">
+                    固定列数，缩略图随容器宽度自适应
+                  </p>
+                </div>
+                <select
+                  id="settings-grid-cols"
+                  v-model.number="gridColumns"
+                  class="settings-select w-24 shrink-0"
+                >
+                  <option v-for="n in [2, 3, 4, 5]" :key="n" :value="n">{{ n }} 张</option>
+                </select>
+              </div>
 
-            <!-- 堆叠模式：网格合并策略（改动即保存，网格即时重排） -->
-            <div class="space-y-1.5">
-              <label for="settings-stack" class="text-sm font-medium">堆叠模式</label>
-              <select
-                id="settings-stack"
-                v-model="stackMode"
-                class="h-8 w-40 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <option v-for="m in STACK_MODES" :key="m.value" :value="m.value">
-                  {{ m.label }}
-                </option>
-              </select>
-              <p class="text-xs text-muted-foreground">
-                {{ STACK_MODES.find((m) => m.value === stackMode)?.desc }}（改动即生效）
-              </p>
-            </div>
+              <div class="settings-row">
+                <div class="settings-row-label">
+                  <label for="settings-stack" class="text-sm font-medium">堆叠模式</label>
+                  <p class="mt-0.5 text-xs text-muted-foreground">
+                    {{ STACK_MODES.find((m) => m.value === stackMode)?.desc }}
+                  </p>
+                </div>
+                <select
+                  id="settings-stack"
+                  v-model="stackMode"
+                  class="settings-select w-32 shrink-0"
+                >
+                  <option v-for="m in STACK_MODES" :key="m.value" :value="m.value">
+                    {{ m.label }}
+                  </option>
+                </select>
+              </div>
+            </section>
 
-            <!-- 扫描包含子目录：改动即保存；已打开目录时自动重扫按新设置生效 -->
-            <div class="space-y-1.5">
-              <div class="flex items-center justify-between">
-                <label class="text-sm font-medium">扫描包含子目录</label>
+            <!-- 识别 -->
+            <section class="space-y-4">
+              <h3 class="section-header">识别</h3>
+
+              <div class="settings-row">
+                <div class="settings-row-label">
+                  <label for="settings-threads" class="text-sm font-medium">识别线程数</label>
+                  <p class="mt-0.5 text-xs text-muted-foreground">
+                    批量识别并发线程（1–4），越多内存占用越高
+                  </p>
+                </div>
+                <select
+                  id="settings-threads"
+                  v-model.number="threadCount"
+                  class="settings-select w-20 shrink-0"
+                >
+                  <option v-for="n in 4" :key="n" :value="n">{{ n }}</option>
+                </select>
+              </div>
+            </section>
+
+            <!-- 扫描 -->
+            <section class="space-y-4">
+              <h3 class="section-header">扫描</h3>
+
+              <div class="settings-row">
+                <div class="settings-row-label">
+                  <label class="text-sm font-medium">扫描包含子目录</label>
+                  <p class="mt-0.5 text-xs text-muted-foreground">
+                    递归扫描全部子目录；改动即保存并自动重扫当前目录
+                  </p>
+                </div>
                 <button
                   type="button"
                   role="switch"
@@ -390,27 +424,21 @@ const aboutRows = computed(
                   />
                 </button>
               </div>
-              <p class="text-xs text-muted-foreground">
-                开启后扫描当前目录的全部子目录（递归，每文件一个 Capture）；
-                改动即时保存并自动重扫当前目录，未打开目录时下次打开生效
-              </p>
-            </div>
+            </section>
           </TabsContent>
 
           <!-- ── 快捷键 ── -->
-          <TabsContent value="shortcuts" class="mt-0 space-y-5">
-            <div v-for="sec in SHORTCUT_SECTIONS" :key="sec.title" class="space-y-1.5">
-              <h3 class="text-sm font-medium">{{ sec.title }}</h3>
-              <div class="space-y-1">
+          <TabsContent value="shortcuts" class="mt-0 space-y-6">
+            <div v-for="sec in SHORTCUT_SECTIONS" :key="sec.title" class="space-y-2">
+              <h3 class="section-header">{{ sec.title }}</h3>
+              <div class="divide-y divide-border rounded-md border border-border bg-card/50">
                 <div
                   v-for="action in sec.actions"
                   :key="action"
-                  class="flex items-center justify-between text-sm"
+                  class="flex items-center justify-between px-3 py-1.5 text-sm"
                 >
                   <span class="text-muted-foreground">{{ ACTION_DESC[action] }}</span>
-                  <kbd
-                    class="rounded bg-muted px-2 py-0.5 tabular-nums text-xs text-foreground"
-                  >
+                  <kbd class="rounded-md border border-border bg-muted px-2 py-0.5 font-mono text-xs text-foreground tabular-nums">
                     {{ shortcutRows(action).join(' / ') }}
                   </kbd>
                 </div>
@@ -420,23 +448,25 @@ const aboutRows = computed(
 
           <!-- ── 关于 ── -->
           <TabsContent value="about" class="mt-0 space-y-5">
-            <div class="space-y-1">
-              <h3 class="text-sm font-medium">Photo Tool（ftpt）</h3>
-              <p class="text-xs text-muted-foreground">照片管理与筛选工具（鸟类摄影工作流）</p>
+            <div class="space-y-1.5">
+              <h3 class="text-base font-semibold">Photo Tool（ftpt）</h3>
+              <p class="text-sm text-muted-foreground">
+                照片管理与筛选工具（鸟类摄影工作流）
+              </p>
             </div>
-            <div class="space-y-1">
+            <div class="divide-y divide-border rounded-md border border-border bg-card/50">
               <div
                 v-for="[label, value] in aboutRows"
                 :key="label"
-                class="flex items-center justify-between text-sm"
+                class="flex items-center justify-between px-3 py-2 text-sm"
               >
                 <span class="text-muted-foreground">{{ label }}</span>
-                <span class="tabular-nums text-xs">{{ value }}</span>
+                <span class="text-xs tabular-nums">{{ value }}</span>
               </div>
             </div>
             <!-- 便携布局说明（对齐 photo-config determine_config_path 语义） -->
-            <div class="space-y-1 rounded-md border p-3 text-xs text-muted-foreground">
-              <p class="font-medium text-foreground">便携布局</p>
+            <div class="space-y-1.5 rounded-md border border-border bg-card/50 p-3 text-xs text-muted-foreground">
+              <p class="text-sm font-medium text-foreground">便携布局</p>
               <p>配置存于可执行文件旁的 PT.db（程序不在系统安装目录时始终视为便携版）。</p>
               <p>缩略图缓存随扫描目录存放（每个目录下 .pt/thumbs）。</p>
             </div>

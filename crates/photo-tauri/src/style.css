@@ -172,6 +172,17 @@
   .section-header {
     @apply pb-1 text-[11px] font-semibold text-muted-foreground;
   }
+  /* 设置弹窗统一下拉控件（SettingsModal 各 select 共用） */
+  .settings-select {
+    @apply h-8 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring;
+  }
+  /* 设置项行式布局：label 左 / 控件右，说明在 label 下方 */
+  .settings-row {
+    @apply flex items-center justify-between gap-4;
+  }
+  .settings-row-label {
+    @apply min-w-0 flex-1;
+  }
   /* 面板卡片（GPUI info_panel.rs panel_card / theme.rs card()）：
      element 底 + 1px 弱边框 + 圆角，用于右栏分区卡片、侧栏文件夹卡片 */
   .panel-card {
