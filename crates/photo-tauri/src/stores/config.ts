@@ -74,9 +74,5 @@ export const useConfigStore = defineStore('config', {
         // mock/后端未就绪：本地态仍生效，下次 load 会回读真实值
       }
     },
-    /** 缩略图尺寸即时生效（仅本地，不持久化）：滑块拖动中调用，持久化由调用方去抖 */
-    setThumbnailSize(size: number) {
-      this.config = { ...this.config, thumbnailSize: size }
-    },
   },
 })

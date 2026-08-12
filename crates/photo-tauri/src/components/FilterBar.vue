@@ -29,18 +29,8 @@ const config = useConfigStore()
 /** 折叠态（对齐 GPUI filter_bar_expanded；默认折叠） */
 const expanded = ref(false)
 
-// ── 网格缩略图尺寸实时调节（滑块 120–400px）：本地即时生效（PhotoGrid 列数/行高
-// 实时跟随），300ms 去抖后持久化 setAppConfig（对齐「设置改动即保存」语义，拖动不刷后端）──
-const THUMB_SLIDER = { min: 120, max: 400, step: 10 } as const
-let thumbPersistTimer: number | undefined
-const thumbnailSize = computed({
-  get: () => config.thumbnailSize,
-  set: (v: number) => {
-    config.setThumbnailSize(v)
-    clearTimeout(thumbPersistTimer)
-    thumbPersistTimer = setTimeout(() => void config.update({ thumbnailSize: v }), 300)
-  },
-})
+// ── 网格密度「每行图片数」：由 config.gridColumns 驱动（2-5 下拉，即时重排），
+// 原缩略图尺寸滑块已移除（thumbnailSize 保留为缩略图生成尺寸，不再驱动列数）──
 
 // ── 格式 chips（固定集合，对齐 GPUI render_format_filter；RAW 用 { Raw: 'RAW' }）──
 const FORMAT_CHIPS: { label: string; value: ImageFormat }[] = [
@@ -320,7 +310,6 @@ function onDocMouseDown(e: MouseEvent) {
 onMounted(() => document.addEventListener('mousedown', onDocMouseDown))
 onUnmounted(() => {
   document.removeEventListener('mousedown', onDocMouseDown)
-  clearTimeout(thumbPersistTimer)
 })
 
 // 目录打开后刷新鸟种候选（listBirdSpecies 名录全量、拼音排序）
@@ -388,22 +377,17 @@ watch(
         <option value="Descending">降序</option>
       </select>
 
-      <!-- 网格缩略图尺寸滑块（拖动即时改网格列宽/行高，300ms 去抖持久化；仅网格态显示） -->
-      <div
-        class="flex shrink-0 items-center gap-1.5"
-        :title="'缩略图尺寸 ' + thumbnailSize + 'px'"
-      >
-        <span class="text-[0.625rem] text-muted-foreground tabular-nums">{{ thumbnailSize }}px</span>
-        <input
-          type="range"
-          v-model.number="thumbnailSize"
-          :min="THUMB_SLIDER.min"
-          :max="THUMB_SLIDER.max"
-          :step="THUMB_SLIDER.step"
-          class="h-3.5 w-28 cursor-pointer accent-primary"
-          aria-label="缩略图尺寸"
-        />
-      </div>
+      <!-- 网格密度：每行图片数下拉（2-5，网格即时重排；替代原缩略图尺寸滑块，仅网格态显示） -->
+      <label class="flex shrink-0 items-center gap-1 text-xs text-muted-foreground" title="每行图片数">
+        <select
+          :value="config.gridColumns"
+          class="h-7 shrink-0 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
+          aria-label="每行图片数"
+          @change="config.update({ gridColumns: Number(($event.target as HTMLSelectElement).value) })"
+        >
+          <option v-for="n in [2, 3, 4, 5]" :key="n" :value="n">{{ n }} 张</option>
+        </select>
+      </label>
     </div>
 
     <!-- 展开态：条件组（对齐 GPUI expanded_form） -->
