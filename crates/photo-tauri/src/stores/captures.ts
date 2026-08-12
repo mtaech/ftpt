@@ -80,8 +80,9 @@ export const useCapturesStore = defineStore('captures', {
 
     /** 打开指定路径目录（侧栏收藏/最近单击复用）：扫描 + 更新哨兵 */
     async openPath(path: string) {
-      // 已是当前目录则跳过重扫（收藏/最近卡片单击当前目录时无副作用）
-      if (!path || path === this.directory) return
+      // 已是当前目录且已有数据则跳过重扫（收藏/最近卡片单击当前目录时无副作用）；
+      // 目录为空（如 mock 无后端自动扫描 / 启动自愈目录但扫描失败）时允许重扫，避免死路
+      if (!path || (path === this.directory && this.items.length > 0)) return
       this.directory = path
       this.scanning = true
       this.progress = { stage: 'scan', done: 0, total: 0 }

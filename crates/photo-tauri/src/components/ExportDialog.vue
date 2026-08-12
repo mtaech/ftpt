@@ -151,11 +151,11 @@ const PLACEHOLDER_HELP = [
           <input
             v-model="exportStore.template"
             placeholder="{name}_{seq}"
-            class="h-8 w-full rounded-md border border-input bg-background px-2 font-mono text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
           <p class="text-[0.6875rem] leading-snug text-muted-foreground">{{ PLACEHOLDER_HELP }}</p>
           <div
-            class="rounded-md bg-muted/50 px-2 py-1 font-mono text-xs text-foreground"
+            class="rounded-md bg-muted/50 px-2 py-1 text-xs text-foreground"
             :class="{ 'text-muted-foreground': !exportStore.previewName }"
           >
             预览：{{ exportStore.previewName || '（无照片可预览）' }}.jpg

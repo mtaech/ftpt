@@ -15,7 +15,9 @@
 use image::{DynamicImage, GenericImageView};
 use ort::session::Session;
 
-use photo_domain::{BBox, Capture, Recognition, RecognitionFailureStage, RecognitionStatus};
+use photo_domain::{
+    BBox, Capture, FocusPoint, FocusShape, Recognition, RecognitionFailureStage, RecognitionStatus,
+};
 
 use crate::catalog::{CatalogDb, ClassificationOutput};
 use crate::detect;
@@ -157,6 +159,8 @@ fn resolve_source_opt(
 /// - `eye_session`: 鸟眼检测 session
 /// - `catalog`: 名录映射
 /// - `capture`: 待识别的 Capture
+/// - `focus_override`: 相机对焦点（`Some` = 跳过 YOLO 检测，用对焦点 ROI 直接
+///   分类——「优先相机对焦点」设置路径；`None` = 全图 YOLO 检测，默认行为）
 /// - `on_progress`: 可选进度回调
 ///
 /// # 返回
@@ -167,6 +171,7 @@ pub fn recognize_capture(
     eye_session: &mut Session,
     catalog: &CatalogDb,
     capture: &Capture,
+    focus_override: Option<FocusPoint>,
     on_progress: Option<&ProgressCallback>,
 ) -> Result<Recognition, RecognizeError> {
     recognize_capture_impl(
@@ -176,6 +181,7 @@ pub fn recognize_capture(
         catalog,
         capture,
         None,
+        focus_override,
         on_progress,
     )
 }
@@ -197,6 +203,7 @@ pub(crate) fn recognize_capture_with_thumbnail(
     catalog: &CatalogDb,
     capture: &Capture,
     thumb_bytes: Option<&[u8]>,
+    focus_override: Option<FocusPoint>,
     on_progress: Option<&ProgressCallback>,
 ) -> Result<Recognition, RecognizeError> {
     recognize_capture_impl(
@@ -206,8 +213,43 @@ pub(crate) fn recognize_capture_with_thumbnail(
         catalog,
         capture,
         thumb_bytes,
+        focus_override,
         on_progress,
     )
+}
+
+/// 对焦点 ROI 的边长下限（归一化比例）：AF 区域/点没有鸟体范围信息，
+/// 外扩后仍需保底尺寸，防止极小框（远处小鸟的 AF 区域可能很小）。
+const FOCUS_MIN_SIDE_RATIO: f32 = 0.18;
+
+/// 相机对焦点 → 分类用归一化 bbox（焦点优先路径的 ROI 构造，跳过 YOLO 检测）。
+///
+/// FocusPoint 的坐标/尺寸已全部归一化（相对 orientation 修正后的显示方向，
+/// exif.rs `normalize_focus`），与 BBox 同一坐标系，直接在此空间构造：
+/// Point 以 30% 图幅比例正方形；Circle 以圆心为中心按直径外扩 1.6×；
+/// Rectangle 以中心外扩 1.4× 保持纵横比。统一夹紧 0-1（`BBox::new` 自带）。
+/// 注：归一化空间的「正方形」在像素空间随图宽高比伸缩，ROI 本就是近似。
+fn focus_to_bbox(fp: &FocusPoint) -> BBox {
+    match fp.shape {
+        FocusShape::Point => {
+            // 无尺寸信息：以点为中心、30% 图幅比例的正方形（猜测鸟体范围）
+            let side = 0.3f32.max(FOCUS_MIN_SIDE_RATIO);
+            BBox::new(fp.x - side / 2.0, fp.y - side / 2.0, fp.x + side / 2.0, fp.y + side / 2.0)
+        }
+        FocusShape::Circle => {
+            // 圆心 + 直径（归一化）：外扩 1.6× 并保底下限（AF 区域通常小于鸟体）
+            let side = (fp.width.max(0.0) * 1.6).max(FOCUS_MIN_SIDE_RATIO);
+            BBox::new(fp.x - side / 2.0, fp.y - side / 2.0, fp.x + side / 2.0, fp.y + side / 2.0)
+        }
+        FocusShape::Rectangle => {
+            // 左上角 + 宽高（归一化）：以中心外扩 1.4×，保持纵横比并保底下限
+            let rw = (fp.width.max(0.0) * 1.4).max(FOCUS_MIN_SIDE_RATIO);
+            let rh = (fp.height.max(0.0) * 1.4).max(FOCUS_MIN_SIDE_RATIO);
+            let cx = fp.x + fp.width / 2.0;
+            let cy = fp.y + fp.height / 2.0;
+            BBox::new(cx - rw / 2.0, cy - rh / 2.0, cx + rw / 2.0, cy + rh / 2.0)
+        }
+    }
 }
 
 /// 单张全管线识别共用实现（`thumb_bytes` 为可选缩略图优先输入）。
@@ -218,6 +260,7 @@ fn recognize_capture_impl(
     catalog: &CatalogDb,
     capture: &Capture,
     thumb_bytes: Option<&[u8]>,
+    focus_override: Option<FocusPoint>,
     on_progress: Option<&ProgressCallback>,
 ) -> Result<Recognition, RecognizeError> {
     let recognized_at = chrono::Utc::now().to_rfc3339();
@@ -246,6 +289,27 @@ fn recognize_capture_impl(
     report_progress(on_progress, 0.1, "图片加载完成");
 
     let ResolvedSource::Image(img) = source;
+
+    // 焦点优先路径：有相机对焦点 → 跳过 YOLO 检测，用对焦点 ROI 直接分类。
+    // 状态语义对齐 recognize_region 人工框选（映射成功即 Confirmed）——相机对焦
+    // 位置先验在拍鸟场景可靠（摄影师对鸟对焦），且跳过检测阶段不存在 Detection 失败。
+    if let Some(fp) = focus_override {
+        report_progress(on_progress, 0.35, "对焦点定位");
+        let bbox = focus_to_bbox(&fp);
+        report_progress(on_progress, 0.5, "检测完成");
+        let (eye_sharpness, eye_bbox) = run_eye_stage(eye_session, &img, None, bbox);
+        report_progress(on_progress, 0.7, "分类中");
+        return Ok(classify_and_map(
+            classification_session,
+            catalog,
+            &img,
+            bbox,
+            eye_sharpness,
+            eye_bbox,
+            on_progress,
+            recognized_at,
+        ));
+    }
 
     // ---- 共享 640×640 缩放：检测与眼模型同尺寸同插值（CatmullRom），
     // 缩放一次同时喂给两者，避免对同一张图做第二次全图缩放 ----
@@ -545,8 +609,44 @@ fn run_eye_stage(
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
-    use super::stage_to_status;
-    use photo_domain::{RecognitionFailureStage, RecognitionStatus};
+    use super::{focus_to_bbox, stage_to_status};
+    use photo_domain::{FocusPoint, RecognitionFailureStage, RecognitionStatus};
+
+    /// 对焦点 → ROI 构造：三种形状的尺寸/位置语义与保底下限
+    #[test]
+    fn test_focus_to_bbox_shapes() {
+        let approx = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        // Point：以点为中心、30% 图幅比例的正方形
+        let b = focus_to_bbox(&FocusPoint::point(0.5, 0.5));
+        assert!(approx(b.x1, 0.35) && approx(b.y1, 0.35) && approx(b.x2, 0.65) && approx(b.y2, 0.65));
+
+        // Circle：圆心 + 直径外扩 1.6×（0.2 → 0.32）
+        let b = focus_to_bbox(&FocusPoint::circle(0.5, 0.5, 0.2));
+        assert!(approx(b.x1, 0.34) && approx(b.y1, 0.34) && approx(b.x2, 0.66) && approx(b.y2, 0.66));
+
+        // Rectangle：中心外扩 1.4×，保持纵横比（0.2×0.4 → 0.28×0.56）
+        let b = focus_to_bbox(&FocusPoint::rectangle(0.2, 0.3, 0.2, 0.4));
+        assert!(approx(b.x1, 0.16) && approx(b.y1, 0.22) && approx(b.x2, 0.44) && approx(b.y2, 0.78));
+    }
+
+    /// 极小/越界对焦点：保底下限与 0-1 夹紧
+    #[test]
+    fn test_focus_to_bbox_clamp_and_floor() {
+        let approx = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        // 极小圆直径 → 保底 18% 图幅比例
+        let b = focus_to_bbox(&FocusPoint::circle(0.5, 0.5, 0.001));
+        assert!(approx(b.x1, 0.41) && approx(b.y1, 0.41) && approx(b.x2, 0.59) && approx(b.y2, 0.59));
+
+        // 点靠近边缘：负坐标夹到 0，框贴边（BBox::new 逐坐标夹紧）
+        let b = focus_to_bbox(&FocusPoint::point(0.05, 0.05));
+        assert_eq!((b.x1, b.y1), (0.0, 0.0));
+        assert!(approx(b.x2, 0.2));
+
+        // 零尺寸矩形 → 保底下限
+        let b = focus_to_bbox(&FocusPoint::rectangle(0.1, 0.1, 0.0, 0.0));
+        assert!(approx(b.x2 - b.x1, 0.18));
+        assert!(approx(b.y2 - b.y1, 0.18));
+    }
 
     /// 测试失败阶段 → 状态映射的完备性（断言生产函数 stage_to_status，对应
     /// pica recognition_pipeline_service.dart；生产路径与测试共用同一实现）

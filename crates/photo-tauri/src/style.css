@@ -53,6 +53,8 @@
   /* 状态色（识别置信度等） */
   --success: #10b981;
   --warning: #f59e0b;
+  /* 对焦框叠加色（F 键）：amber-500，与检测框 primary 蓝区分，重叠时可辨 */
+  --focus: #f59e0b;
   /* 圆角对齐 GPUI rounded_md=6px：sm=4 / md=6 / lg=8 / xl=12 */
   --radius: 0.5rem;
 }
@@ -97,6 +99,8 @@
   --accent-dim: rgb(34 211 238 / 0.1);
   --success: #34d399;
   --warning: #fbbf24;
+  /* 对焦框叠加色（F 键）：amber-400，暗底更亮，与检测框 cyan 区分 */
+  --focus: #fbbf24;
   /* 暗色阴影：深黑加重，暗底上才有可见层次 */
   --shadow-2xs: 0 1px 2px 0 rgb(0 0 0 / 0.4);
   --shadow-xs: 0 1px 3px 0 rgb(0 0 0 / 0.45), 0 1px 2px -1px rgb(0 0 0 / 0.45);
@@ -116,8 +120,6 @@
   --color-pick: #22c55e;
   --color-reject: #ef4444;
   --color-rating: #e8ab07;
-  /* 数字/计数等宽字体（GPUI MONO_FONT_FAMILY = Cascadia Mono） */
-  --font-mono: 'Cascadia Mono', 'Cascadia Code', Consolas, 'Courier New', monospace;
 }
 
 @theme inline {
@@ -139,6 +141,7 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-focus: var(--focus);
   --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);
   --color-chart-3: var(--chart-3);

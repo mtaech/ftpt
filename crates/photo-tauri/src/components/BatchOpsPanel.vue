@@ -255,7 +255,7 @@ watch(
       <input
         v-model="batch.renameTemplate"
         placeholder="{name}_{seq}"
-        class="h-8 w-full rounded-md border border-input bg-background px-2 font-mono text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
       />
       <div class="flex items-center gap-1.5">
         <label class="shrink-0 text-[0.6875rem] text-muted-foreground">起始序号</label>
@@ -265,7 +265,7 @@ watch(
           min="0"
           class="h-8 w-20 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
         />
-        <span class="ml-auto truncate font-mono text-[0.6875rem] text-muted-foreground">
+        <span class="ml-auto truncate text-[0.6875rem] text-muted-foreground">
           预览：{{ batch.renamePreview || '—' }}
         </span>
       </div>

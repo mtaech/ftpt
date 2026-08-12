@@ -2,10 +2,11 @@
 // 左栏「目录」tab 内容：打开目录 / 收藏当前目录 / 当前目录卡片 / 收藏列表 / 最近打开列表。
 // 收藏与最近经 '@/lib/ipc' 命令读取（mock 模式走内存态）；外壳（宽度/拖宽/tab 头）在 LeftPanel.vue。
 import { computed, onMounted, ref, watch } from 'vue'
-import { ChevronRightIcon, ClockIcon, FolderIcon, FolderOpenIcon, StarIcon, XIcon } from '@lucide/vue'
+import { ChevronRightIcon, ClockIcon, FolderIcon, FolderOpenIcon, ImportIcon, StarIcon, XIcon } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { useCapturesStore } from '@/stores/captures'
 import { useContextMenuStore, type ContextMenuItem } from '@/stores/contextMenu'
+import { useImportDialogStore } from '@/stores/importDialog'
 import type { SubdirInfo } from '@/lib/bindings'
 import {
   addFavorite,
@@ -19,6 +20,7 @@ import {
 
 const captures = useCapturesStore()
 const contextMenu = useContextMenuStore()
+const importDialog = useImportDialogStore()
 
 // ── 收藏 / 最近打开 ──────────────────────────────────────────────
 const favorites = ref<string[]>([])
@@ -192,9 +194,13 @@ watch(
 
 <template>
   <div class="flex min-h-0 flex-1 flex-col">
-    <!-- 操作区：收藏当前目录（打开目录统一收归顶栏主按钮，此处不重复；无目录时整块隐藏） -->
-    <div v-if="captures.directory" class="flex flex-col gap-1.5 border-b px-3 py-2">
-      <Button size="sm" variant="ghost" @click="toggleFavorite">
+    <!-- 操作区：导入（对话框内含「导入 SD 卡 / 添加目录直接打开」双选项）+ 收藏当前目录（无目录时隐藏） -->
+    <div class="flex flex-col gap-1.5 border-b px-3 py-2">
+      <Button size="sm" @click="importDialog.open = true">
+        <ImportIcon data-icon="inline-start" />
+        导入
+      </Button>
+      <Button v-if="captures.directory" size="sm" variant="ghost" @click="toggleFavorite">
         <StarIcon data-icon="inline-start" :class="isFav ? 'fill-current text-primary' : ''" />
         {{ isFav ? '取消收藏' : '收藏当前目录' }}
       </Button>
@@ -202,19 +208,28 @@ watch(
 
     <!-- 滚动列表区 -->
     <div class="min-h-0 flex-1 overflow-y-auto px-3 py-2">
-      <!-- 当前目录卡片：目录名 + 照片计数（对齐 GPUI sidebar 目录行；右键收藏切换） -->
+      <!-- 当前目录卡片：图标瓦片 + 目录名 + 照片计数（对齐 GPUI sidebar 目录行；右键收藏切换） -->
       <div
-        class="dir-card-active mb-2 flex items-center gap-1 px-2.5 py-2"
+        class="dir-card-active mb-2 flex items-center gap-2 px-2.5 py-2"
         @contextmenu.prevent="onCurrentDirContextMenu($event)"
       >
+        <div
+          class="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/15 text-primary"
+        >
+          <FolderOpenIcon class="size-4" />
+        </div>
         <div class="min-w-0 flex-1">
-          <div v-if="captures.directory" class="truncate text-[13px]" :title="captures.directory">
+          <div
+            v-if="captures.directory"
+            class="truncate text-[13px] font-medium"
+            :title="captures.directory"
+          >
             {{ dirName(captures.directory) }}
           </div>
           <div v-else class="text-[13px] text-muted-foreground">未打开目录</div>
           <div
             v-if="captures.directory"
-            class="truncate font-mono text-xs text-muted-foreground tabular-nums"
+            class="truncate text-[11px] text-muted-foreground tabular-nums"
           >
             {{ captures.count }} 张
           </div>
@@ -256,11 +271,10 @@ watch(
           <div
             v-for="s in subdirs ?? []"
             :key="s.path"
-            class="group flex cursor-pointer items-center gap-1 rounded-md border border-transparent px-2 py-1 hover:border-border hover:bg-accent"
+            class="group flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 transition-colors hover:bg-element-hover"
             :title="s.path"
             @click="openPath(s.path)"
           >
-            <FolderIcon class="size-3 shrink-0 text-muted-foreground" />
             <span class="min-w-0 flex-1 truncate text-xs">{{ s.name }}</span>
             <span class="tabular-nums text-[0.625rem] text-muted-foreground">
               {{ s.photoCount }} 张
@@ -269,28 +283,30 @@ watch(
         </div>
       </div>
 
-      <!-- 收藏分区（分隔线 + 分区标题 + panel-card 文件夹行） -->
+      <!-- 收藏分区（分隔线 + 分区标题 + 轻列表行） -->
       <div class="mt-3 border-t border-border pt-3">
-        <div class="section-header">收藏</div>
+        <div class="section-header mb-1.5 flex items-center gap-1">
+          <StarIcon class="size-3" />
+          收藏
+        </div>
         <div v-if="favorites.length === 0" class="text-xs text-muted-foreground">
           点「收藏当前目录」加入
         </div>
         <div
           v-for="dir in favorites"
           :key="dir"
-          class="panel-card group mb-1 flex items-center gap-1 px-2 py-1 hover:bg-accent"
+          class="group mb-0.5 flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-element-hover"
           :title="dir"
           @click="openPath(dir)"
           @contextmenu.prevent="onFolderContextMenu(dir, $event)"
         >
-          <StarIcon class="size-3 shrink-0 text-primary" />
           <div class="min-w-0 flex-1">
-            <div class="truncate text-xs">{{ dirName(dir) }}</div>
+            <div class="truncate text-xs font-medium">{{ dirName(dir) }}</div>
             <div class="truncate text-[0.625rem] text-muted-foreground tabular-nums">{{ dir }}</div>
           </div>
           <!-- 移除按钮（悬浮显现） -->
           <button
-            class="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:bg-muted hover:text-foreground"
+            class="shrink-0 rounded-full p-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:bg-element-active hover:text-foreground"
             title="移除收藏"
             @click.stop="removeFav(dir)"
           >
@@ -300,8 +316,9 @@ watch(
       </div>
 
       <!-- 最近打开分区（分隔线 + 分区标题 + panel-card 文件夹行） -->
+      <!-- 最近打开分区（分隔线 + 分区标题 + 轻列表行） -->
       <div class="mt-3 border-t border-border pt-3">
-        <div class="flex items-center gap-1 text-[11px] font-semibold text-muted-foreground">
+        <div class="mb-1.5 flex items-center gap-1 text-[11px] font-semibold text-muted-foreground">
           <ClockIcon class="size-3" />
           最近打开
         </div>
@@ -311,14 +328,13 @@ watch(
         <div
           v-for="dir in recents"
           :key="dir"
-          class="panel-card group mb-1 flex items-center gap-1 px-2 py-1 hover:bg-accent"
+          class="group mb-0.5 flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-element-hover"
           :title="dir"
           @click="openPath(dir)"
           @contextmenu.prevent="onFolderContextMenu(dir, $event)"
         >
-          <FolderOpenIcon class="size-3 shrink-0 text-muted-foreground" />
           <div class="min-w-0 flex-1">
-            <div class="truncate text-xs">{{ dirName(dir) }}</div>
+            <div class="truncate text-xs font-medium">{{ dirName(dir) }}</div>
             <div class="truncate text-[0.625rem] text-muted-foreground tabular-nums">{{ dir }}</div>
           </div>
         </div>

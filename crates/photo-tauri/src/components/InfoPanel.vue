@@ -12,6 +12,7 @@ import {
   PencilIcon,
   RotateCcwIcon,
   ScanSearchIcon,
+  SlidersHorizontalIcon,
   XIcon,
 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
@@ -21,7 +22,7 @@ import { usePreviewStore } from '@/stores/preview'
 import { useRecognitionStore } from '@/stores/recognition'
 import { useFilterStore } from '@/stores/filter'
 import { correctBird, getAdjustments, getFrequentSpecies, getHistogram, getRecognition, isTauri, ptimgUrl, setAdjustments } from '@/lib/ipc'
-import { displayName, formatBadgeLabel, formatBytes, ratingToNumber } from '@/lib/format'
+import { displayName, formatBytes, formatName, ratingToNumber } from '@/lib/format'
 import type {
   AdjustParams,
   CaptureMeta,
@@ -520,6 +521,18 @@ function onOpenMap(e: Event) {
 
 /** 本地调整参数（跟随焦点图；拖动实时改内存，350ms 去抖后持久化） */
 const adj = reactive<AdjustParams>({ exposure: 0, contrast: 0, saturation: 0 })
+
+/** 调整字段表（驱动模板 v-for，消除三份重复行）：范围/步进对齐 GPUI adjust 语义 */
+const ADJ_FIELDS = [
+  { key: 'exposure', label: '曝光', min: -2, max: 2, step: 0.05 },
+  { key: 'contrast', label: '对比度', min: -100, max: 100, step: 1 },
+  { key: 'saturation', label: '饱和度', min: -100, max: 100, step: 1 },
+] as const satisfies readonly { key: keyof AdjustParams; label: string; min: number; max: number; step: number }[]
+
+/** 字段数值文案：曝光 ±0.00 EV，其余 ±N */
+function fmtField(key: keyof AdjustParams, v: number): string {
+  return key === 'exposure' ? fmtExposure(v) : fmtSigned(v)
+}
 /** 加载序号：切图后旧请求的结果直接丢弃（防异步回填串图） */
 let loadSeq = 0
 let persistTimer: ReturnType<typeof setTimeout> | null = null
@@ -600,10 +613,6 @@ function fmtExposure(v: number): string {
 function fmtSigned(v: number): string {
   return `${v >= 0 ? '+' : ''}${v}`
 }
-/** 非中性数值用 accent（primary）强调 */
-function valueCls(v: number): string {
-  return v !== 0 ? 'text-primary' : ''
-}
 </script>
 
 <template>
@@ -678,7 +687,7 @@ function valueCls(v: number): string {
               <div
                 class="shrink-0 rounded-sm border border-border px-1 tabular-nums text-[0.625rem] text-muted-foreground"
               >
-                {{ formatBadgeLabel(focused).toUpperCase() }}
+                {{ formatName(focused) }}
               </div>
             </div>
             <!-- 鸟种中文名（存在时显示，对齐 GPUI hero） -->
@@ -1093,96 +1102,61 @@ function valueCls(v: number): string {
 
       <!-- ════════════ 调整 tab ════════════ -->
       <template v-else>
-        <div class="panel-card flex flex-col gap-2 p-3">
-          <div class="flex items-center justify-between">
-            <span class="text-[11px] font-semibold text-muted-foreground">基础调整</span>
+        <div class="panel-card flex flex-col gap-1 p-3">
+          <div class="mb-1 flex items-center justify-between">
+            <span class="flex items-center gap-1.5 text-[11px] font-semibold text-muted-foreground">
+              <SlidersHorizontalIcon class="size-3.5" />
+              基础调整
+            </span>
             <button
               v-if="!isNeutral"
               type="button"
-              class="text-xs text-primary hover:underline"
+              class="flex items-center gap-1 rounded-sm px-1 py-0.5 text-[11px] text-primary transition-colors hover:bg-element"
               @click="resetAll"
             >
+              <RotateCcwIcon class="size-3" />
               重置全部
             </button>
           </div>
           <template v-if="focused">
-            <!-- 曝光（EV ±2.0，步进 0.05） -->
-            <div class="flex items-center gap-2">
-              <span class="w-11 shrink-0 text-xs text-muted-foreground">曝光</span>
+            <!-- 调整行（两行式：标签+数值 chip+重置一行，滑杆独占一行全宽。
+                 单行布局在面板最小宽 200px 时滑杆被挤到 ~10px 不可用，见 aside 钳制 200–480） -->
+            <div
+              v-for="f in ADJ_FIELDS"
+              :key="f.key"
+              class="-mx-1 rounded-md px-1 py-1.5 transition-colors hover:bg-element/50"
+            >
+              <div class="mb-0.5 flex items-center justify-between">
+                <span class="text-xs text-muted-foreground">{{ f.label }}</span>
+                <div class="flex items-center gap-1">
+                  <span
+                    class="w-16 rounded-sm px-1 py-0.5 text-center text-[11px] tabular-nums"
+                    :class="adj[f.key] !== 0 ? 'bg-primary/10 font-medium text-primary' : 'text-muted-foreground'"
+                  >
+                    {{ fmtField(f.key, adj[f.key] ?? 0) }}
+                  </span>
+                  <button
+                    v-if="adj[f.key] !== 0"
+                    type="button"
+                    class="flex size-5 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-element-hover hover:text-primary"
+                    :title="`重置${f.label}`"
+                    @click="resetField(f.key)"
+                  >
+                    <RotateCcwIcon class="size-3" />
+                  </button>
+                  <span v-else class="size-5" />
+                </div>
+              </div>
               <input
                 type="range"
-                class="h-4 w-full accent-primary"
-                min="-2"
-                max="2"
-                step="0.05"
-                :value="adj.exposure"
-                aria-label="曝光"
-                @input="onSliderInput('exposure', $event)"
+                class="adj-slider w-full"
+                :min="f.min"
+                :max="f.max"
+                :step="f.step"
+                :value="adj[f.key]"
+                :aria-label="f.label"
+                @input="onSliderInput(f.key, $event)"
               />
-              <span class="w-16 shrink-0 text-right tabular-nums text-xs" :class="valueCls(adj.exposure ?? 0)">
-                {{ fmtExposure(adj.exposure ?? 0) }}
-              </span>
-              <button
-                v-if="adj.exposure !== 0"
-                type="button"
-                class="w-10 shrink-0 text-right text-xs text-primary hover:underline"
-                @click="resetField('exposure')"
-              >
-                重置
-              </button>
-              <span v-else class="w-10 shrink-0" />
-            </div>
-            <!-- 对比度（±100，步进 1） -->
-            <div class="flex items-center gap-2">
-              <span class="w-11 shrink-0 text-xs text-muted-foreground">对比度</span>
-              <input
-                type="range"
-                class="h-4 w-full accent-primary"
-                min="-100"
-                max="100"
-                step="1"
-                :value="adj.contrast"
-                aria-label="对比度"
-                @input="onSliderInput('contrast', $event)"
-              />
-              <span class="w-16 shrink-0 text-right tabular-nums text-xs" :class="valueCls(adj.contrast ?? 0)">
-                {{ fmtSigned(adj.contrast ?? 0) }}
-              </span>
-              <button
-                v-if="adj.contrast !== 0"
-                type="button"
-                class="w-10 shrink-0 text-right text-xs text-primary hover:underline"
-                @click="resetField('contrast')"
-              >
-                重置
-              </button>
-              <span v-else class="w-10 shrink-0" />
-            </div>
-            <!-- 饱和度（±100，步进 1） -->
-            <div class="flex items-center gap-2">
-              <span class="w-11 shrink-0 text-xs text-muted-foreground">饱和度</span>
-              <input
-                type="range"
-                class="h-4 w-full accent-primary"
-                min="-100"
-                max="100"
-                step="1"
-                :value="adj.saturation"
-                aria-label="饱和度"
-                @input="onSliderInput('saturation', $event)"
-              />
-              <span class="w-16 shrink-0 text-right tabular-nums text-xs" :class="valueCls(adj.saturation ?? 0)">
-                {{ fmtSigned(adj.saturation ?? 0) }}
-              </span>
-              <button
-                v-if="adj.saturation !== 0"
-                type="button"
-                class="w-10 shrink-0 text-right text-xs text-primary hover:underline"
-                @click="resetField('saturation')"
-              >
-                重置
-              </button>
-              <span v-else class="w-10 shrink-0" />
             </div>
           </template>
           <div v-else class="text-xs text-muted-foreground">未选择图片</div>
@@ -1191,3 +1165,58 @@ function valueCls(v: number): string {
     </div>
   </aside>
 </template>
+
+<style scoped>
+/* 调整滑杆（WebView2/Chromium 主路径 + Firefox 回退）：4px 细轨道带中点刻度，
+   白底圆形拇指 + primary 描边，悬停放大。原生 accent-primary 外观过粗。 */
+.adj-slider {
+  appearance: none;
+  height: 16px;
+  background: transparent;
+  cursor: pointer;
+}
+.adj-slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  /* 轨道底用 input 强边框色（卡片底 element-background，gray-200 仍太弱）；
+     中点刻度：50% 处 1px 竖线（muted-foreground，压过轨道底） */
+  background:
+    linear-gradient(
+      to right,
+      transparent calc(50% - 0.5px),
+      var(--muted-foreground) calc(50% - 0.5px),
+      var(--muted-foreground) calc(50% + 0.5px),
+      transparent calc(50% + 0.5px)
+    ),
+    var(--input);
+}
+.adj-slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  margin-top: -4.5px; /* (轨道 4 - 拇指 13) / 2，垂直居中 */
+  border-radius: 50%;
+  background: var(--card);
+  border: 2px solid var(--primary);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.25);
+  transition: transform 120ms ease-out;
+}
+.adj-slider:hover::-webkit-slider-thumb {
+  transform: scale(1.15);
+}
+.adj-slider:active::-webkit-slider-thumb {
+  transform: scale(1.05);
+}
+.adj-slider::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--input);
+}
+.adj-slider::-moz-range-thumb {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--card);
+  border: 2px solid var(--primary);
+}
+</style>

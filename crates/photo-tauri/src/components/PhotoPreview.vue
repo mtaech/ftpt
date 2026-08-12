@@ -2,7 +2,7 @@
 // 单图预览：ptimg master 图源（1:1 时切 full），滚轮光标中心缩放（×1.25 步进，
 // 数学走 previewMath 纯函数），左键拖拽平移，工具条 −/%/+/适应/1:1/返回网格。
 import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue'
-import { MinusIcon, PlusIcon, MaximizeIcon, ScanIcon, ScanLineIcon, Grid2x2Icon, ImageIcon, ArrowLeftRightIcon } from '@lucide/vue'
+import { CrosshairIcon, MinusIcon, PlusIcon, MaximizeIcon, ScanIcon, ScanLineIcon, Grid2x2Icon, ImageIcon } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import Filmstrip from '@/components/Filmstrip.vue'
 import { useCapturesStore } from '@/stores/captures'
@@ -13,7 +13,7 @@ import { useRecognitionStore } from '@/stores/recognition'
 import { useContextMenuStore, captureMenuItems } from '@/stores/contextMenu'
 import { getClippingMask, getRecognition, ptimgUrl } from '@/lib/ipc'
 import { registerZoomHost } from '@/lib/zoomHost'
-import { displayName } from '@/lib/format'
+import { displayName, formatBadgeLabel } from '@/lib/format'
 import type { BBox } from '@/lib/bindings'
 import type { Vec2 } from '@/lib/previewMath'
 
@@ -39,7 +39,7 @@ const current = computed(() => selection.selected)
 
 /**
  * 堆叠切换：当前选中成员所在堆叠组（无堆叠/不在组内返回 null）。
- * 组内成员 ≥2 时工具条显示「切换格式」按钮（±1 循环，选中联动）。
+ * 组内成员 ≥2 时工具条显示成员分段选择器（点击直达，选中联动）。
  */
 const currentStack = computed(() => {
   const i = selection.selectedIndex
@@ -47,17 +47,28 @@ const currentStack = computed(() => {
   return filter.stackGroups.find((g) => g.members.includes(i)) ?? null
 })
 const canCycleStack = computed(() => (currentStack.value?.members.length ?? 0) > 1)
-/** 当前激活成员在组内的序号（1 起；按钮文案「格式 1/2」） */
-const stackPosText = computed(() => {
-  const i = selection.selectedIndex
+/** 堆叠组是否多格式（同画面 JPG/RAW 等）；单格式 = 连拍多帧 */
+const stackMultiFormat = computed(() => {
   const g = currentStack.value
-  if (!g || i === null) return ''
-  return `${g.members.indexOf(i) + 1}/${g.members.length}`
+  if (!g) return false
+  return new Set(g.members.map((i) => captures.items[i].primaryFormat)).size > 1
 })
-function cycleStack() {
-  const i = selection.selectedIndex
-  if (i === null) return
-  selection.cycleStackFrom(i, 1)
+/**
+ * 成员分段选择器标签：多格式组显示格式徽标（JPG / CR3…，一眼区分点哪个），
+ * 单格式连拍组显示组内帧号（1 起）。
+ */
+function stackMemberLabel(m: number): string {
+  const g = currentStack.value
+  if (!g) return ''
+  if (stackMultiFormat.value) return formatBadgeLabel(captures.items[m])
+  return String(g.members.indexOf(m) + 1)
+}
+/** 点击分段选择器直达激活成员（与网格成员带同语义；组位置稳定，key 覆盖不失效） */
+function activateStackMember(m: number) {
+  const g = currentStack.value
+  if (!g || m === selection.selectedIndex) return
+  filter.setStackActive(g.key, m)
+  selection.select(m)
 }
 
 /** 显示尺寸与定位（渲染公式 = previewMath，与 GPUI 一致） */
@@ -545,7 +556,7 @@ function onImageContextMenu(e: MouseEvent) {
         <!-- 圆 / 矩形区域：中心或左上角定位 -->
         <div
           v-if="focusOverlay.shape !== 'Point'"
-          class="pointer-events-none absolute border-2 border-primary bg-primary/10"
+          class="pointer-events-none absolute border-2 border-focus bg-focus/10"
           :class="focusOverlay.shape === 'Circle' ? 'rounded-full' : ''"
           :style="{
             left: `${focusOverlay.cx}px`,
@@ -568,19 +579,19 @@ function onImageContextMenu(e: MouseEvent) {
         >
           <!-- 四臂线相对容器原点（= 焦点中心）内联定位 -->
           <div
-            class="absolute bg-primary"
+            class="absolute bg-focus"
             :style="{ left: '0', top: '0', width: '2px', height: `${FOCUS_CROSS_ARM}px`, transform: 'translate(-50%, -100%)' }"
           />
           <div
-            class="absolute bg-primary"
+            class="absolute bg-focus"
             :style="{ left: '0', top: '0', width: '2px', height: `${FOCUS_CROSS_ARM}px`, transform: 'translate(-50%, 0)' }"
           />
           <div
-            class="absolute bg-primary"
+            class="absolute bg-focus"
             :style="{ left: '0', top: '0', width: `${FOCUS_CROSS_ARM}px`, height: '2px', transform: 'translate(-100%, -50%)' }"
           />
           <div
-            class="absolute bg-primary"
+            class="absolute bg-focus"
             :style="{ left: '0', top: '0', width: `${FOCUS_CROSS_ARM}px`, height: '2px', transform: 'translate(0, -50%)' }"
           />
         </div>
@@ -610,9 +621,9 @@ function onImageContextMenu(e: MouseEvent) {
         }"
       />
 
-      <!-- 工具条（stop 冒泡：不触发拖拽/框选/缩放） -->
+      <!-- 工具条（stop 冒泡：不触发拖拽/框选/缩放）；胶囊形浮条，半透明 + 毛玻璃 -->
       <div
-        class="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-md border bg-card/90 p-1 shadow-md backdrop-blur"
+        class="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full border bg-card/85 py-1 pr-2 pl-1 shadow-lg backdrop-blur-md"
         @pointerdown.stop
         @wheel.stop
       >
@@ -638,16 +649,27 @@ function onImageContextMenu(e: MouseEvent) {
           <ScanIcon />
           1:1
         </Button>
-        <Button
+        <!-- 堆叠成员分段选择器：多格式组显示格式徽标（JPG/CR3…）、连拍组显示帧号；
+             点击直达目标成员，替代原「格式 n/m」循环按钮（要点多次才知道有什么） -->
+        <div
           v-if="canCycleStack"
-          size="sm"
-          variant="ghost"
-          :title="`切换堆叠内格式（${stackPosText}，共 ${currentStack!.members.length} 个文件）`"
-          @click="cycleStack"
+          class="flex max-w-56 items-center gap-0.5 overflow-x-auto rounded-full bg-element/80 p-0.5 [scrollbar-width:none]! [&::-webkit-scrollbar]:hidden"
         >
-          <ArrowLeftRightIcon />
-          格式 {{ stackPosText }}
-        </Button>
+          <button
+            v-for="m in currentStack!.members"
+            :key="m"
+            class="flex h-6 min-w-6 shrink-0 cursor-pointer items-center justify-center rounded-full px-1.5 text-[11px] leading-none font-medium transition-colors"
+            :class="
+              m === selection.selectedIndex
+                ? 'bg-primary text-primary-foreground shadow-sm'
+                : 'text-muted-foreground hover:bg-element-hover hover:text-foreground'
+            "
+            :title="displayName(captures.items[m])"
+            @click="activateStackMember(m)"
+          >
+            {{ stackMemberLabel(m) }}
+          </button>
+        </div>
         <Button
           size="sm"
           :variant="preview.bboxVisible ? 'secondary' : 'ghost'"
@@ -656,6 +678,15 @@ function onImageContextMenu(e: MouseEvent) {
         >
           <ScanLineIcon />
           检测框
+        </Button>
+        <Button
+          size="sm"
+          :variant="preview.focusVisible ? 'secondary' : 'ghost'"
+          title="对焦点（F）"
+          @click="preview.toggleFocus()"
+        >
+          <CrosshairIcon />
+          对焦点
         </Button>
         <Button size="sm" variant="ghost" title="返回网格（Esc/G）" @click="preview.closePreview()">
           <Grid2x2Icon />

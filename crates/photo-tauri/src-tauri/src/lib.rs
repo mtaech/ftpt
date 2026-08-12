@@ -764,7 +764,7 @@ fn list_bird_species() -> Result<Vec<String>, String> {
 #[specta::specta]
 async fn recognize_captures(app: AppHandle, paths: Vec<String>) -> Result<(), String> {
     // 守卫：已有识别任务进行中时拒绝并发（与 GPUI recognize_selected 一致）
-    let (cancel, folder_db, thumb_cache, thread_count, dir, generation, global_db, dir_str) = {
+    let (cancel, folder_db, thumb_cache, thread_count, dir, generation, global_db, dir_str, use_focus) = {
         let st = app.state::<Mutex<AppState>>();
         let mut st = st.lock().expect("AppState 锁中毒");
         if st.recognition_running {
@@ -785,12 +785,14 @@ async fn recognize_captures(app: AppHandle, paths: Vec<String>) -> Result<(), St
             st.scan_generation,
             st.global_db.clone(),
             dir.to_string_lossy().to_string(),
+            // 识别鸟体定位来源：Focus = 优先相机对焦点 ROI（无对焦点回退 YOLO）
+            st.config.detection_source == photo_config::DetectionSource::Focus,
         )
     };
 
-    // 构建目标列表：path（主文件绝对路径）→ (rel_path, Capture, date_taken)；
+    // 构建目标列表：path（主文件绝对路径）→ (rel_path, Capture, focus_point, date_taken)；
     // 找不到对应 CaptureMeta 的路径跳过（文件可能已被移动/删除）
-    let targets: Vec<(String, String, photo_domain::Capture, Option<String>)> = {
+    let targets: Vec<(String, String, photo_domain::Capture, Option<photo_domain::FocusPoint>, Option<String>)> = {
         let st = app.state::<Mutex<AppState>>();
         let st = st.lock().expect("AppState 锁中毒");
         paths
@@ -802,6 +804,7 @@ async fn recognize_captures(app: AppHandle, paths: Vec<String>) -> Result<(), St
                     path.clone(),
                     rel,
                     build_capture_from_meta(meta),
+                    meta.focus_point,
                     meta.date_taken.clone(),
                 ))
             })
@@ -842,6 +845,7 @@ async fn recognize_captures(app: AppHandle, paths: Vec<String>) -> Result<(), St
             let generation = &generation_work;
             let targets = &targets;
             let dir_str = &dir_str;
+            let use_focus = &use_focus;
 
             let handles: Vec<_> = targets
                 .chunks(chunk_size)
@@ -849,7 +853,7 @@ async fn recognize_captures(app: AppHandle, paths: Vec<String>) -> Result<(), St
                     s.spawn(move || {
                         // 每线程懒加载自己的 Recognizer（DirectML 初始化 2-5s 一次性）
                         let mut recognizer = build_recognizer();
-                        for (path, rel, cap, date_taken) in chunk {
+                        for (path, rel, cap, focus_point, date_taken) in chunk {
                             // 取消令牌：逐张检查，置位即提前退出
                             if cancel.load(Ordering::Relaxed) {
                                 break;
@@ -861,9 +865,11 @@ async fn recognize_captures(app: AppHandle, paths: Vec<String>) -> Result<(), St
                             let thumb_bytes = cache.as_ref().and_then(|c| {
                                 c.get_or_generate(primary, 2048, Some(cancel.as_ref())).ok()
                             });
+                            // 焦点优先设置：有对焦点 → 走 ROI 路径跳过 YOLO；无对焦点 → 回退全图 YOLO
+                            let focus_override = if *use_focus { *focus_point } else { None };
                             let rec_result = match &mut recognizer {
                                 Ok(rec) => rec
-                                    .recognize_with_thumbnail(cap, thumb_bytes.as_deref(), None)
+                                    .recognize_with_thumbnail(cap, thumb_bytes.as_deref(), focus_override, None)
                                     .map_err(|e| format!("识别失败: {e}")),
                                 Err(e) => Err(e.clone()),
                             };
@@ -1935,6 +1941,8 @@ fn set_app_config(state: State<'_, Mutex<AppState>>, config: AppConfig) -> Resul
         right_panel_width: config.right_panel_width.clamp(200, 480),
         font_family: config.font_family,
         recognition_thread_count: config.recognition_thread_count.clamp(1, 4),
+        // 识别鸟体定位来源：两态枚举（Yolo/Focus），无钳制直接透传（下次批量识别生效）
+        detection_source: config.detection_source,
         // 布尔开关无钳制范围，直接透传（决定下次扫描单层/递归）
         include_subdirectories: config.include_subdirectories,
         // 导出预设：质量钳制 1-100、长边 0 → None（ExportPreset::clamped）

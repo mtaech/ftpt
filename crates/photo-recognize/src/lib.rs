@@ -34,7 +34,7 @@ use std::path::Path;
 use ort::ep;
 use ort::session::Session;
 
-use photo_domain::{BBox, Capture, Recognition};
+use photo_domain::{BBox, Capture, FocusPoint, Recognition};
 
 pub use catalog::CatalogDb;
 pub use catalog::ClassificationOutput;
@@ -177,9 +177,13 @@ impl Recognizer {
     ///
     /// 业务失败体现在 `Recognition.status`，`Err` 仅用于模型/库不可用等系统性故障。
     /// 对应 pica `recognition_pipeline_service.dart:recognize()`。
+    ///
+    /// `focus_override`：相机对焦点（`Some` = 跳过 YOLO 检测，用对焦点 ROI 直接
+    /// 分类，对齐 [`Recognizer::recognize_region`] 的框选语义；`None` = 全图 YOLO）。
     pub fn recognize(
         &mut self,
         capture: &Capture,
+        focus_override: Option<FocusPoint>,
         on_progress: Option<&pipeline::ProgressCallback>,
     ) -> Result<Recognition, RecognizeError> {
         pipeline::recognize_capture(
@@ -188,6 +192,7 @@ impl Recognizer {
             &mut self.eye_session,
             &self.catalog,
             capture,
+            focus_override,
             on_progress,
         )
     }
@@ -202,6 +207,7 @@ impl Recognizer {
         &mut self,
         capture: &Capture,
         thumb_bytes: Option<&[u8]>,
+        focus_override: Option<FocusPoint>,
         on_progress: Option<&pipeline::ProgressCallback>,
     ) -> Result<Recognition, RecognizeError> {
         pipeline::recognize_capture_with_thumbnail(
@@ -211,6 +217,7 @@ impl Recognizer {
             &self.catalog,
             capture,
             thumb_bytes,
+            focus_override,
             on_progress,
         )
     }
@@ -587,7 +594,7 @@ mod tests {
             }],
         };
 
-        let result = recognizer.recognize(&capture, None);
+        let result = recognizer.recognize(&capture, None, None);
         match result {
             Ok(rec) => {
                 // 任何结果都是可接受的——只要不 panic 就是成功

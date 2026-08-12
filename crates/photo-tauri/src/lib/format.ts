@@ -89,6 +89,15 @@ export function formatBadgeLabel(c: CaptureMeta): string {
   }
 }
 
+/**
+ * 格式名（RAW 不包裹前缀）：JPG/PNG/CR3/NEF/TIFF/OTHER。
+ * 用于网格缩略图左上徽标与信息面板 Hero 格式徽标（用户偏好直读扩展名）；
+ * 需要 RAW(CR3) 全称的场景（堆叠分段选择器/成员带格式标签）仍用 formatBadgeLabel。
+ */
+export function formatName(c: CaptureMeta): string {
+  return formatBadgeLabel(c).replace(/^RAW\((.*)\)$/, '$1')
+}
+
 /** 是否非图片格式（视频等）：网格不渲染缩略图，只居中显示格式徽标 */
 export function isOtherFormat(c: CaptureMeta): boolean {
   return c.primaryFormat.toUpperCase() === 'OTHER'

@@ -17,6 +17,7 @@ const DEFAULT_CONFIG: AppConfig = {
   rightPanelWidth: 200,
   fontFamily: 'Segoe UI',
   recognitionThreadCount: 2,
+  detectionSource: 'Yolo',
   includeSubdirectories: false,
   stackMode: 'ByTime',
   gridColumns: 4,
@@ -36,6 +37,8 @@ export const useConfigStore = defineStore('config', {
     fontFamily: (s) => s.config.fontFamily ?? 'Segoe UI',
     /** 识别线程数（回退 2） */
     recognitionThreadCount: (s) => s.config.recognitionThreadCount ?? 2,
+    /** 识别鸟体定位来源（回退 Yolo = 全图 YOLO 检测，对齐 photo-config 默认） */
+    detectionSource: (s) => s.config.detectionSource ?? 'Yolo',
     /** 缩略图尺寸 px（回退 220，对齐 photo-config 默认） */
     thumbnailSize: (s) => s.config.thumbnailSize ?? 220,
     /** 扫描包含子目录开关（回退 false = 单层扫描，对齐 photo-config 默认） */

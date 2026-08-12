@@ -52,7 +52,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 
 ### 核心数据流
 
-1. **scanner** → `Vec<Capture>`：walkdir 单层（`max_depth(1)`）扫描，**每个图片文件一个 Capture**（扫描模型不配对）；网格**显示层**按配置堆叠模式分组（`src/lib/stacks.ts`：ByTime 同组照片堆叠按拍摄时间 ≤2s 聚类、ByFileName 同 stem 合并、None 关闭；主格式默认 JPEG 优先，×N 徽标点击切换激活格式，方向键在堆叠组间导航）；扫描期不做任何筛选，识别状态等元数据在扫描后才从 folder_db 读取，全部筛选由前端 `src/lib/filter.ts` 在 CaptureMeta 层面执行
+1. **scanner** → `Vec<Capture>`：walkdir 单层（`max_depth(1)`）扫描，**每个图片文件一个 Capture**（扫描模型不配对）；网格**显示层**按配置堆叠模式分组（`src/lib/stacks.ts`：ByTime 同组照片堆叠按拍摄时间 ≤2s 聚类、ByFileName 同 stem 合并、None 关闭；主格式默认 JPEG 优先，堆叠组底部成员缩略图带点击直达激活格式、语义徽标区分同画面多格式/连拍，方向键在堆叠组间导航、Q/E 组内切换）；扫描期不做任何筛选，识别状态等元数据在扫描后才从 folder_db 读取，全部筛选由前端 `src/lib/filter.ts` 在 CaptureMeta 层面执行
 2. **Capture** → **exif**：提取 EXIF（统一走 `ExifProvider` 抽象：**exiftool 主后端**（`-stay_open` 长驻进程 + JSON，覆盖 JPEG/RAW 及厂商私有对焦点），**rawlib 回退后端**（RAW 专用，Fuji FocusPixel / Nikon AFInfo blob 本地解析）；kamadak-exif 已移除）；`CaptureMeta::enrich_with_exif` 回填摘要（类型 `ExifMetadata` 定义在 domain，提取机械在 engine）
 3. **Capture** → **ops**：删除（回收站/永久）/移动（跨设备 copy+delete 回退）/复制/批量重命名
 4. **SourceFile** → **thumbnail**：磁盘缓存 JPEG 字节（缓存键 = `DefaultHasher(path+size)` 的 `{:016x}.jpg`，目录 = 照片目录 `.pt/thumbs`，每文件夹独立）；RAW 完整解码（half_size 预览选项）母版按 `u32::MAX` 键存一份，网格缩略图/预览/全分辨率均从母版 DCT 派生（不落盘）；内嵌 JPEG 长边 ≥2048（RW2/DNG 大内嵌）时直接用作母版省解码；常规图优先 EXIF 内嵌缩略图
@@ -210,7 +210,7 @@ async mutateOptimistic(paths, apply, remote) {
 ### Keybinding 层
 
 - `src/keymap.ts`：`installKeymap(handlers)` 全局安装；按键 → action 名解析（焦点上下文隔离 + 修饰键精确匹配），App.vue 提供 `KeymapHandlers` 表接真实 store 调用；`BINDINGS` 导出供快捷键参考页
-- 键位全集对齐 GPUI layout.rs：1-5/0 评分、6-9 色标、P/X/U 旗标、B/Ctrl+B/Ctrl+Shift+B 识别、V 检测框、G 视图切换、方向键/Home/End、Delete 删除、Ctrl+A/D 选择、Esc（设置 > 批量识别取消 > 对比退出 > 框选清除 > 预览退出）、F5 重扫、Ctrl+[ / Ctrl+] 面板开关；**前端新增**：C 对比模式（多选 2–4 张 / 连拍组前 4 张，对比内 ←/→ 移聚焦格、1-5 评分聚焦格、Esc/G 退出）、T 鸟种统计、S 幻灯片（空格暂停）、O 剪切警告叠加（预览）、Ctrl+Z 撤销批量操作（移动/复制/重命名）、Ctrl+6 紫色标签、=/- 缩放（预览/对比）
+- 键位全集对齐 GPUI layout.rs：1-5/0 评分、6-9 色标、P/X/U 旗标、B/Ctrl+B/Ctrl+Shift+B 识别、V 检测框、G 视图切换、方向键/Home/End、Delete 删除、Ctrl+A/D 选择、Esc（设置 > 批量识别取消 > 对比退出 > 框选清除 > 预览退出）、F5 重扫、Ctrl+[ / Ctrl+] 面板开关；**前端新增**：C 对比模式（多选 2–4 张 / 连拍组前 4 张，对比内 ←/→ 移聚焦格、1-5 评分聚焦格、Esc/G 退出）、T 鸟种统计、S 幻灯片（空格暂停）、O 剪切警告叠加（预览）、Ctrl+Z 撤销批量操作（移动/复制/重命名）、Ctrl+6 紫色标签、Q/E 堆叠内切换成员（网格）、=/- 缩放（预览/对比）
 - 排序含 EyeSharpness（眼锐度，T0 批次）：CaptureMeta.eye_sharpness 经 enrich_with_recognition 填充，比较器在 filter.ts（None 排最前）；连拍分组纯前端（lib/burst.ts，相邻 dateTaken ≤2s 成组，仅登记 size≥2）
 
 ### 调试：真机 WebView2 DOM 验证
@@ -224,5 +224,6 @@ kimi_cu 的 UIA 树看不到 WebView2 DOM；无 vision 模型时用 CDP：
 
 ## 近期修复记录
 
+- **2026-08-12 堆叠显示改造（A+E）**：网格堆叠从「×N 徽标循环点击」改为 cell 底部成员缩略图带（点击直达激活+选中，长连拍横向滚动），新增语义徽标区分同画面多格式（Copy 蓝）/连拍多帧（Layers 橙），连拍徽标仅在单成员组显示避免重复；新增 Q/E 组内切换激活成员（网格态）；修复 `openPath` 同目录早退导致目录为空（mock 无后端自动扫描/启动自愈后扫描失败）时无法重扫的死路
 - **2026-08-10 迁移 wave 1-3**：Tauri v2 迁移（计划见 git 历史 `docs/tauri-migration-plan.md`）；GPUI 版删除；specta 真实绑定导出（bin 绕开 harness 0xc0000139）；启动自愈（自动恢复目录事件早于挂载）；主题默认 Light；mock 层 batchOpExecute detached `this` 修复
 - 历史（GPUI 版时代，引擎层均保留）：copy_recognitions_to 索引错位修复、批量操作 ADR 0006 重构（筛选驱动）、全分辨率 DCT 降采样、RAW 母版缓存、Worker panic 兜底（前端 store 状态机继承）、OTHER 格式徽标、调整功能 ADR 0007（无 crop）

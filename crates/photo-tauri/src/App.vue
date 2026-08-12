@@ -9,9 +9,9 @@ import {
   FolderOpenIcon,
   GalleryVerticalEndIcon,
   ImageIcon,
-  ImportIcon,
-  LayoutGridIcon,
   ListChecksIcon,
+  PanelLeftIcon,
+  PanelLeftOpenIcon,
   RefreshCwIcon,
   ScanSearchIcon,
   SettingsIcon,
@@ -40,6 +40,7 @@ import { useRecognitionStore } from '@/stores/recognition'
 import { useConfigStore } from '@/stores/config'
 import { useStatsStore } from '@/stores/stats'
 import { useBatchStore } from '@/stores/batch'
+import { useImportDialogStore } from '@/stores/importDialog'
 import { installKeymap, type KeymapHandlers } from '@/keymap'
 import { zoomHost } from '@/lib/zoomHost'
 import { deleteCaptures, undoBatchOperation } from '@/lib/ipc'
@@ -62,8 +63,8 @@ const leftTab = ref('dir')
 const rightPanelVisible = ref(true)
 /** 设置弹窗开关（顶栏齿轮按钮打开、Esc 分支关闭，v-model 传给 SettingsModal） */
 const settingsOpen = ref(false)
-/** 导入弹窗开关（顶栏「导入」按钮打开，×/Esc/遮罩关闭） */
-const importOpen = ref(false)
+/** 导入弹窗显隐（store 驱动：文件树 tab「导入」按钮打开，×/Esc/遮罩关闭） */
+const importDialog = useImportDialogStore()
 
 /**
  * 标记键目标路径：对比模式（视图态）作用于聚焦格（单张），幻灯片态作用于
@@ -252,6 +253,16 @@ const keymapHandlers: KeymapHandlers = {
   },
   first: () => selection.moveToStack(0),
   last: () => selection.moveToStack(selection.stackCount - 1),
+  // 堆叠：Q/E 在组内循环切换激活成员并选中（E=下一个 Q=上一个；网格态，
+  // 预览/对比/幻灯片/统计下 no-op——这些视图有各自的 Q/E 需求空间，避免误触）。
+  stackPrev: () => {
+    if (preview.isPreview || preview.isCompare || preview.isSlideshow || preview.isStats) return
+    if (selection.selectedIndex !== null) selection.cycleStackFrom(selection.selectedIndex, -1)
+  },
+  stackNext: () => {
+    if (preview.isPreview || preview.isCompare || preview.isSlideshow || preview.isStats) return
+    if (selection.selectedIndex !== null) selection.cycleStackFrom(selection.selectedIndex, 1)
+  },
   // 删除：Delete 单张/所选进回收站，无确认（对齐 GPUI layout.rs Delete 键）。
   // 后端 delete_captures 删除后 emit scan:done，captures store 自动 reload，这里不重复拉取；
   // 对比模式下删聚焦格后对比集失效，直接退出对比。
@@ -388,23 +399,26 @@ function showPreview() {
   }
   toPreview()
 }
+
+/**
+ * 顶栏「统计」tab：从任意视图进统计（已统计态 no-op；
+ * 对比/幻灯片退出分支与 toggleStats 同语义，不引入新状态）。
+ */
+function showStats() {
+  if (preview.isStats) return
+  if (preview.isSlideshow) preview.closeSlideshow()
+  if (compare.active) compare.close()
+  preview.openStats()
+}
 </script>
 
 <template>
   <div class="flex h-screen flex-col overflow-hidden bg-background text-foreground">
     <!-- 顶栏（全宽，对齐 GPUI toolbar 置顶，高 44px）：左 = 操作按钮 + 目录名/计数；中央 = 网格/预览下划线 tab；右 = 扫描进度/刷新/设置 -->
     <header class="flex h-11 shrink-0 items-center gap-2 border-b bg-card px-2">
-      <!-- 左组：操作按钮 + 目录名（粗体截断，max-w 11rem）+ 计数（等宽 muted） -->
+      <!-- 左组：操作按钮 + 目录名（粗体截断，max-w 11rem）+ 计数（muted）。
+           打开/导入已收归左栏文件树 tab 操作区 -->
       <div class="flex min-w-0 flex-1 items-center gap-2">
-        <Button size="xs" class="shadow-none" :disabled="captures.scanning" @click="captures.openDirectory()">
-          <FolderOpenIcon data-icon="inline-start" />
-          打开目录
-        </Button>
-        <!-- 导入（T1 批次 ImportRebuild：SD 卡 → 按日期建目录 → 去重 → 复制/移动） -->
-        <Button size="xs" variant="ghost" @click="importOpen = true">
-          <ImportIcon data-icon="inline-start" />
-          导入
-        </Button>
         <!-- 批量操作：左栏 tab 切换（目录 / 批量，对齐右栏 tabs 模式） -->
         <Button
           size="xs"
@@ -419,7 +433,7 @@ function showPreview() {
           {{ dirName(captures.directory) }}
         </span>
         <span v-else class="truncate font-semibold text-muted-foreground">未打开目录</span>
-        <span v-if="captures.count > 0" class="shrink-0 font-mono text-xs text-muted-foreground tabular-nums">
+        <span v-if="captures.count > 0" class="shrink-0 text-xs text-muted-foreground tabular-nums">
           {{ captures.count }} 项
         </span>
       </div>
@@ -449,6 +463,17 @@ function showPreview() {
           预览
           <span class="absolute inset-x-0 bottom-0 h-0.5" :class="preview.isPreview ? 'bg-primary' : 'bg-transparent'" />
         </button>
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="preview.isStats"
+          class="relative flex h-full items-center px-3 text-sm transition-colors"
+          :class="preview.isStats ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'"
+          @click="showStats"
+        >
+          统计
+          <span class="absolute inset-x-0 bottom-0 h-0.5" :class="preview.isStats ? 'bg-primary' : 'bg-transparent'" />
+        </button>
       </div>
 
       <!-- 右组：扫描进度 + 刷新（outline 小按钮）+ 设置（ghost 吸最右） -->
@@ -474,18 +499,6 @@ function showPreview() {
           />
         </div>
       </div>
-        <!-- 网格密度：每行几张（2-5，网格即时重排；等价设置页同选项） -->
-        <label class="flex items-center gap-1 text-xs text-muted-foreground" title="每行图片数">
-          <span class="hidden xl:inline">每行</span>
-          <select
-            :value="configStore.gridColumns"
-            class="h-7 rounded-md border border-input bg-background px-1 text-xs outline-none"
-            aria-label="每行图片数"
-            @change="configStore.update({ gridColumns: Number(($event.target as HTMLSelectElement).value) })"
-          >
-            <option v-for="n in [2, 3, 4, 5]" :key="n" :value="n">{{ n }} 张</option>
-          </select>
-        </label>
         <!-- 刷新目录（对齐 GPUI toolbar refresh-btn；无目录/扫描中禁用，F5 同义） -->
         <Button
           size="icon-sm"
@@ -513,17 +526,20 @@ function showPreview() {
 
     <!-- 主区三栏：左 rail | 左栏 | 内容区 | 右栏 | 右 rail（对齐 GPUI layout.rs h_resizable） -->
     <div class="flex min-h-0 flex-1">
-      <!-- 左 Activity Rail：48px 竖排图标（对齐 GPUI RAIL_WIDTH；打开目录只保留顶栏主按钮，不重复） -->
-      <nav class="flex w-12 shrink-0 flex-col items-center gap-1 border-r bg-card pt-2">
+      <!-- 左 Activity Rail：48px 竖排图标（对齐 GPUI RAIL_WIDTH；打开目录在左栏文件树 tab 操作区，不重复）。
+           首按钮 = 左栏显隐（与右 rail 面板切换同款交互/样式） -->
+      <nav class="flex w-12 shrink-0 flex-col items-center gap-1 border-r bg-card pt-2" aria-label="左侧活动栏">
         <Button
           size="icon-sm"
           variant="ghost"
           class="text-muted-foreground hover:bg-accent"
-          title="浏览 / 网格"
-          :class="{ 'bg-accent text-accent-foreground': !preview.isPreview }"
-          @click="closeToGrid"
+          :title="sidebarVisible ? '隐藏侧栏 (Ctrl+[)' : '显示侧栏 (Ctrl+[)'"
+          :aria-pressed="sidebarVisible"
+          :class="{ 'bg-accent text-accent-foreground': sidebarVisible }"
+          @click="toggleLeftPanel"
         >
-          <LayoutGridIcon class="size-4" />
+          <PanelLeftIcon v-if="sidebarVisible" class="size-4" />
+          <PanelLeftOpenIcon v-else class="size-4" />
         </Button>
         <Button
           size="icon-sm"
@@ -553,10 +569,12 @@ function showPreview() {
       <!-- 内容区：筛选栏（仅 grid + 有目录）+ 空态/网格/预览 -->
       <main class="flex min-w-0 flex-1 flex-col">
         <!-- 筛选栏：仅网格视图 + 已有目录时显示（对齐 GPUI layout.rs 条件） -->
-        <FilterBar v-if="captures.directory" />
+        <FilterBar v-if="captures.directory && preview.isGrid" />
 
         <div class="min-h-0 flex-1">
-          <!-- 统计视图：全局鸟种索引（T1 批次；无目录也可看，Esc/G/退出按钮关闭） -->
+          <!-- 主区视图单链互斥：统计 → 空态 → 幻灯片 → 对比 → 预览 → 网格。
+               统计/空态优先于其余视图；无目录时非统计视图一律落到空态。
+               注意 v-if 链必须连续，否则 v-else 的 PhotoGrid 会在统计态下误渲染 -->
           <StatsView v-if="preview.isStats" />
           <!-- 空态：无目录时（对齐 GPUI layout.rs empty state；统计态优先于空态） -->
           <div
@@ -570,7 +588,7 @@ function showPreview() {
               打开目录
             </Button>
           </div>
-          <SlideshowView v-if="preview.isSlideshow" />
+          <SlideshowView v-else-if="preview.isSlideshow" />
           <CompareView v-else-if="preview.isCompare" />
           <PhotoPreview v-else-if="preview.isPreview" />
           <PhotoGrid v-else />
@@ -585,7 +603,7 @@ function showPreview() {
       />
 
       <!-- 右 Activity Rail：48px（对齐 GPUI right_rail.rs） -->
-      <RightRail :visible="rightPanelVisible" @toggle="toggleRightPanel" @stats="toggleStats" />
+      <RightRail :visible="rightPanelVisible" @toggle="toggleRightPanel" />
     </div>
 
     <!-- 底部状态栏 24px -->
@@ -594,8 +612,8 @@ function showPreview() {
     <ContextMenu />
     <!-- 设置弹窗（Teleport 到 body；齿轮按钮打开、Esc/×/遮罩关闭） -->
     <SettingsModal v-model:open="settingsOpen" />
-    <!-- 导入弹窗（顶栏「导入」按钮打开；选源 → 计划预览 → 执行） -->
-    <ImportDialog v-model:open="importOpen" />
+    <!-- 导入弹窗（文件树 tab「导入」按钮打开；选源 → 计划预览 → 执行） -->
+    <ImportDialog v-model:open="importDialog.open" />
     <!-- 导出弹窗（右键菜单「导出…」/ 批量面板「导出」打开；自身 store 管理显隐） -->
     <ExportDialog />
   </div>

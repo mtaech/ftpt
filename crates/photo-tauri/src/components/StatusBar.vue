@@ -100,7 +100,7 @@ watch(
     </div>
 
     <!-- 中段：项数 + 选中数（等宽字体，对齐 GPUI status_bar 计数区） -->
-    <div class="flex shrink-0 items-center gap-1 font-mono tabular-nums">
+    <div class="flex shrink-0 items-center gap-1 tabular-nums">
       <span>{{ captures.count }}</span>
       <span class="text-muted-foreground/70">项</span>
       <span class="text-muted-foreground/70">·</span>

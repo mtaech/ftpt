@@ -48,6 +48,9 @@ export type KeymapAction =
   | 'next'
   | 'first'
   | 'last'
+  // 堆叠（Q/E 组内切换激活成员，网格态）
+  | 'stackPrev'
+  | 'stackNext'
   // 文件操作
   | 'delete'
   // 撤销（Ctrl+Z：撤销最近一次批量移动/复制）
@@ -126,6 +129,9 @@ export const BINDINGS: readonly KeyBinding[] = [
   { key: 'right', ctrl: false, action: 'next' },
   { key: 'home', ctrl: false, action: 'first' },
   { key: 'end', ctrl: false, action: 'last' },
+  // 堆叠：Q/E 在组内循环切换激活成员（网格态；E=下一个 Q=上一个，对齐 ×N 点击循环语义）
+  { key: 'q', ctrl: false, action: 'stackPrev' },
+  { key: 'e', ctrl: false, action: 'stackNext' },
   // 删除：Delete（GPUI 不区分修饰键，(key, _) 通配）
   { key: 'delete', action: 'delete' },
   // 撤销批量操作：Ctrl+Z（shift: false 精确匹配，Ctrl+Shift+Z 不触发；对齐 b 键三态模式）

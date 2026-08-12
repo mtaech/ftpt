@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 右侧 Activity Rail：48px 宽，与左侧 rail 对称（对齐 GPUI right_rail.rs）。
-// 按钮：右侧信息面板切换 + 统计视图（T1 批次 SpeciesIndex）。
-import { BarChart3Icon, PanelRightIcon, PanelRightOpenIcon } from '@lucide/vue'
+// 按钮：右侧信息面板切换（统计视图已上移到顶栏 网格/预览/统计 tab）。
+import { PanelRightIcon, PanelRightOpenIcon } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 
 defineProps<{
@@ -10,7 +10,7 @@ defineProps<{
 }>()
 
 /** 切换右侧面板（App.vue 监听；等价 Ctrl+]） */
-const emit = defineEmits<{ toggle: []; stats: [] }>()
+const emit = defineEmits<{ toggle: [] }>()
 </script>
 
 <template>
@@ -29,16 +29,6 @@ const emit = defineEmits<{ toggle: []; stats: [] }>()
     >
       <PanelRightIcon v-if="visible" class="size-4" />
       <PanelRightOpenIcon v-else class="size-4" />
-    </Button>
-    <Button
-      size="icon-sm"
-      variant="ghost"
-      class="text-muted-foreground hover:bg-accent"
-      title="统计视图 (t)"
-      aria-label="统计视图"
-      @click="emit('stats')"
-    >
-      <BarChart3Icon class="size-4" />
     </Button>
   </nav>
 </template>

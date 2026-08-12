@@ -62,7 +62,7 @@ fn main() {
         eprintln!("  [{:>5.1}%] {}", p.value * 100.0, p.stage);
     };
     let result = recognizer
-        .recognize(&capture, Some(&progress))
+        .recognize(&capture, None, Some(&progress))
         .unwrap_or_else(|e| {
             eprintln!("识别过程系统故障: {e}");
             std::process::exit(1);

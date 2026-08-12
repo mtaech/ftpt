@@ -41,6 +41,22 @@ impl Default for StackMode {
     }
 }
 
+/// 识别鸟体定位来源：Yolo = 全图 YOLO 检测（默认，现状）；
+/// Focus = 优先用相机对焦点构造 ROI 直接分类（相机对焦位置先验可靠），
+/// 无对焦点的照片回退 YOLO 全图检测。
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum DetectionSource {
+    Yolo,
+    Focus,
+}
+
+impl Default for DetectionSource {
+    fn default() -> Self {
+        Self::Yolo
+    }
+}
+
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -60,6 +76,10 @@ pub struct AppConfig {
     /// 批量识别线程数（1-4）。低配设备减小，高配设备加大。默认 4（8 核以上 CPU）。
     #[serde(default = "default_recognition_threads")]
     pub recognition_thread_count: u32,
+    /// 识别鸟体定位来源（默认 Yolo = 全图 YOLO 检测；Focus = 优先相机对焦点 ROI，
+    /// 无对焦点时回退 YOLO）。枚举无钳制；改动后对下次批量识别生效。
+    #[serde(default)]
+    pub detection_source: DetectionSource,
     /// 导出预设列表（T1 批次：命名模板/长边/质量组合）。旧配置无此字段时为空。
     #[serde(default)]
     pub export_presets: Vec<ExportPreset>,
@@ -150,6 +170,7 @@ impl Default for AppConfig {
             right_panel_width: 200,
             font_family: default_font_family(),
             recognition_thread_count: default_recognition_threads(),
+            detection_source: DetectionSource::default(),
             include_subdirectories: false,
             export_presets: vec![ExportPreset::default()],
             stack_mode: StackMode::default(),
@@ -334,6 +355,21 @@ mod tests {
         assert_eq!(cfg.theme, Theme::Light);
         // 扫描子目录开关默认关闭（保持单层扫描现状）
         assert!(!cfg.include_subdirectories);
+        // 识别鸟体定位默认 YOLO 全图检测（焦点优先为新开关，默认不改变现状）
+        assert_eq!(cfg.detection_source, DetectionSource::Yolo);
+    }
+
+    #[test]
+    fn test_detection_source_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("PT.db");
+        let cfg = AppConfig {
+            detection_source: DetectionSource::Focus,
+            ..Default::default()
+        };
+        save_config(&path, &cfg).unwrap();
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(loaded.detection_source, DetectionSource::Focus);
     }
 
     #[test]

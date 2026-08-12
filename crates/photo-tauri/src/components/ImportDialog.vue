@@ -25,9 +25,23 @@ import {
   type ImportProgressPayload,
 } from '@/lib/ipc'
 import type { ImportCandidate, ImportDrive, ImportMode, ImportPlan, ImportResult } from '@/lib/bindings'
+import { useCapturesStore } from '@/stores/captures'
 
-/** 弹窗开关（App.vue v-model 控制：顶栏「导入」按钮打开、×/Esc/遮罩关闭） */
+/** 弹窗开关（store 驱动：文件树 tab「导入」按钮打开、×/Esc/遮罩关闭） */
 const open = defineModel<boolean>('open', { default: false })
+
+const captures = useCapturesStore()
+
+/** 顶部选项：导入（SD 卡 → 复制/移动）| 添加（选目录直接打开浏览，不动文件） */
+const tab = ref<'import' | 'add'>('import')
+
+/** 添加目录：系统选目录 → 直接打开（= 原「打开目录」逻辑），关闭弹窗 */
+async function addDirectory() {
+  const dir = await pickDirectory()
+  if (!dir) return
+  open.value = false
+  await captures.openPath(dir)
+}
 
 // ── 状态 ──────────────────────────────────────────────
 
@@ -100,6 +114,7 @@ const progressPct = computed(() => {
 /** 打开时：复位 + 加载驱动器列表（对齐 SettingsModal watch(open) 模式） */
 watch(open, (v) => {
   if (!v) return
+  tab.value = 'import'
   source.value = null
   scanning.value = false
   candidates.value = []
@@ -244,6 +259,48 @@ watch(toast, (t) => {
 
       <!-- 主体（可滚动） -->
       <div class="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
+        <!-- ── 选项：导入（复制/移动到库）| 添加（直接打开目录浏览）── -->
+        <div class="flex gap-1 rounded-md bg-element p-0.5">
+          <button
+            type="button"
+            class="flex-1 rounded-sm py-1 text-center text-xs transition-colors select-none"
+            :class="
+              tab === 'import'
+                ? 'bg-card font-medium text-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            "
+            :aria-pressed="tab === 'import'"
+            @click="tab = 'import'"
+          >
+            导入
+          </button>
+          <button
+            type="button"
+            class="flex-1 rounded-sm py-1 text-center text-xs transition-colors select-none"
+            :class="
+              tab === 'add'
+                ? 'bg-card font-medium text-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            "
+            :aria-pressed="tab === 'add'"
+            @click="tab = 'add'"
+          >
+            添加
+          </button>
+        </div>
+
+        <!-- ── 添加：选目录直接打开（不复制/移动文件）── -->
+        <div v-if="tab === 'add'" class="space-y-3">
+          <p class="text-xs leading-relaxed text-muted-foreground">
+            把本机已有目录加入照片库直接浏览，文件保持原位，不复制、不移动。
+          </p>
+          <Button size="sm" @click="addDirectory">
+            <FolderOpenIcon data-icon="inline-start" />
+            选择目录…
+          </Button>
+        </div>
+
+        <template v-else>
         <!-- ── 源位置：可移动盘列表 + 手动浏览 ── -->
         <div class="space-y-1.5">
           <div class="text-xs font-medium text-muted-foreground">源位置（SD 卡 / 目录）</div>
@@ -416,6 +473,7 @@ watch(toast, (t) => {
             </div>
           </div>
         </div>
+        </template>
       </div>
 
       <!-- 底部：目标目录提示（对齐 BatchOpsPanel 对话框描述风格） -->

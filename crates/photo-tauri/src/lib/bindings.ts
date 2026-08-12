@@ -269,6 +269,8 @@ export type AppConfig = {
 	fontFamily?: string,
 	/**  批量识别线程数（1-4）。低配设备减小，高配设备加大。默认 4（8 核以上 CPU）。 */
 	recognitionThreadCount?: number,
+	/**  识别鸟体定位来源（默认 Yolo = 全图 YOLO 检测；Focus = 优先相机对焦点 ROI，无对焦点时回退 YOLO）。 */
+	detectionSource?: DetectionSource,
 	/**  导出预设列表（T1 批次：命名模板/长边/质量组合）。旧配置无此字段时为空。 */
 	exportPresets?: ExportPreset[],
 	/**
@@ -686,6 +688,13 @@ export type SpeciesStat = {
  *  （拍摄时间差 ≤2s 的连拍合并，前端按 dateTaken 聚类）。默认 ByTime。
  */
 export type StackMode = "None" | "ByFileName" | "ByTime";
+
+/**
+ *  识别鸟体定位来源（photo-config DetectionSource；AppConfig.detectionSource）：
+ *  Yolo = 全图 YOLO 检测（默认）；Focus = 优先相机对焦点构造 ROI 直接分类，
+ *  无对焦点的照片回退 YOLO 全图检测。纯枚举不加 rename（对齐 StackMode 约定）。
+ */
+export type DetectionSource = "Yolo" | "Focus";
 
 /**
  *  侧栏目录树节点：name = 目录名，path = 完整路径，photoCount = 该目录**一层**

@@ -14,7 +14,7 @@ import { useConfigStore } from '@/stores/config'
 import { useCapturesStore } from '@/stores/captures'
 import { listSystemFonts } from '@/lib/ipc'
 import { BINDINGS, type KeyBinding, type KeymapAction } from '@/keymap'
-import type { StackMode, Theme } from '@/lib/bindings'
+import type { DetectionSource, StackMode, Theme } from '@/lib/bindings'
 
 /** 弹窗开关（App.vue v-model 控制：顶栏齿轮按钮打开、keymap Esc 分支 / 弹窗自身 × 关闭） */
 const open = defineModel<boolean>('open', { default: false })
@@ -62,6 +62,20 @@ const fontFamily = computed({
 const threadCount = computed({
   get: () => config.recognitionThreadCount,
   set: (v: number) => void config.update({ recognitionThreadCount: v }),
+})
+
+/**
+ * 识别鸟体定位来源（photo-config DetectionSource）：Yolo = 全图 YOLO 检测（默认，
+ * 多鸟场景不漏）；Focus = 优先相机对焦点 ROI 直接分类（相机对焦位置先验可靠），
+ * 无对焦点的照片自动回退 YOLO。改动即保存，下次批量识别生效。
+ */
+const DETECTION_SOURCES: { value: DetectionSource; label: string; desc: string }[] = [
+  { value: 'Yolo', label: 'YOLO 检测', desc: '全图 YOLO 检测鸟体（默认，多鸟不漏）' },
+  { value: 'Focus', label: '相机对焦点', desc: '优先用相机对焦点 ROI 分类，无对焦点回退 YOLO' },
+]
+const detectionSource = computed({
+  get: () => config.detectionSource,
+  set: (v: DetectionSource) => void config.update({ detectionSource: v }),
 })
 
 /** 网格每行图片数 2-5（下拉选项；固定列数后 cell 宽由容器自适应，即时重排） */
@@ -139,6 +153,8 @@ const ACTION_DESC: Record<KeymapAction, string> = {
   next: '下一张',
   first: '第一张',
   last: '最后一张',
+  stackPrev: '堆叠内上一个成员（网格）',
+  stackNext: '堆叠内下一个成员（网格）',
   delete: '删除到回收站',
   undoBatch: '撤销批量操作（移动/复制/重命名）',
   selectAll: '全选',
@@ -177,6 +193,7 @@ const SHORTCUT_SECTIONS: { title: string; actions: KeymapAction[] }[] = [
     actions: [
       'prev', 'next', 'first', 'last', 'toggleGridPreview', 'delete', 'undoBatch', 'refresh',
       'zoomIn', 'zoomOut', 'slideshow', 'slideshowTogglePlay', 'toggleClipping',
+      'stackPrev', 'stackNext',
     ],
   },
   {
@@ -396,6 +413,24 @@ const aboutRows = computed(
                   <option v-for="n in 4" :key="n" :value="n">{{ n }}</option>
                 </select>
               </div>
+
+              <div class="settings-row">
+                <div class="settings-row-label">
+                  <label for="settings-detection" class="text-sm font-medium">鸟体定位来源</label>
+                  <p class="mt-0.5 text-xs text-muted-foreground">
+                    {{ DETECTION_SOURCES.find((m) => m.value === detectionSource)?.desc }}
+                  </p>
+                </div>
+                <select
+                  id="settings-detection"
+                  v-model="detectionSource"
+                  class="settings-select w-32 shrink-0"
+                >
+                  <option v-for="m in DETECTION_SOURCES" :key="m.value" :value="m.value">
+                    {{ m.label }}
+                  </option>
+                </select>
+              </div>
             </section>
 
             <!-- 扫描 -->
@@ -438,7 +473,7 @@ const aboutRows = computed(
                   class="flex items-center justify-between px-3 py-1.5 text-sm"
                 >
                   <span class="text-muted-foreground">{{ ACTION_DESC[action] }}</span>
-                  <kbd class="rounded-md border border-border bg-muted px-2 py-0.5 font-mono text-xs text-foreground tabular-nums">
+                  <kbd class="rounded-md border border-border bg-muted px-2 py-0.5 text-xs text-foreground tabular-nums">
                     {{ shortcutRows(action).join(' / ') }}
                   </kbd>
                 </div>

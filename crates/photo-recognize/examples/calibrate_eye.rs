@@ -47,7 +47,7 @@ fn main() {
             }],
             primary_index: 0,
         };
-        let Ok(rec) = recognizer.recognize(&capture, None) else { continue };
+        let Ok(rec) = recognizer.recognize(&capture, None, None) else { continue };
         let (Some(score), Some(eye)) = (rec.eye_sharpness, rec.eye_bbox) else {
             eprintln!("  无眼 (status={:?})", rec.status);
             continue;

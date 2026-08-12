@@ -2,11 +2,11 @@
 // 网格：动态列数 + 行级虚拟化（绝对定位行，渲染可见行 ± 2 行缓冲，cell 高约 240px）。
 // 列数 = 容器宽 ÷ cell 宽（thumbnailSize + gap），实时跟随缩略图尺寸滑块与窗口宽度；
 // 行高跟随后端配置 thumbnailSize（cell = thumbnailSize + 56，对齐 GPUI grid.rs cell_size）。
-// cell = 缩略图 + 格式徽标(左上) + 旗标角标(右上) + 文件名/大小/星级 + 鸟种状态 chip + 色标条(底缘)。
+// cell = 缩略图 + 格式徽标(左上) + 旗标角标(右上) + 堆叠成员带(底部，多成员组：成员缩略图+语义徽标) + 文件名/大小/星级 + 鸟种状态 chip + 色标条(底缘)。
 // 选择交互：单击 select、Ctrl+单击 toggle、Shift+单击 selectRange、双击进预览。
 // thumb:ready → store 版本号递增 → img src ?v= 刷新。
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { CheckIcon, LayersIcon, XIcon } from '@lucide/vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch, type Component } from 'vue'
+import { CheckIcon, ChevronLeftIcon, ChevronRightIcon, CopyIcon, LayersIcon, XIcon } from '@lucide/vue'
 import { useCapturesStore } from '@/stores/captures'
 import { useFilterStore } from '@/stores/filter'
 import { useSelectionStore } from '@/stores/selection'
@@ -18,6 +18,7 @@ import {
   displayName,
   formatBadgeLabel,
   formatBytes,
+  formatName,
   isOtherFormat,
   ratingToNumber,
 } from '@/lib/format'
@@ -136,12 +137,14 @@ function thumbSrc(c: CaptureMeta): string {
   return ptimgUrl('thumb', c.primaryPath, captures.thumbVersions[c.primaryPath])
 }
 
-/** cell 选中态：选中集高亮（对齐 GPUI：2px primary 边框 + element-hover 底），锚点项额外 ring 供范围选择定位；
- * 未选中 = 透明边框占位（border-2 防跳动），悬停显示弱边框 */
+/** cell 选中态：选中集高亮。用 ring + 2px offset（box-shadow 不占布局，替代原 border-2 直描）——
+ *  选中框与 cell 边缘、相邻 cell 之间留出呼吸缝，不再紧贴旁边图片；
+ *  锚点项满色 ring 供范围选择定位，其余选中项 70% 透明度区分层级 */
 function cellClass(i: number): string {
   if (!selection.isSelected(i)) return 'border-transparent hover:border-border'
-  if (selection.anchorIndex === i) return 'border-primary bg-element-hover ring-1 ring-primary/60'
-  return 'border-primary bg-element-hover'
+  if (selection.anchorIndex === i)
+    return 'border-transparent bg-element-hover ring-2 ring-primary ring-offset-2 ring-offset-background'
+  return 'border-transparent bg-element-hover ring-2 ring-primary/70 ring-offset-2 ring-offset-background'
 }
 
 /** 连拍组信息（filter store 按显示序分组，key = captures.items 下标；仅 size≥2 的组） */
@@ -150,18 +153,48 @@ function burstOf(i: number) {
 }
 
 /**
- * 堆叠徽标 tooltip：成员格式列表（「点击切换格式」提示）。
- * 单成员组返回 undefined（无堆叠 UI）。
+ * 堆叠语义：按组内成员格式多样性区分两种堆叠——
+ * 多格式 = 同画面（JPG/RAW 等，Copy 图标 + 蓝）；单格式 = 连拍多帧（Layers 图标 + 橙）。
  */
-function stackTitle(g: StackGroup): string | undefined {
-  if (g.members.length < 2) return undefined
-  const names = g.members.map((i) => displayName(captures.items[i])).join(' / ')
-  return `${names}（点击切换格式）`
+function stackSemantic(g: StackGroup): { icon: Component; cls: string; label: string; multiFormat: boolean } {
+  const fmts = new Set(g.members.map((i) => captures.items[i].primaryFormat))
+  if (fmts.size > 1) return { icon: CopyIcon, cls: 'text-sky-300', label: '同画面多格式', multiFormat: true }
+  return { icon: LayersIcon, cls: 'text-amber-300', label: '连拍', multiFormat: false }
 }
 
-/** 堆叠徽标点击：循环切换该组激活成员并选中（±1；单成员组 no-op） */
-function cycleStackOf(g: StackGroup) {
-  selection.cycleStackFrom(g.active, 1)
+/** 堆叠语义徽标 tooltip：语义 + 成员数（成员细节见各缩略图 title） */
+function stackTitle(g: StackGroup): string {
+  const s = stackSemantic(g)
+  return `${s.label}（${g.members.length} 张）`
+}
+
+/** 成员缩略图点击：直达激活该成员并选中（替代原 ×N 循环点击） */
+function activateStackMember(g: StackGroup, m: number) {
+  if (m === g.active) return
+  filter.setStackActive(g.key, m)
+  selection.select(m)
+}
+
+/** 成员带滚轮横滚：纵向滚轮转横向滚动（无需 Shift；prevent 阻止冒泡触发网格整体滚动） */
+function onStripWheel(e: WheelEvent) {
+  const el = e.currentTarget as HTMLElement
+  el.scrollLeft += e.deltaY !== 0 ? e.deltaY : e.deltaX
+}
+
+/** 成员带滚动状态：组 key → 可否向左/右滚（驱动两端半透明按钮显隐；默认右可滚） */
+const stripScroll = reactive<Record<string, { l: boolean; r: boolean }>>({})
+
+/** 成员带滚动事件：刷新两端按钮显隐（1px 容差吸收小数滚动值） */
+function onStripScroll(key: string, e: Event) {
+  const el = e.currentTarget as HTMLElement
+  stripScroll[key] = { l: el.scrollLeft > 1, r: el.scrollLeft + el.clientWidth < el.scrollWidth - 1 }
+}
+
+/** 左右按钮点击：平滑滚动 3 个缩略图位（32px/位）；经 data-strip-scroll 找同带滚动容器 */
+function scrollStrip(e: MouseEvent, dir: 1 | -1) {
+  const strip = (e.currentTarget as HTMLElement).parentElement?.querySelector<HTMLElement>('[data-strip-scroll]')
+  if (!strip) return
+  strip.scrollBy({ left: dir * 96, behavior: 'smooth' })
 }
 
 /** 五星逐位彩虹色（GPUI RATING 数组原值）：第 i 颗已填星颜色，仅着色用 */
@@ -308,11 +341,11 @@ watch([rowCount, ROW_STEP], () => {
               class="size-full object-cover"
             />
 
-            <!-- 格式徽标（左上，半透明黑底，对齐 GPUI BADGE_BG） -->
+            <!-- 格式徽标（左上，半透明黑底，RAW 直读扩展名，对齐 GPUI BADGE_BG） -->
             <span
               class="absolute top-1 left-1 rounded-sm bg-black/70 px-1 text-[10px] leading-4 text-white"
             >
-              {{ formatBadgeLabel(cell.c) }}
+              {{ formatName(cell.c) }}
             </span>
 
             <!-- 旗标角标（右上 18px 圆，Pick 绿底白勾 / Reject 红底白叉，对齐 GPUI flag 覆层） -->
@@ -327,24 +360,93 @@ watch([rowCount, ROW_STEP], () => {
               <XIcon v-else class="size-3 text-white" />
             </div>
 
-            <!-- 连拍组徽标（左下，半透明黑底，对齐格式/旗标徽标风格；仅 size≥2 显示） -->
+            <!-- 连拍组徽标（左下，仅单成员组：堆叠组的连拍语义由成员带+语义徽标表达，避免双徽标重复） -->
             <div
-              v-if="burstOf(cell.g.active)"
+              v-if="cell.g.members.length === 1 && burstOf(cell.g.active)"
               class="absolute bottom-1 left-1 flex items-center gap-0.5 rounded-sm bg-black/70 px-1 text-[0.625rem] leading-4 text-white"
             >
               <LayersIcon class="size-3" />
               <span class="tabular-nums">{{ burstOf(cell.g.active)!.size }}</span>
             </div>
 
-            <!-- 堆叠徽标（右下，仅同 stem 多成员组；点击循环切换激活格式并选中） -->
-            <button
+            <!-- 堆叠成员带（多成员组）：底部横向成员缩略图 + 语义徽标（同画面多格式/连拍）。
+                 点击缩略图直达激活并选中；滚动条隐藏，成员多时两端浮出半透明左右按钮
+                 （滚到头自动隐藏），滚轮直接横滚。 -->
+            <div
               v-if="cell.g.members.length > 1"
-              class="absolute right-1 bottom-1 cursor-pointer rounded-sm bg-black/70 px-1 text-[10px] leading-4 text-white transition-colors hover:bg-black/90"
-              :title="stackTitle(cell.g)"
-              @click.stop="cycleStackOf(cell.g)"
+              class="absolute inset-x-0 bottom-0 flex items-center gap-0.5 bg-black/60 p-0.5 backdrop-blur-[2px]"
+              @dblclick.stop
             >
-              ×{{ cell.g.members.length }}
-            </button>
+              <!-- 左滚按钮（半透明，滚到最左隐藏） -->
+              <button
+                v-if="cell.g.members.length > 4"
+                class="z-10 flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-full bg-black/40 text-white/80 transition-opacity hover:bg-black/70 hover:text-white"
+                :class="stripScroll[cell.g.key]?.l ? 'opacity-100' : 'pointer-events-none opacity-0'"
+                title="向左滚动"
+                @click.stop="scrollStrip($event, -1)"
+              >
+                <ChevronLeftIcon class="size-3.5" />
+              </button>
+              <div
+                data-strip-scroll
+                class="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto p-[2px] [scrollbar-width:none]! [&::-webkit-scrollbar]:hidden"
+                @scroll="onStripScroll(cell.g.key, $event)"
+                @wheel.prevent="onStripWheel"
+              >
+                <button
+                  v-for="m in cell.g.members"
+                  :key="m"
+                  class="relative size-[28px] shrink-0 cursor-pointer overflow-hidden rounded transition-all"
+                  :class="
+                    m === cell.g.active
+                      ? 'ring-2 ring-primary'
+                      : 'opacity-75 hover:opacity-100 hover:ring-1 hover:ring-white/70'
+                  "
+                  :title="displayName(captures.items[m])"
+                  @click.stop="activateStackMember(cell.g, m)"
+                >
+                  <img
+                    v-if="!isOtherFormat(captures.items[m])"
+                    :src="thumbSrc(captures.items[m])"
+                    :alt="displayName(captures.items[m])"
+                    loading="lazy"
+                    draggable="false"
+                    class="size-full object-cover"
+                  />
+                  <div v-else class="flex size-full items-center justify-center bg-element">
+                    <span
+                      class="rounded-sm bg-card px-0.5 text-[8px] leading-3 font-medium text-primary"
+                    >
+                      {{ formatBadgeLabel(captures.items[m]) }}
+                    </span>
+                  </div>
+                  <span
+                    v-if="stackSemantic(cell.g).multiFormat"
+                    class="absolute bottom-0 left-0 rounded-sm bg-black/70 px-0.5 text-[8px] leading-3 text-white"
+                  >
+                    {{ formatBadgeLabel(captures.items[m]) }}
+                  </span>
+                </button>
+              </div>
+              <!-- 右滚按钮（半透明，滚到最右隐藏；初始默认可滚） -->
+              <button
+                v-if="cell.g.members.length > 4"
+                class="z-10 flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-full bg-black/40 text-white/80 transition-opacity hover:bg-black/70 hover:text-white"
+                :class="(stripScroll[cell.g.key]?.r ?? true) ? 'opacity-100' : 'pointer-events-none opacity-0'"
+                title="向右滚动"
+                @click.stop="scrollStrip($event, 1)"
+              >
+                <ChevronRightIcon class="size-3.5" />
+              </button>
+              <div
+                class="flex shrink-0 items-center gap-1 self-center rounded-full bg-white/10 px-1.5 py-0.5 text-[10px] leading-3"
+                :class="stackSemantic(cell.g).cls"
+                :title="stackTitle(cell.g)"
+              >
+                <component :is="stackSemantic(cell.g).icon" class="size-3" />
+                <span class="tabular-nums">{{ cell.g.members.length }}</span>
+              </div>
+            </div>
           </div>
 
           <!-- 信息区：文件名 / 大小+五星 / 鸟种状态行（常驻等高占位） -->
@@ -358,7 +460,7 @@ watch([rowCount, ROW_STEP], () => {
               </span>
             </div>
             <div class="flex items-center justify-between">
-              <span class="font-mono text-xs text-muted-foreground tabular-nums">
+              <span class="text-xs text-muted-foreground tabular-nums">
                 {{ formatBytes(cell.c.fileSize) }}
               </span>
               <!-- 五星（GPUI 逐位彩虹色）：第 i 颗已填星 = RATING_COLORS[i]，未填星 muted -->
@@ -388,7 +490,7 @@ watch([rowCount, ROW_STEP], () => {
                 </span>
                 <span
                   v-if="confPct(cell.c.birdConfidence) !== null"
-                  class="shrink-0 font-mono text-muted-foreground tabular-nums"
+                  class="shrink-0 text-muted-foreground tabular-nums"
                 >
                   {{ confPct(cell.c.birdConfidence)!.toFixed(1) }}%
                 </span>
