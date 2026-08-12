@@ -1947,8 +1947,8 @@ fn set_app_config(state: State<'_, Mutex<AppState>>, config: AppConfig) -> Resul
         stack_mode: config.stack_mode,
         // 网格每行图片数：钳制 2-5（下拉栏只出这 4 个选项，防手改配置越界）
         grid_columns: config.grid_columns.clamp(2, 5),
-        // 界面缩放比例：钳制 80-130%（下拉栏 90/100/110/120 选项）
-        ui_scale: config.ui_scale.clamp(80, 130),
+        // 界面缩放比例：钳制 80-200%（下拉栏 90/100/110/120/150/200 选项）
+        ui_scale: config.ui_scale.clamp(80, 200),
     };
     save_config(&st);
     Ok(())
