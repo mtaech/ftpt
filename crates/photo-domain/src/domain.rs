@@ -152,6 +152,8 @@ pub struct CaptureMeta {
     pub gps_lat: Option<f64>,
     /// GPS 经度（十进制度；西经为负；EXIF 无 GPS 为 None）
     pub gps_lon: Option<f64>,
+    /// 对焦点（归一化坐标；相机未记录为 None）
+    pub focus_point: Option<FocusPoint>,
     // --- 评分/色标/旗标字段（从文件夹数据库 xmp_meta 表填充） ---
     pub rating: Rating,
     pub color_label: ColorLabel,
@@ -228,6 +230,7 @@ impl CaptureMeta {
             image_height: None,
             gps_lat: None,
             gps_lon: None,
+            focus_point: None,
             rating: Rating::None,
             color_label: ColorLabel::None,
             flag: None,
@@ -252,6 +255,7 @@ impl CaptureMeta {
         self.image_width = exif.image_width;
         self.image_height = exif.image_height;
         self.date_taken = exif.date_time_original.clone();
+        self.focus_point = exif.focus_point;
         // GPS：EXIF 存 DMS 元组（南纬/西经符号已由提取层施加在度分量上），
         // 此处统一转十进制度供前端展示/地图链接
         self.gps_lat = exif.gps.latitude.map(|(d, m, s)| dms_to_decimal(d, m, s));
@@ -465,6 +469,69 @@ pub fn dms_to_decimal(deg: f64, min: f64, sec: f64) -> f64 {
     }
 }
 
+/// 对焦点形状（EXIF SubjectArea 三形态 / RAW makernotes 映射）
+/// 纯枚举不加 rename（对齐 Rating/ColorLabel 约定）：变体按原名序列化。
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum FocusShape {
+    /// 仅中心点（SubjectArea 1 值 / Fuji FocusPixel / Nikon·Panasonic AFPointSelected）
+    Point,
+    /// 圆形区域（SubjectArea 2 值：圆心 + 直径）
+    Circle,
+    /// 矩形区域（SubjectArea 3 值：左上角 + 宽高）
+    Rectangle,
+}
+
+/// 对焦点：归一化坐标（0–1，相对 orientation 修正后的显示方向），形状决定渲染形态。
+///
+/// 字段语义随形状变化：`Point` 时 (x, y) 为点位置、width/height 为 0；`Circle` 时
+/// (x, y) 为圆心、width = height = 直径；`Rectangle` 时 (x, y) 为左上角、width/height 为宽高。
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FocusPoint {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub shape: FocusShape,
+}
+
+impl FocusPoint {
+    /// 构造点形状焦点并夹紧到 0–1
+    pub fn point(x: f32, y: f32) -> Self {
+        Self {
+            x: x.clamp(0.0, 1.0),
+            y: y.clamp(0.0, 1.0),
+            width: 0.0,
+            height: 0.0,
+            shape: FocusShape::Point,
+        }
+    }
+
+    /// 构造圆形区域焦点（width/height 为直径）并夹紧到 0–1
+    pub fn circle(x: f32, y: f32, d: f32) -> Self {
+        Self {
+            x: x.clamp(0.0, 1.0),
+            y: y.clamp(0.0, 1.0),
+            width: d.clamp(0.0, 1.0),
+            height: d.clamp(0.0, 1.0),
+            shape: FocusShape::Circle,
+        }
+    }
+
+    /// 构造矩形区域焦点（(x, y) 为左上角）并夹紧到 0–1
+    pub fn rectangle(x: f32, y: f32, w: f32, h: f32) -> Self {
+        Self {
+            x: x.clamp(0.0, 1.0),
+            y: y.clamp(0.0, 1.0),
+            width: w.clamp(0.0, 1.0),
+            height: h.clamp(0.0, 1.0),
+            shape: FocusShape::Rectangle,
+        }
+    }
+}
+
 /// 完整的 EXIF 元数据
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -479,6 +546,8 @@ pub struct ExifMetadata {
     pub file_size: Option<u64>,
     pub color_space: Option<String>,
     pub orientation: Option<u16>,
+    /// 对焦点（EXIF SubjectArea / RAW makernotes；相机未记录为 None）
+    pub focus_point: Option<FocusPoint>,
 }
 
 // ============================================================================
@@ -861,6 +930,7 @@ mod tests {
             image_height: None,
             gps_lat: None,
             gps_lon: None,
+            focus_point: None,
             rating: Rating::None,
             color_label: ColorLabel::None,
             flag: None,
@@ -922,6 +992,62 @@ mod tests {
         assert!(meta.image_width.is_none());
         assert!(meta.image_height.is_none());
         assert!(meta.file_size.is_none());
+        assert!(meta.focus_point.is_none());
+    }
+
+    #[test]
+    fn test_focus_point_constructors_clamp_and_shape() {
+        // 点：width/height 为 0，坐标夹紧
+        let p = FocusPoint::point(1.5, -0.2);
+        assert_eq!(p.shape, FocusShape::Point);
+        assert_eq!(p.x, 1.0);
+        assert_eq!(p.y, 0.0);
+        assert_eq!(p.width, 0.0);
+        assert_eq!(p.height, 0.0);
+        // 圆：width = height = 直径
+        let c = FocusPoint::circle(0.3, 0.4, 0.2);
+        assert_eq!(c.shape, FocusShape::Circle);
+        assert_eq!(c.width, 0.2);
+        assert_eq!(c.height, 0.2);
+        // 矩形：左上角 + 宽高
+        let r = FocusPoint::rectangle(0.1, 0.1, 0.5, 0.3);
+        assert_eq!(r.shape, FocusShape::Rectangle);
+        assert_eq!(r.x, 0.1);
+        assert_eq!(r.width, 0.5);
+        assert_eq!(r.height, 0.3);
+    }
+
+    #[test]
+    fn test_focus_point_serde_roundtrip_camel_case() {
+        let r = FocusPoint::rectangle(0.1, 0.2, 0.5, 0.3);
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"shape\":\"Rectangle\""), "got: {json}");
+        let back: FocusPoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn test_enrich_with_exif_copies_focus_point() {
+        let mk = || CaptureMeta::from_capture(
+            &Capture {
+                base_name: "G".into(),
+                source_files: vec![],
+                primary_index: 0,
+            },
+            0,
+        );
+        let mut exif = ExifMetadata::default();
+        exif.image_width = Some(4000);
+        exif.image_height = Some(3000);
+        exif.focus_point = Some(FocusPoint::point(0.5, 0.5));
+        let mut cm = mk();
+        cm.enrich_with_exif(&exif);
+        assert_eq!(cm.focus_point, exif.focus_point);
+        // 无焦点记录时保持 None
+        exif.focus_point = None;
+        let mut cm2 = mk();
+        cm2.enrich_with_exif(&exif);
+        assert!(cm2.focus_point.is_none());
     }
 
     #[test]

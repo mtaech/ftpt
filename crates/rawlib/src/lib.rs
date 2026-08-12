@@ -13,7 +13,7 @@ pub mod parallel;
 pub mod raw_processor;
 
 // Public exports
-pub use exif::{extract_exif, extract_exif_parallel, ExifData, ExifError};
+pub use exif::{extract_exif, extract_exif_parallel, AfInfoData, ExifData, ExifError};
 pub use parallel::{
     process_files_parallel, ParallelConfig, ParallelProcessor, ProcessResult, ProcessingStats,
 };

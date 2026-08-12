@@ -30,6 +30,7 @@ export type KeymapAction =
   | 'recognizeAll'
   // 预览 / 视图
   | 'toggleBbox'
+  | 'toggleFocus'
   | 'toggleClipping'
   | 'toggleGridPreview'
   // 缩放（= 放大 / - 缩小；预览/对比态生效，网格态 no-op）
@@ -103,6 +104,8 @@ export const BINDINGS: readonly KeyBinding[] = [
   { key: 'b', ctrl: true, shift: true, action: 'recognizeAll' },
   // 预览：V 检测框开关
   { key: 'v', ctrl: false, action: 'toggleBbox' },
+  // 预览：F 对焦点叠加开关（仅预览态生效，独立于 V 检测框）
+  { key: 'f', ctrl: false, action: 'toggleFocus' },
   // 剪切警告叠加：O 开关（红 = 高光溢出、蓝 = 死黑；仅预览态生效）
   { key: 'o', ctrl: false, action: 'toggleClipping' },
   // 视图：G 网格/预览切换

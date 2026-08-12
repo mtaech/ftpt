@@ -189,6 +189,34 @@ extern "C" {
     pub fn libraw_get_iwidth(data: *mut libraw_data_t) -> c_int;
     /// 获取图像高度
     pub fn libraw_get_iheight(data: *mut libraw_data_t) -> c_int;
+
+    // === 对焦点（C shim：focus_point.c） ===
+    /// 读取 Fuji makernotes 对焦点像素坐标（相对未旋转传感器图；无记录返回 0）
+    pub fn rawlib_get_focus_pixel(
+        data: *mut libraw_data_t,
+        out_x: *mut c_ushort,
+        out_y: *mut c_ushort,
+    ) -> c_int;
+    /// 读取 makernotes AFInfo/AFInfo2 原始 blob（Nikon/Panasonic；无记录返回 0）
+    pub fn rawlib_get_afinfo(
+        data: *mut libraw_data_t,
+        out_tag: *mut libc::c_uint,
+        out_order: *mut libc::c_short,
+        out_version: *mut libc::c_uint,
+        out_len: *mut libc::c_uint,
+        out_buf: *mut c_uchar,
+        buf_cap: libc::c_uint,
+    ) -> c_int;
+
+    // === Panasonic AFPointPosition（C shim：focus_point.c 回调捕获） ===
+    /// 分配 per-call 回调 context（无全局状态，支持并行提取）
+    pub fn rawlib_pan_ctx_alloc() -> *mut libc::c_void;
+    /// 释放回调 context
+    pub fn rawlib_pan_ctx_free(ctx: *mut libc::c_void);
+    /// 注册 Panasonic makernotes 回调（必须在 open 之前调用）
+    pub fn rawlib_panasonic_af_init(data: *mut libraw_data_t, ctx: *mut libc::c_void);
+    /// open 之后取归一化坐标（0–1）；无记录返回 0
+    pub fn rawlib_panasonic_af_get(ctx: *mut libc::c_void, out_x: *mut libc::c_double, out_y: *mut libc::c_double) -> c_int;
 }
 
 // === LibRaw 初始化标志常量 ===

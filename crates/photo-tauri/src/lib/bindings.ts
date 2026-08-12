@@ -276,6 +276,8 @@ export type AppConfig = {
 	 *  布尔字段无需钳制；改动后需重新扫描生效（scan 编排处按此值选单层/递归）。
 	 */
 	includeSubdirectories?: boolean,
+	/**  网格堆叠模式（默认 ByTime = 同组照片堆叠；旧配置无此字段时回退默认）。 */
+	stackMode?: StackMode,
 };
 
 /**  检测框：归一化坐标 [x1, y1, x2, y2]（0–1，相对图像宽高） */
@@ -396,6 +398,8 @@ export type CaptureMeta = {
 	gpsLat: number | null,
 	/**  GPS 经度（十进制度；西经为负；EXIF 无 GPS 为 None） */
 	gpsLon: number | null,
+	/**  对焦点（归一化坐标；相机未记录为 None） */
+	focusPoint: FocusPoint | null,
 	rating: Rating,
 	colorLabel: ColorLabel,
 	flag: Flag | null,
@@ -455,6 +459,32 @@ export type ExportProgress = {
 
 /**  Pick/Reject 旗标 */
 export type Flag = "Pick" | "Reject";
+
+/**
+ *  对焦点：归一化坐标（0–1，相对 orientation 修正后的显示方向），形状决定渲染形态。
+ * 
+ *  字段语义随形状变化：`Point` 时 (x, y) 为点位置、width/height 为 0；`Circle` 时
+ *  (x, y) 为圆心、width = height = 直径；`Rectangle` 时 (x, y) 为左上角、width/height 为宽高。
+ */
+export type FocusPoint = {
+	x: number | null,
+	y: number | null,
+	width: number | null,
+	height: number | null,
+	shape: FocusShape,
+};
+
+/**
+ *  对焦点形状（EXIF SubjectArea 三形态 / RAW makernotes 映射）
+ *  纯枚举不加 rename（对齐 Rating/ColorLabel 约定）：变体按原名序列化。
+ */
+export type FocusShape = 
+/**  仅中心点（SubjectArea 1 值 / Fuji FocusPixel / Nikon·Panasonic AFPointSelected） */
+"Point" | 
+/**  圆形区域（SubjectArea 2 值：圆心 + 直径） */
+"Circle" | 
+/**  矩形区域（SubjectArea 3 值：左上角 + 宽高） */
+"Rectangle";
 
 /**
  *  `get_histogram` 返回：256 级 luma（BT.601 加权）+ RGB 三通道计数 + 剪切统计。
@@ -639,6 +669,13 @@ export type SpeciesStat = {
 	lastDate: string | null,
 	avgSharpness: number | null,
 };
+
+/**
+ *  网格堆叠模式：None = 不堆叠（每文件一项）；ByFileName = 同文件名（stem）合并
+ *  （JPG/NEF 同画面，前端 stacks.ts 按 baseName 分组）；ByTime = 同组照片堆叠
+ *  （拍摄时间差 ≤2s 的连拍合并，前端按 dateTaken 聚类）。默认 ByTime。
+ */
+export type StackMode = "None" | "ByFileName" | "ByTime";
 
 /**
  *  侧栏目录树节点：name = 目录名，path = 完整路径，photoCount = 该目录**一层**

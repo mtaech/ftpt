@@ -147,8 +147,13 @@ fn main() {
     };
     cc::Build::new()
         .file("src/half_size.c")
+        .file("src/focus_point.c")
         .include(include_dir)
         .compile("half_size");
+
+    // 监听 C shim 源文件变化（cc crate 不总是自动 emit rerun-if-changed）
+    println!("cargo:rerun-if-changed=src/half_size.c");
+    println!("cargo:rerun-if-changed=src/focus_point.c");
 
     // 监听构建脚本本身的变化
     println!("cargo:rerun-if-changed=build.rs");

@@ -54,26 +54,35 @@ function mockEmit(event: string, payload: unknown) {
 const FORMATS = ['Jpeg', 'Raw', 'Jpeg', 'Jpeg', 'Raw', 'Png'] as const
 const RAWS = ['NEF', 'CR3', 'ARW']
 
+/**
+ * 堆叠样本：i=7 与 i=8 同 stem（DSC_1007 CR3 + DSC_1007 JPG）、i=9 与 i=10 同 stem
+ * （DSC_1009 JPG + DSC_1009 CR3）——验证网格堆叠徽标（×2）/格式切换/预览切换按钮。
+ * 其余 stem 唯一（每文件一个 Capture，JPG/RAW 不配对，见 CONTEXT.md）。
+ */
+const STACK_ALT_STEM: Record<number, string> = { 8: 'DSC_1007', 10: 'DSC_1009' }
+
 /** 生成 200 条确定性的假数据（评分/色标/旗标部分预置，便于验证渲染） */
 function makeCaptures(): CaptureMeta[] {
   const out: CaptureMeta[] = []
   for (let i = 0; i < 200; i++) {
     const isRaw = FORMATS[i % FORMATS.length] === 'Raw'
     const ext = isRaw ? RAWS[i % RAWS.length] : FORMATS[i % FORMATS.length].toUpperCase()
+    const stem = STACK_ALT_STEM[i] ?? `DSC_${String(1000 + i)}`
     out.push({
       index: i,
-      baseName: `DSC_${String(1000 + i)}`,
-      primaryPath: `${MOCK_DIR}/DSC_${String(1000 + i)}.${ext.toLowerCase()}`,
+      baseName: stem,
+      primaryPath: `${MOCK_DIR}/${stem}.${ext.toLowerCase()}`,
       primaryFormat: isRaw ? 'raw' : ext.toLowerCase(),
       fileSize: 4_000_000 + ((i * 7919) % 20_000_000),
       // 前 6 张（1s 间隔）与 100–103（同秒）构成连拍组，供网格徽标/对比模式手动验证；
-      // 其余按分钟递增（60s 间隔，不成组）
+      // 其余按分钟递增：日期随 i/60 变化（非 i%9），避免 (日期, 分钟) 组合在 200 条内
+      // 周期性碰撞（原 (i%9) 周期 180：i=6 与 i=186 时间戳相同，同组堆叠误并组）
       dateTaken:
         i < 6
           ? `2026-08-01T10:15:${String(28 + i).padStart(2, '0')}`
           : i >= 100 && i < 104
             ? '2026-08-02T10:40:00'
-            : `2026-08-${String((i % 9) + 1).padStart(2, '0')}T10:${String(i % 60).padStart(2, '0')}:00`,
+            : `2026-08-${String((Math.floor(i / 60) % 9) + 1).padStart(2, '0')}T10:${String(i % 60).padStart(2, '0')}:00`,
       extensions: isRaw ? [ext, 'JPG'] : [ext],
       cameraMake: 'NIKON',
       cameraModel: 'Z 9',
@@ -97,6 +106,8 @@ function makeCaptures(): CaptureMeta[] {
       recognitionStatus: null,
       birdBbox: null,
       eyeSharpness: null,
+      // 对焦点：mock 给部分样本一个确定性焦点（x 随 i 偏移），验证叠加层
+      focusPoint: i % 4 === 0 ? { x: 0.3 + (i % 4) * 0.15, y: 0.4, width: 0, height: 0, shape: 'Point' } : null,
     })
   }
   return out
@@ -653,6 +664,7 @@ let appConfig: AppConfig = {
   fontFamily: 'Segoe UI',
   recognitionThreadCount: 2,
   includeSubdirectories: false,
+  stackMode: 'ByTime',
   exportPresets: [{ name: '原图', longEdge: null, quality: 95, template: '{name}' }],
 }
 

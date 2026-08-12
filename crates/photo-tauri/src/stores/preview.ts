@@ -30,6 +30,8 @@ export const usePreviewStore = defineStore('preview', {
     pan: [0, 0] as Vec2,
     /** 检测框是否可见（默认关，对齐 GPUI；V 键 / 工具条「检测框」切换） */
     bboxVisible: false,
+    /** 对焦点叠加是否可见（默认关；F 键切换，独立于检测框） */
+    focusVisible: false,
     /** 剪切警告叠加是否可见（默认关；'o' 键切换：红 = 高光溢出、蓝 = 死黑） */
     clipOverlayVisible: false,
     /**
@@ -184,6 +186,11 @@ export const usePreviewStore = defineStore('preview', {
     /** 切换检测框叠加显示（V 键 / 工具条「检测框」） */
     toggleBbox() {
       this.bboxVisible = !this.bboxVisible
+    },
+
+    /** 切换对焦点叠加显示（F 键 / 工具条「对焦点」） */
+    toggleFocus() {
+      this.focusVisible = !this.focusVisible
     },
 
     /** 切换剪切警告叠加（'o' 键；红 = 高光溢出、蓝 = 死黑） */

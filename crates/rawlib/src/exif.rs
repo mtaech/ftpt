@@ -39,6 +39,25 @@ pub struct ExifData {
     pub gps_longitude: Option<(f64, f64, f64)>,
     /// GPS altitude
     pub gps_altitude: Option<f64>,
+    /// 对焦点像素坐标（Fuji makernotes FocusPixel，相对未旋转传感器图；无记录为 None）
+    pub focus_pixel: Option<(u16, u16)>,
+    /// AFInfo/AFInfo2 原始 blob（Nikon 0x0088/0x00b7、Panasonic 等；libraw 只存不解析）
+    pub af_info: Option<AfInfoData>,
+    /// Panasonic AFPointPosition 归一化坐标（0–1；现代机型数据在预览 EXIF 则 None）
+    pub panasonic_focus: Option<(f64, f64)>,
+}
+
+/// libraw makernotes 的 AFInfo 原始数据（应用层按 tag/version 解析坐标）。
+#[derive(Debug, Clone, Default)]
+pub struct AfInfoData {
+    /// makernotes tag：0x0088 = AFInfo（旧版，无坐标）、0x00b7 = AFInfo2
+    pub tag: u32,
+    /// TIFF 字节序：0x4949 小端 / 0x4d4d 大端
+    pub order: u16,
+    /// AFInfo2 版本号（300 = 0300 等；AFInfo 老版未设置为 0）
+    pub version: u32,
+    /// blob 数据（AFInfo2 已跳过前 4 字节版本号，从 AFDetectionMethod 开始）
+    pub data: Vec<u8>,
 }
 
 impl ExifData {
@@ -125,6 +144,14 @@ pub fn extract_exif<P: AsRef<Path>>(path: P) -> Result<ExifData, ExifError> {
         if data.is_null() {
             return Err(ExifError::LibRaw("libraw_init returned NULL".into()));
         }
+
+        // Panasonic AFPointPosition 捕获：注册 makernotes 回调（必须早于 open）
+        let pan_ctx = ffi::rawlib_pan_ctx_alloc();
+        if pan_ctx.is_null() {
+            ffi::libraw_close(data);
+            return Err(ExifError::LibRaw("pan_ctx_alloc returned NULL".into()));
+        }
+        ffi::rawlib_panasonic_af_init(data, pan_ctx);
 
         // Open file
         #[cfg(windows)]
@@ -231,6 +258,46 @@ pub fn extract_exif<P: AsRef<Path>>(path: P) -> Result<ExifData, ExifError> {
             None
         };
 
+        // 对焦点（Fuji makernotes FocusPixel，C shim 读取）
+        let mut fx: u16 = 0;
+        let mut fy: u16 = 0;
+        let has_focus = ffi::rawlib_get_focus_pixel(data, &mut fx, &mut fy) != 0;
+        let focus_pixel = if has_focus { Some((fx, fy)) } else { None };
+
+        // AFInfo blob（Nikon AFInfo/AFInfo2、Panasonic 等；C shim 读取原始字节）
+        let mut af_tag: u32 = 0;
+        let mut af_order: i16 = 0;
+        let mut af_version: u32 = 0;
+        let mut af_len: u32 = 0;
+        let mut af_buf = vec![0u8; 1 << 20]; // 1MB 上限
+        let has_af = ffi::rawlib_get_afinfo(
+            data,
+            &mut af_tag,
+            &mut af_order,
+            &mut af_version,
+            &mut af_len,
+            af_buf.as_mut_ptr(),
+            af_buf.len() as u32,
+        ) != 0;
+        let af_info = if has_af {
+            af_buf.truncate((af_len as usize).min(af_buf.len()));
+            Some(AfInfoData {
+                tag: af_tag,
+                order: af_order as u16,
+                version: af_version,
+                data: af_buf,
+            })
+        } else {
+            None
+        };
+
+        // Panasonic AFPointPosition（回调捕获的归一化坐标）
+        let mut pan_x: f64 = 0.0;
+        let mut pan_y: f64 = 0.0;
+        let has_pan = ffi::rawlib_panasonic_af_get(pan_ctx, &mut pan_x, &mut pan_y) != 0;
+        ffi::rawlib_pan_ctx_free(pan_ctx);
+        let panasonic_focus = if has_pan { Some((pan_x, pan_y)) } else { None };
+
         ffi::libraw_close(data);
 
         Ok(ExifData {
@@ -248,6 +315,9 @@ pub fn extract_exif<P: AsRef<Path>>(path: P) -> Result<ExifData, ExifError> {
             gps_latitude,
             gps_longitude,
             gps_altitude,
+            focus_pixel,
+            af_info,
+            panasonic_focus,
         })
     }
 }

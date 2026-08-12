@@ -51,7 +51,8 @@ fn folder_migrations() -> Migrations<'static> {
                 gps_lon_deg  REAL,
                 gps_lon_min  REAL,
                 gps_lon_sec  REAL,
-                gps_altitude REAL
+                gps_altitude REAL,
+                focus_point  TEXT
             );",
         ),
         M::up(
@@ -151,6 +152,11 @@ impl FolderDb {
         let mut conn = rusqlite::Connection::open(&db_path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
         folder_migrations().to_latest(&mut conn)?;
+        // 兼容旧库：exif_cache 若缺 focus_point 列则补列。
+        // 不能写进 migration——bundled SQLite 不支持 ADD COLUMN IF NOT EXISTS
+        // （3.35+ 才引入），且畸形旧库可能整个表缺失；这里用列元数据检查，
+        // 新库（migration 建表已含该列）直接跳过。
+        ensure_exif_focus_column(&mut conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -172,7 +178,7 @@ impl FolderDb {
                     exposure_compensation, white_balance, date_time_original,
                     image_width, image_height, file_size_cache, color_space, orientation,
                     gps_lat_deg, gps_lat_min, gps_lat_sec,
-                    gps_lon_deg, gps_lon_min, gps_lon_sec, gps_altitude
+                    gps_lon_deg, gps_lon_min, gps_lon_sec, gps_altitude, focus_point
              FROM exif_cache
              WHERE path = ?1 AND file_size = ?2 AND mtime_ns = ?3",
         )?;
@@ -203,8 +209,8 @@ impl FolderDb {
               focal_length, exposure_compensation, white_balance, date_time_original,
               image_width, image_height, file_size_cache, color_space, orientation,
               gps_lat_deg, gps_lat_min, gps_lat_sec,
-              gps_lon_deg, gps_lon_min, gps_lon_sec, gps_altitude)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)",
+              gps_lon_deg, gps_lon_min, gps_lon_sec, gps_altitude, focus_point)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)",
             rusqlite::params_from_iter(params.iter().map(|b| b.as_ref())),
         )?;
         Ok(())
@@ -235,18 +241,18 @@ impl FolderDb {
                     exposure_compensation, white_balance, date_time_original,
                     image_width, image_height, file_size_cache, color_space, orientation,
                     gps_lat_deg, gps_lat_min, gps_lat_sec,
-                    gps_lon_deg, gps_lon_min, gps_lon_sec, gps_altitude,
+                    gps_lon_deg, gps_lon_min, gps_lon_sec, gps_altitude, focus_point,
                     path, file_size, mtime_ns
              FROM exif_cache",
         )?;
         let rows = stmt.query_map([], |row| {
-            // 列 0-21 与 row_to_exif 对齐；22-24 追加 path/指纹
+            // 列 0-22 与 row_to_exif 对齐；23-25 追加 path/指纹
             let exif = row_to_exif(row)?;
             Ok((
-                row.get::<_, String>(22)?,
+                row.get::<_, String>(23)?,
                 ExifCacheRow {
-                    file_size: row.get(23)?,
-                    mtime_ns: row.get(24)?,
+                    file_size: row.get(24)?,
+                    mtime_ns: row.get(25)?,
                     exif,
                 },
             ))
@@ -840,6 +846,28 @@ fn file_fingerprint(path: &Path) -> std::io::Result<(u64, u64)> {
     Ok((size, mtime))
 }
 
+/// 检查 exif_cache 表是否含 focus_point 列，缺则补列（旧库升级；新库建表已含）。
+/// 表整体缺失的畸形旧库不补（migration 的 CREATE IF NOT EXISTS 建表时已含列）。
+fn ensure_exif_focus_column(conn: &mut rusqlite::Connection) -> Result<(), FolderDbError> {
+    let table_exists: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'exif_cache'",
+        [],
+        |row| row.get(0),
+    )?;
+    if table_exists == 0 {
+        return Ok(());
+    }
+    let has = conn
+        .prepare("PRAGMA table_info(exif_cache)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .any(|name| name == "focus_point");
+    if !has {
+        conn.execute_batch("ALTER TABLE exif_cache ADD COLUMN focus_point TEXT;")?;
+    }
+    Ok(())
+}
+
 fn row_to_exif(row: &rusqlite::Row) -> rusqlite::Result<ExifMetadata> {
     use photo_domain::{CameraInfo, GpsInfo, ShootingParams};
 
@@ -887,6 +915,10 @@ fn row_to_exif(row: &rusqlite::Row) -> rusqlite::Result<ExifMetadata> {
             longitude: gps_lon,
             altitude: row.get(21)?,
         },
+        // focus_point 列：JSON 序列化（exif_to_params 同源），坏数据回退 None
+        focus_point: row
+            .get::<_, Option<String>>(22)?
+            .and_then(|s| serde_json::from_str(&s).ok()),
     })
 }
 
@@ -925,6 +957,11 @@ fn exif_to_params<'a>(
         Box::new(lon_min),
         Box::new(lon_sec),
         Box::new(exif.gps.altitude),
+        // focus_point：JSON 序列化（row_to_exif 同源解析）
+        Box::new(
+            exif.focus_point
+                .map(|fp| serde_json::to_string(&fp).unwrap_or_default()),
+        ),
     ]
 }
 
@@ -1005,6 +1042,7 @@ mod tests {
                 longitude: Some((116.0, 23.0, 29.0)),
                 altitude: Some(50.5),
             },
+            focus_point: Some(photo_domain::FocusPoint::point(0.5, 0.5)),
         }
     }
 

@@ -29,6 +29,7 @@ function mk(dateTaken: string | null, overrides: Partial<CaptureMeta> = {}): Cap
     keywords: [],
     gpsLat: null,
     gpsLon: null,
+    focusPoint: null,
     birdName: null,
     birdConfidence: null,
     recognitionStatus: null,
