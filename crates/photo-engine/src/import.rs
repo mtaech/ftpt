@@ -161,7 +161,7 @@ pub fn scan_import_source(dir: &Path) -> Result<Vec<ImportCandidate>, ImportErro
 fn build_candidate(path: &Path) -> Option<ImportCandidate> {
     let meta = std::fs::metadata(path).ok()?;
     let format = path.extension().and_then(|e| e.to_str()).and_then(ImageFormat::from_extension);
-    // 视频等非图片格式不尝试 EXIF（kamadak 无法解析，直接走 mtime）
+    // 视频等非图片格式不尝试 EXIF（无后端支持，直接走 mtime）
     let date = match format {
         Some(f) if !f.is_other() => match exif::extract_exif(path, &f) {
             Ok(m) => m

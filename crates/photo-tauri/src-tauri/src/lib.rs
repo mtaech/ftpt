@@ -1943,6 +1943,8 @@ fn set_app_config(state: State<'_, Mutex<AppState>>, config: AppConfig) -> Resul
             .into_iter()
             .map(photo_config::ExportPreset::clamped)
             .collect(),
+        // 堆叠模式：三态枚举（None/ByFileName/ByTime），无钳制直接透传（网格按配置即时重排）
+        stack_mode: config.stack_mode,
     };
     save_config(&st);
     Ok(())
@@ -3251,8 +3253,15 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // 退出时关闭 exiftool 长驻进程（避免残留子进程）
+            if let tauri::RunEvent::Exit = event {
+                photo_engine::exif::shutdown_provider();
+                app.exit(0);
+            }
+        });
 }
 
 // ============================================================================

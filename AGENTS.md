@@ -10,7 +10,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 - `photo-config` — 配置读写（TOML + SQLite 持久化）
 - `photo-tauri` — **Tauri v2 前端**（Vue 3 + Pinia + Tailwind v4 + shadcn-vue），2026-08 自 GPUI 版迁移完成（Q2 决策：并行新 app，parity 验收后删除旧 GPUI `photo-tool-app`；GPUI 版源码已删除，git 历史 `545921a` 前可查）
 
-核心工作流：**目录扫描（单层/递归可配）→ 浏览/标记/筛选 → 鸟类识别（单张/批量）→ 文件操作（删除/移动/复制/重命名，可撤销）→ 格式转换/导出预设**；另含 **SD 卡导入、全局鸟种统计、连拍对比、幻灯片**。迁移决策与功能清单见 `docs/tauri-migration-plan.md`（Phase 1–3 完成，Phase 4 打包/验收收尾中）。
+核心工作流：**目录扫描（单层/递归可配）→ 浏览/标记/筛选 → 鸟类识别（单张/批量）→ 文件操作（删除/移动/复制/重命名，可撤销）→ 格式转换/导出预设**；另含 **SD 卡导入、全局鸟种统计、连拍对比、幻灯片**。迁移决策与功能清单记录于 git 历史 `docs/tauri-migration-plan.md`（Phase 1–3 完成，Phase 4 打包/验收收尾中）。
 
 ---
 
@@ -52,8 +52,8 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 
 ### 核心数据流
 
-1. **scanner** → `Vec<Capture>`：walkdir 单层（`max_depth(1)`）扫描，**每个图片文件一个 Capture**（JPG/RAW 不再堆叠配对）；扫描期不做任何筛选，识别状态等元数据在扫描后才从 folder_db 读取，全部筛选由前端 `src/lib/filter.ts` 在 CaptureMeta 层面执行
-2. **Capture** → **exif**：提取 EXIF（常规图 kamadak-exif，RAW 走 `rawlib::exif`）；`CaptureMeta::enrich_with_exif` 回填摘要（类型 `ExifMetadata` 定义在 domain，提取机械在 engine）
+1. **scanner** → `Vec<Capture>`：walkdir 单层（`max_depth(1)`）扫描，**每个图片文件一个 Capture**（扫描模型不配对）；网格**显示层**按配置堆叠模式分组（`src/lib/stacks.ts`：ByTime 同组照片堆叠按拍摄时间 ≤2s 聚类、ByFileName 同 stem 合并、None 关闭；主格式默认 JPEG 优先，×N 徽标点击切换激活格式，方向键在堆叠组间导航）；扫描期不做任何筛选，识别状态等元数据在扫描后才从 folder_db 读取，全部筛选由前端 `src/lib/filter.ts` 在 CaptureMeta 层面执行
+2. **Capture** → **exif**：提取 EXIF（统一走 `ExifProvider` 抽象：**exiftool 主后端**（`-stay_open` 长驻进程 + JSON，覆盖 JPEG/RAW 及厂商私有对焦点），**rawlib 回退后端**（RAW 专用，Fuji FocusPixel / Nikon AFInfo blob 本地解析）；kamadak-exif 已移除）；`CaptureMeta::enrich_with_exif` 回填摘要（类型 `ExifMetadata` 定义在 domain，提取机械在 engine）
 3. **Capture** → **ops**：删除（回收站/永久）/移动（跨设备 copy+delete 回退）/复制/批量重命名
 4. **SourceFile** → **thumbnail**：磁盘缓存 JPEG 字节（缓存键 = `DefaultHasher(path+size)` 的 `{:016x}.jpg`，目录 = 照片目录 `.pt/thumbs`，每文件夹独立）；RAW 完整解码（half_size 预览选项）母版按 `u32::MAX` 键存一份，网格缩略图/预览/全分辨率均从母版 DCT 派生（不落盘）；内嵌 JPEG 长边 ≥2048（RW2/DNG 大内嵌）时直接用作母版省解码；常规图优先 EXIF 内嵌缩略图
 5. **Capture** → **convert**：RAW 内嵌预览→JPEG、常规图缩放（Lanczos3）；`export_adjusted` 全尺寸烘焙（调整参数渲染）
@@ -73,13 +73,13 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 |`crates/photo-engine/src/`|文件机械：scanner, ops, exif, thumbnail, convert, folder_db, batch_ops, adjustments（全部同步）|
 |`crates/photo-engine/src/folder_db.rs`|文件夹级 SQLite（`.pt/data.db`）：exif_cache / xmp_meta / recognition / adjustments 四表，rusqlite_migration 版本化|
 |`crates/photo-recognize/src/`|识别管线：lib.rs(Recognizer 门面), detect(YOLO), classify(bird_model), catalog(名录映射), pipeline, eye, sharpness|
-|`crates/photo-config/src/lib.rs`|配置读写（TOML + SQLite 持久化）；AppConfig 含 favorite_dirs/recent_directories/theme(默认 Light)/leftPanelWidth/rightPanelWidth/thumbnailSize/recognitionThreadCount 等|
+|`crates/photo-config/src/lib.rs`|配置读写（TOML + SQLite 持久化）；AppConfig 含 favorite_dirs/recent_directories/theme(默认 Light)/leftPanelWidth/rightPanelWidth/thumbnailSize/recognitionThreadCount/stackMode(默认 ByTime 同组堆叠) 等|
 |`crates/photo-tauri/src-tauri/src/lib.rs`|Tauri 后端：24 commands + 8 事件 + ptimg 协议 + 启动（配置便携优先 + 模型预热 + 上次目录自动恢复）|
 |`crates/photo-tauri/src-tauri/src/bin/export_bindings.rs`|specta TS 绑定导出（生成前端 bindings.ts）|
 |`crates/photo-tauri/src/stores/`|Pinia：captures（扫描/标记/事件接线）/ selection（多选锚点语义）/ preview（缩放平移/检测框/框选）/ filter（筛选排序）/ recognition（批量识别状态机）/ batch（批量操作两阶段）/ config（设置）/ contextMenu|
 |`crates/photo-tauri/src/lib/`|bindings.ts（specta 生成）/ ipc.ts（typed invoke 薄封装 + 事件）/ filter.ts（filter.rs 纯移植 + vitest）/ previewMath.ts（preview_math.rs 移植）/ mock.ts（浏览器 mock 模式）/ format.ts|
-|`docs/tauri-migration-plan.md`|迁移计划 + 进度 + parity 基线（附录 A）|
-|`local-lib/`|预编译 Linux `libraw.so`/`libraw_r.so`（不纳入版本控制）|
+|`docs/exiftool-update.md`|ExifTool 本地运行时更新指引（EXIF 后端依赖，进 git）|
+|`local-lib/`|预编译 Linux `libraw.so`/`libraw_r.so` + `exiftool/`（ExifTool 跨平台运行时：`windows/` perl.exe+exiftool.pl、`linux/` 源码包、VERSION.txt；更新指引 `docs/exiftool-update.md`，均不纳入版本控制）|
 
 ---
 
@@ -96,8 +96,9 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 |开发运行（tauri dev）|`cd crates/photo-tauri && npm run tauri dev`（vite 1420 端口 + WebView2）|
 |生成 TS 绑定|`cargo run -p photo-tauri --bin export_bindings`（覆盖 bindings.ts；specta 不导出的类型手写追加段需手动保留）|
 |浏览器 mock 模式|`cd crates/photo-tauri && npm run dev` + 浏览器开 localhost:1420（无 `__TAURI_INTERNALS__` 走 mock 数据流）|
+|EXIF 提取验证|`cargo run -p photo-engine --example focus_check -- <图片>`（打印 ExifMetadata + 对焦点；exiftool 不可用或残留进程时先 `taskkill //F //IM perl.exe`）|
 
-**注意**：`cargo test -p photo-tauri` 在本机崩溃（lib test harness 0xc0000139，环境问题；`ftpt-next` bin 正常）——specta 导出用 bin 而非测试。
+**注意**：`cargo test -p photo-tauri` 在本机崩溃（lib test harness 0xc0000139，环境问题；`ftpt` bin 正常）——specta 导出用 bin 而非测试。
 
 ---
 
@@ -113,7 +114,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 
 ### 错误处理
 
-- 每模块一个 `thiserror::Error` 枚举（`ConfigError`/`ScanError`/`OpError`/`ThumbnailError`/`ExifError`/`XmpError`/`ConvertError`/`FolderDbError`/`RecognizeError`），均以 `Io(#[from] std::io::Error)` 起步；外部错误多数 `#[from]`，rawlib/kamadak-exif 错误转成 `String` 变体
+- 每模块一个 `thiserror::Error` 枚举（`ConfigError`/`ScanError`/`OpError`/`ThumbnailError`/`ExifError`/`XmpError`/`ConvertError`/`FolderDbError`/`RecognizeError`），均以 `Io(#[from] std::io::Error)` 起步；外部错误多数 `#[from]`，rawlib/exiftool 错误转成 `String` 变体
 - 批量操作返回 `Vec<(PathBuf, Result<(), Error>)>`，逐文件报告
 - Tauri commands 返回 `Result<T, String>`，前端经 `unwrap`/`unwrapVoid`（ipc.ts）解包为 reject（tauri-specta 默认 Result 模式 resolve `{status:'ok'|'error'}`）
 
@@ -136,6 +137,9 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 ### 已知陷阱
 
 - `quick-xml` 在根 `Cargo.toml` 的 `[workspace.dependencies]` 中声明但各 crate src 无引用
+- **exiftool `-stay_open` 长驻进程不能加 `-q`**：`-q` 同时抑制 `{ready}` 标记，导致 execute 读不到结果边界挂起
+- **Windows 官方 exiftool(-k).exe 内嵌 `-k`（每命令后等 ENTER）**：程序化调用必须用 `perl.exe exiftool.pl`（photo-engine 已自动处理）；开发时残留 perl.exe 进程会让后续 cargo 命令假死，`taskkill //F //IM perl.exe` 清理（cfg(test) 已跳过真实 spawn、photo-tauri 退出走 shutdown_provider，仅手动 example 需注意）
+- **exiftool 定位优先级**：`PHOTO_EXIFTOOL` env → exe 同级 `exiftool/`（打包）→ 仓库 `local-lib/exiftool/`（开发）→ PATH；升级版本见 `docs/exiftool-update.md`
 - 使用了 let-chains（edition 2024 特性），如 `photo-config/config.rs` 便携路径判断
 - **tauri-specta 生成 bindings.ts 会覆盖手写追加段**：specta 不导出的类型（FilterCriteria/SortBy 等——Rust 侧无 command 引用它们）需在文件尾部手写保留，重新导出后手动恢复
 - **export_bindings 按 cwd 相对路径写文件**：必须 `cd crates/photo-tauri/src-tauri` 再 `cargo run -p photo-tauri --bin export_bindings`；从 workspace 根跑会把 bindings.ts 写到 `crates/src/lib/` 错位置
@@ -149,7 +153,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 ## 测试与 QA
 
 - Rust：**127 个 `#[test]`**（+ 2 个 `#[ignore]` 真机冒烟）分布在 4 个 crate 的源文件末尾内联 `#[cfg(test)] mod tests`
-- 前端：`src/lib/filter.test.ts` 22 个 vitest 用例（对照 Rust filter.rs 测试边界移植）
+- 前端：vitest 55 用例（filter.test.ts 22 + stacks.test.ts 7 堆叠分组/主格式 + burst/nameTemplate 26）
 - 真机识别冒烟：`cargo test -p photo-recognize -- --ignored`（需 worktree/发布根有 `models/` 与 `data/pica_ref.db`）；单文件手动识别工具：`cargo run -p photo-recognize --example recognize_file -- <图片路径>`
 - 浏览器 mock 实测：`npm run dev` + 浏览器（无 Tauri 后端时走 mock 数据流，覆盖网格/预览/筛选/识别/批量/设置/右键全 UI）
 
@@ -175,7 +179,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 - **IPC 契约**：`src/lib/ipc.ts` 是唯一 IPC 入口（typed invoke + 事件订阅 + `ptimgUrl`）；`src/lib/bindings.ts` 由 specta 生成（勿手改，追加段除外）
 - **事件驱动刷新**：scan:progress/scan:done/capture:enriched/thumb:ready/recognize:progress/recognize:done/batch:progress/batch:done；前端 store `init()` 统一接线
 - **图片 URL**：`ptimgUrl(kind, path, v?)`，kind ∈ `'thumb' | 'master' | 'full'`；`thumb:ready` 后 `thumbVersions[path]` 递增强制 `?v=` 刷新
-- **主题**：Catppuccin Mocha（暗）/ Latte（亮）双主题 CSS 变量（style.css）；默认 Light（对齐 GPUI AppConfig::default）；`html.dark` class 由 config store 按 `getAppConfig().theme` 应用
+- **主题**：GPUI theme.rs 移植双主题（亮 = gray-100 画布/白面板/blue-500 accent；暗 = 交易终端近黑 #0b0d11/cyan accent）CSS 变量（style.css），另有 element 层语义色与 .section-header/.panel-card/.dir-card-active 共享类；默认 Light（对齐 GPUI AppConfig::default）；`html.dark` class 由 config store 按 `getAppConfig().theme` 应用；html 基准字号 14px（紧凑密度）
 
 ### 关键模式
 
@@ -220,5 +224,5 @@ kimi_cu 的 UIA 树看不到 WebView2 DOM；无 vision 模型时用 CDP：
 
 ## 近期修复记录
 
-- **2026-08-10 迁移 wave 1-3**：Tauri v2 迁移（见 `docs/tauri-migration-plan.md`）；GPUI 版删除；specta 真实绑定导出（bin 绕开 harness 0xc0000139）；启动自愈（自动恢复目录事件早于挂载）；主题默认 Light；mock 层 batchOpExecute detached `this` 修复
+- **2026-08-10 迁移 wave 1-3**：Tauri v2 迁移（计划见 git 历史 `docs/tauri-migration-plan.md`）；GPUI 版删除；specta 真实绑定导出（bin 绕开 harness 0xc0000139）；启动自愈（自动恢复目录事件早于挂载）；主题默认 Light；mock 层 batchOpExecute detached `this` 修复
 - 历史（GPUI 版时代，引擎层均保留）：copy_recognitions_to 索引错位修复、批量操作 ADR 0006 重构（筛选驱动）、全分辨率 DCT 降采样、RAW 母版缓存、Worker panic 兜底（前端 store 状态机继承）、OTHER 格式徽标、调整功能 ADR 0007（无 crop）

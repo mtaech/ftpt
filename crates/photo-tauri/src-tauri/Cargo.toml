@@ -2,17 +2,16 @@
 name = "photo-tauri"
 version.workspace = true
 edition.workspace = true
-description = "ftpt 照片管理工具（Tauri v2 版，GPUI 并行迁移期）"
-default-run = "ftpt-next"
+description = "ftpt 照片管理工具（Tauri v2 版）"
+default-run = "ftpt"
 
 [lib]
 name = "photo_tauri_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
-# 二进制名必须叫 ftpt-next：target/debug/ftpt.exe 是现役 GPUI 版，
-# Q2 决策并行迁移期两个 app 并存，parity 验收后才统一定名（Phase 4）
+# 二进制名 ftpt（2026-08-11 迁移完成，统一定名；原 GPUI 版已删除）
 [[bin]]
-name = "ftpt-next"
+name = "ftpt"
 path = "src/main.rs"
 
 [dependencies]
@@ -37,3 +36,9 @@ percent-encoding = "2"
 
 [build-dependencies]
 tauri-build.workspace = true
+
+[features]
+# 生产构建必须启用（`tauri build` CLI 或打包脚本 --features custom-protocol 注入）：
+# 转发 tauri/custom-protocol → tauri build.rs 不设 `dev` cfg → 运行时加载编译期嵌入的
+# frontendDist 而非 devUrl。缺失时打包版 exe 启动即尝试连 localhost:1420（拒绝连接）
+custom-protocol = ["tauri/custom-protocol"]
