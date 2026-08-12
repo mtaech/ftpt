@@ -70,6 +70,12 @@ const gridColumns = computed({
   set: (v: number) => void config.update({ gridColumns: v }),
 })
 
+/** 界面缩放比例（90/100/110/120%，即时应用 DOM） */
+const uiScale = computed({
+  get: () => config.uiScale,
+  set: (v: number) => void config.update({ uiScale: v }),
+})
+
 /** 网格堆叠模式选项（对齐 photo-config StackMode 三态；改动即保存，网格即时重排） */
 const STACK_MODES: { value: StackMode; label: string; desc: string }[] = [
   { value: 'None', label: '不堆叠', desc: '每个文件独立显示' },
@@ -330,6 +336,21 @@ const aboutRows = computed(
               </select>
               <p class="text-xs text-muted-foreground">
                 固定列数，缩略图随容器宽度自适应；即时重排
+              </p>
+            </div>
+
+            <!-- 界面缩放：整体 UI 等比缩放（html font-size = 15px × scale/100，Tailwind 全 rem） -->
+            <div class="space-y-1.5">
+              <label for="settings-ui-scale" class="text-sm font-medium">界面缩放</label>
+              <select
+                id="settings-ui-scale"
+                v-model.number="uiScale"
+                class="h-8 w-40 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <option v-for="n in [90, 100, 110, 120]" :key="n" :value="n">{{ n }}%</option>
+              </select>
+              <p class="text-xs text-muted-foreground">
+                整体界面等比缩放（100% = 基准 15px）；即时生效
               </p>
             </div>
 

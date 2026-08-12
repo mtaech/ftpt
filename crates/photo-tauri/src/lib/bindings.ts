@@ -283,6 +283,11 @@ export type AppConfig = {
 	 *  缩略图尺寸（thumbnail_size）保留为缩略图生成尺寸（缓存键），不再驱动列数。
 	 */
 	gridColumns?: number,
+	/**
+	 *  界面缩放比例（百分比 80-130，默认 100 = 基准字号 15px）。
+	 *  html font-size = 15 × ui_scale/100，Tailwind 全 rem 等比缩放整体 UI。
+	 */
+	uiScale?: number,
 };
 
 /**  检测框：归一化坐标 [x1, y1, x2, y2]（0–1，相对图像宽高） */
@@ -719,7 +724,6 @@ async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; dat
     }
 }
 
-// ============================================================================
 // 手写补充类型（specta 生成物不含）：FilterCriteria/SortBy/SortDirection/
 // RecognitionFilter 仅被前端筛选逻辑使用，Rust 侧无 command 引用它们，specta
 // 不会导出；此处按 domain.rs 的 serde 输出（camelCase、外部标签枚举）补齐。

@@ -44,14 +44,19 @@ export const useConfigStore = defineStore('config', {
     stackMode: (s) => s.config.stackMode ?? 'ByTime',
     /** 网格每行图片数（回退 4，对齐 photo-config 默认；2-5 下拉） */
     gridColumns: (s) => s.config.gridColumns ?? 4,
+    /** 界面缩放比例（回退 100 = 基准字号 15px；80-130） */
+    uiScale: (s) => s.config.uiScale ?? 100,
     /** 网格 cell 高度 = thumbnailSize + 56（对齐 GPUI grid.rs cell_size 公式） */
     rowHeight: (s) => (s.config.thumbnailSize ?? 220) + 56,
   },
   actions: {
-    /** 把主题/字体即时应用到 DOM（启动恢复与设置改动共用） */
+    /** 把主题/字体/缩放比例应用到 DOM（启动恢复与设置改动共用） */
     applyDom() {
       document.documentElement.classList.toggle('dark', this.theme === 'Dark')
       document.documentElement.style.setProperty('--font-family-app', this.fontFamily)
+      // 全局 UI 缩放：html font-size = 15px × scale/100（Tailwind 全 rem 等比缩放）
+      const base = 15 * (this.uiScale / 100)
+      document.documentElement.style.fontSize = `${base}px`
     },
     /** 从后端拉取配置并应用到 DOM（启动 / 打开设置弹窗时调用；mock 或后端未就绪时保持默认） */
     async load() {

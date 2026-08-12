@@ -74,6 +74,10 @@ pub struct AppConfig {
     /// 缩略图尺寸（thumbnail_size）保留为缩略图生成尺寸（缓存键），不再驱动列数。
     #[serde(default = "default_grid_columns")]
     pub grid_columns: u32,
+    /// 界面缩放比例（百分比 80-130，默认 100 = 基准字号 15px）。
+    /// html font-size = 15 × ui_scale/100，Tailwind 全 rem 等比缩放整体 UI。
+    #[serde(default = "default_ui_scale")]
+    pub ui_scale: u32,
 }
 
 /// 导出预设（T1 批次）：导出对话框的可复用组合（预设名 + 长边 + JPEG 质量 + 命名模板）。
@@ -129,6 +133,10 @@ fn default_grid_columns() -> u32 {
     4
 }
 
+fn default_ui_scale() -> u32 {
+    100
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -146,6 +154,7 @@ impl Default for AppConfig {
             export_presets: vec![ExportPreset::default()],
             stack_mode: StackMode::default(),
             grid_columns: default_grid_columns(),
+            ui_scale: default_ui_scale(),
         }
     }
 }

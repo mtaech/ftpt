@@ -666,6 +666,7 @@ let appConfig: AppConfig = {
   includeSubdirectories: false,
   stackMode: 'ByTime',
   gridColumns: 4,
+  uiScale: 100,
   exportPresets: [{ name: '原图', longEdge: null, quality: 95, template: '{name}' }],
 }
 
