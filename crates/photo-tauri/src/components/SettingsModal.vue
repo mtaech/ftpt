@@ -254,7 +254,7 @@ const aboutRows = computed(
 
       <!-- 主体：左 tab 导航 + 右内容（对齐 GPUI Settings 页布局；标准 Tabs 组件） -->
       <Tabs v-model="activeTab" class="flex min-h-0 flex-1">
-        <TabsList class="flex w-44 shrink-0 flex-col items-stretch gap-1 rounded-none border-r bg-transparent p-2">
+        <TabsList class="flex w-44 shrink-0 flex-col items-stretch justify-start gap-1 rounded-none border-r bg-transparent p-2">
           <TabsTrigger
             v-for="t in TABS"
             :key="t.id"

@@ -205,8 +205,8 @@
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
     /* 全局界面缩放基准：Tailwind 工具类全 rem，调这里等比缩放整体 UI。
-       14px 对齐 GPUI 默认文本尺寸的紧凑密度 */
-    font-size: 14px;
+       15px = 14px 基础上适当放大（原 14px 对齐 GPUI 紧凑密度，2026-08 用户反馈偏小） */
+    font-size: 15px;
   }
   body {
     @apply bg-background text-foreground;
