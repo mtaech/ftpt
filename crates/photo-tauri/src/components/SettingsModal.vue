@@ -64,11 +64,10 @@ const threadCount = computed({
   set: (v: number) => void config.update({ recognitionThreadCount: v }),
 })
 
-/** 缩略图尺寸（px）：即时调整网格 cell（对齐 GPUI grid.rs cell_size = thumbnailSize + 56），缩略图缓存按需重新生成 */
-const THUMB_RANGE = { min: 160, max: 320, step: 20 } as const
-const thumbnailSize = computed({
-  get: () => config.thumbnailSize,
-  set: (v: number) => void config.update({ thumbnailSize: v }),
+/** 网格每行图片数 2-5（下拉选项；固定列数后 cell 宽由容器自适应，即时重排） */
+const gridColumns = computed({
+  get: () => config.gridColumns,
+  set: (v: number) => void config.update({ gridColumns: v }),
 })
 
 /** 网格堆叠模式选项（对齐 photo-config StackMode 三态；改动即保存，网格即时重排） */
@@ -319,23 +318,18 @@ const aboutRows = computed(
               </p>
             </div>
 
-            <!-- 缩略图尺寸：即时调整网格 cell（对齐 GPUI grid.rs） -->
+            <!-- 网格密度：每行图片数（固定列数 2-5，cell 宽由容器自适应；对齐顶栏右上角同选项） -->
             <div class="space-y-1.5">
-              <div class="flex items-center justify-between">
-                <label for="settings-thumb" class="text-sm font-medium">缩略图尺寸</label>
-                <span class="tabular-nums text-xs text-muted-foreground">{{ thumbnailSize }}px</span>
-              </div>
-              <input
-                id="settings-thumb"
-                v-model.number="thumbnailSize"
-                type="range"
-                :min="THUMB_RANGE.min"
-                :max="THUMB_RANGE.max"
-                :step="THUMB_RANGE.step"
-                class="w-full accent-primary"
-              />
+              <label for="settings-grid-cols" class="text-sm font-medium">每行图片数</label>
+              <select
+                id="settings-grid-cols"
+                v-model.number="gridColumns"
+                class="h-8 w-40 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <option v-for="n in [2, 3, 4, 5]" :key="n" :value="n">{{ n }} 张</option>
+              </select>
               <p class="text-xs text-muted-foreground">
-                即时调整网格 cell（对齐 GPUI）；缩略图缓存按需重新生成
+                固定列数，缩略图随容器宽度自适应；即时重排
               </p>
             </div>
 

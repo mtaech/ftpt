@@ -665,6 +665,7 @@ let appConfig: AppConfig = {
   recognitionThreadCount: 2,
   includeSubdirectories: false,
   stackMode: 'ByTime',
+  gridColumns: 4,
   exportPresets: [{ name: '原图', longEdge: null, quality: 95, template: '{name}' }],
 }
 

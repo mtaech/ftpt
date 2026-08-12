@@ -33,7 +33,9 @@ const config = useConfigStore()
 
 /** 网格布局常量：行高跟随后端配置 thumbnailSize（cell = thumbnailSize + 56，对齐 GPUI grid.rs cell_size），
  * 行距 8px、容器内边距 4px（对齐 GPUI p_1；值与模板 gap-[8px]/px-[4px] 保持一致，保证滚动定位精确） */
-const ROW_HEIGHT = computed(() => config.rowHeight)
+const ROW_HEIGHT = computed(() =>
+  gridWidth.value > 0 ? Math.max(80, Math.round(cellW.value) + 56) : config.rowHeight,
+)
 const ROW_GAP = 8
 const ROW_STEP = computed(() => ROW_HEIGHT.value + ROW_GAP)
 const PAD = 4
@@ -42,13 +44,16 @@ const BUFFER_ROWS = 2
 /** 网格容器可视宽度（ResizeObserver 测量，列数计算依据） */
 const gridWidth = ref(0)
 /**
- * 动态列数：容器宽 ÷ cell 宽（thumbnailSize + gap），下限 1；未测量时回退 4
- * （对齐原固定 4 列）。缩略图尺寸滑块/窗口宽度变化即时生效。
+ * 固定列数 = 配置的每行图片数（2-5，下拉栏选择）。cell 宽由容器宽 ÷ 列数
+ * 自适应，行高 = cell 宽 + 56（缩略图正方形，对齐 GPUI cell_size 公式）。
+ * 容器未测量（宽 0）时按默认 4 列 + thumbnailSize 估算行高。
  */
-const COLS = computed(() => {
+const COLS = computed(() => config.gridColumns)
+/** cell 宽（px）：容器宽扣除内边距与列间距后均分 */
+const cellW = computed(() => {
   const w = gridWidth.value
-  if (w <= 0) return 4
-  return Math.max(1, Math.floor((w + ROW_GAP) / (config.thumbnailSize + ROW_GAP)))
+  if (w <= 0) return (config.thumbnailSize ?? 220) + 56 - 56
+  return (w - PAD * 2 - (COLS.value - 1) * ROW_GAP) / COLS.value
 })
 
 /** 色标条颜色（取 theme.rs LABEL_* 原值，经 @theme 注册为 bg-label-*） */

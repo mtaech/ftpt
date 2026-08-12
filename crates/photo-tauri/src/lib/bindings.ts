@@ -278,6 +278,11 @@ export type AppConfig = {
 	includeSubdirectories?: boolean,
 	/**  网格堆叠模式（默认 ByTime = 同组照片堆叠；旧配置无此字段时回退默认）。 */
 	stackMode?: StackMode,
+	/**
+	 *  网格每行图片数（2-5，默认 4）。固定列数后 cell 宽由容器自适应，
+	 *  缩略图尺寸（thumbnail_size）保留为缩略图生成尺寸（缓存键），不再驱动列数。
+	 */
+	gridColumns?: number,
 };
 
 /**  检测框：归一化坐标 [x1, y1, x2, y2]（0–1，相对图像宽高） */
@@ -713,7 +718,6 @@ async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; dat
         return { status: "error", error: e as any };
     }
 }
-
 
 // ============================================================================
 // 手写补充类型（specta 生成物不含）：FilterCriteria/SortBy/SortDirection/

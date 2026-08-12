@@ -19,6 +19,7 @@ const DEFAULT_CONFIG: AppConfig = {
   recognitionThreadCount: 2,
   includeSubdirectories: false,
   stackMode: 'ByTime',
+  gridColumns: 4,
 }
 
 export const useConfigStore = defineStore('config', {
@@ -41,6 +42,8 @@ export const useConfigStore = defineStore('config', {
     includeSubdirectories: (s) => s.config.includeSubdirectories ?? false,
     /** 网格堆叠模式（回退 ByTime = 同组照片堆叠，对齐 photo-config 默认） */
     stackMode: (s) => s.config.stackMode ?? 'ByTime',
+    /** 网格每行图片数（回退 4，对齐 photo-config 默认；2-5 下拉） */
+    gridColumns: (s) => s.config.gridColumns ?? 4,
     /** 网格 cell 高度 = thumbnailSize + 56（对齐 GPUI grid.rs cell_size 公式） */
     rowHeight: (s) => (s.config.thumbnailSize ?? 220) + 56,
   },

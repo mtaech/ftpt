@@ -474,6 +474,18 @@ function showPreview() {
           />
         </div>
       </div>
+        <!-- 网格密度：每行几张（2-5，网格即时重排；等价设置页同选项） -->
+        <label class="flex items-center gap-1 text-xs text-muted-foreground" title="每行图片数">
+          <span class="hidden xl:inline">每行</span>
+          <select
+            :value="configStore.gridColumns"
+            class="h-7 rounded-md border border-input bg-background px-1 text-xs outline-none"
+            aria-label="每行图片数"
+            @change="configStore.update({ gridColumns: Number(($event.target as HTMLSelectElement).value) })"
+          >
+            <option v-for="n in [2, 3, 4, 5]" :key="n" :value="n">{{ n }} 张</option>
+          </select>
+        </label>
         <!-- 刷新目录（对齐 GPUI toolbar refresh-btn；无目录/扫描中禁用，F5 同义） -->
         <Button
           size="icon-sm"

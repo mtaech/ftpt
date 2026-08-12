@@ -70,6 +70,10 @@ pub struct AppConfig {
     /// 网格堆叠模式（默认 ByTime = 同组照片堆叠；旧配置无此字段时回退默认）。
     #[serde(default)]
     pub stack_mode: StackMode,
+    /// 网格每行图片数（2-5，默认 4）。固定列数后 cell 宽由容器自适应，
+    /// 缩略图尺寸（thumbnail_size）保留为缩略图生成尺寸（缓存键），不再驱动列数。
+    #[serde(default = "default_grid_columns")]
+    pub grid_columns: u32,
 }
 
 /// 导出预设（T1 批次）：导出对话框的可复用组合（预设名 + 长边 + JPEG 质量 + 命名模板）。
@@ -121,6 +125,10 @@ fn default_recognition_threads() -> u32 {
     4
 }
 
+fn default_grid_columns() -> u32 {
+    4
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -137,6 +145,7 @@ impl Default for AppConfig {
             include_subdirectories: false,
             export_presets: vec![ExportPreset::default()],
             stack_mode: StackMode::default(),
+            grid_columns: default_grid_columns(),
         }
     }
 }

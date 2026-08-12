@@ -1945,6 +1945,8 @@ fn set_app_config(state: State<'_, Mutex<AppState>>, config: AppConfig) -> Resul
             .collect(),
         // 堆叠模式：三态枚举（None/ByFileName/ByTime），无钳制直接透传（网格按配置即时重排）
         stack_mode: config.stack_mode,
+        // 网格每行图片数：钳制 2-5（下拉栏只出这 4 个选项，防手改配置越界）
+        grid_columns: config.grid_columns.clamp(2, 5),
     };
     save_config(&st);
     Ok(())
