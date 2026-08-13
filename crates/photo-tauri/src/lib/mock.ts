@@ -394,6 +394,10 @@ export const mockCommands = {
     appConfig = config
     return { status: 'ok', data: null }
   },
+  // mock：浏览器模式无法真打开编辑器，模拟成功（真实行为见后端 open_config_file）
+  async openConfigFile(): Promise<MockResult<null>> {
+    return { status: 'ok', data: null }
+  },
 
   // ── T1 批次（SpeciesIndex）：全局鸟种统计 mock ──────────
 
@@ -658,6 +662,7 @@ let appConfig: AppConfig = {
   lastDirectory: MOCK_DIR,
   recentDirectories: [MOCK_DIR],
   theme: 'Light',
+  accentColor: null,
   leftPanelWidth: 180,
   rightPanelVisible: true,  rightPanelWidth: 200,
   fontFamily: 'Segoe UI',

@@ -36,6 +36,17 @@ export const useStatsStore = defineStore('stats', {
     totalPhotos(s) {
       return s.overview.stats.reduce((acc, x) => acc + x.photoCount, 0)
     },
+    /** 张数条比例基准：全量鸟种最大张数（搜索过滤不改变条长基准，排行条可比） */
+    maxPhotoCount(s) {
+      return s.overview.stats.reduce((m, x) => Math.max(m, x.photoCount), 0) || 1
+    },
+    /** 全库平均识别命中率 = 1 - Σ被改 / Σ预测（汇总卡；无预测数据 → null） */
+    overallAccuracy(s) {
+      const pred = s.correctionStats.reduce((a, x) => a + x.predictedCount, 0)
+      if (pred === 0) return null
+      const corr = s.correctionStats.reduce((a, x) => a + x.correctedAwayCount, 0)
+      return 1 - corr / pred
+    },
     /** 选中鸟种的照片绝对路径（folder + '/' + relPath，ptimgUrl 输入形态） */
     photoPaths(s) {
       return s.photos.map((p) => `${p.folder}/${p.relPath}`)

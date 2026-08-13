@@ -144,6 +144,8 @@ export const exportAdjusted: (path: string, outputDir: string | null) => Promise
 export const listSystemFonts: () => Promise<string[]> = () => unwrap(api.listSystemFonts())
 export const setAppConfig: (config: AppConfig) => Promise<void> = (config) =>
   unwrapVoid(api.setAppConfig(config))
+/** 用系统默认文本编辑器打开配置文件（设置面板「打开配置文件」链接；文件不存在先落盘当前配置） */
+export const openConfigFile: () => Promise<void> = () => unwrapVoid(api.openConfigFile())
 
 // ── T1 批次（SpeciesIndex）：全局鸟种统计 ─────────────────
 

@@ -6,15 +6,16 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { getVersion, getTauriVersion } from '@tauri-apps/api/app'
 import { version as vueVersion } from 'vue'
-import { BookOpenIcon, InfoIcon, MoonIcon, SettingsIcon, SunIcon, XIcon } from '@lucide/vue'
+import { BookOpenIcon, FileTextIcon, InfoIcon, MoonIcon, SettingsIcon, SunIcon, XIcon } from '@lucide/vue'
 import { Dialog, DialogClose, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Button } from '@/components/ui/button'
 import { useConfigStore } from '@/stores/config'
 import { useCapturesStore } from '@/stores/captures'
-import { listSystemFonts } from '@/lib/ipc'
+import { listSystemFonts, openConfigFile as openConfigFileIpc } from '@/lib/ipc'
 import { BINDINGS, type KeyBinding, type KeymapAction } from '@/keymap'
 import type { DetectionSource, StackMode, Theme } from '@/lib/bindings'
+import { DEFAULT_ACCENT } from '@/lib/m3Theme'
 
 /** 弹窗开关（App.vue v-model 控制：顶栏齿轮按钮打开、keymap Esc 分支 / 弹窗自身 × 关闭） */
 const open = defineModel<boolean>('open', { default: false })
@@ -49,6 +50,16 @@ const theme = computed<Theme>({
   get: () => config.theme,
   set: (v: Theme) => void config.update({ theme: v }),
 })
+
+/** Material You 预设 seed 色板（8 个色块） */
+const ACCENT_PRESETS = ['#3b82f6', '#6750a4', '#00696e', '#386a20', '#b3261e', '#8d4f2f', '#a6374c', '#605b63']
+/** 主题 seed 色：预设/取色器改动即保存 + 整套配色即时重染；null = 默认蓝 */
+const accentColor = computed<string | null>({
+  get: () => config.accentColor,
+  set: (v: string | null) => void config.update({ accentColor: v }),
+})
+/** 当前生效 seed（null 回退默认蓝），取色器 value 与选中态判定用 */
+const effectiveAccent = computed(() => config.accentColor ?? DEFAULT_ACCENT)
 
 /** 系统字体列表（listSystemFonts 一次性拉取，真实后端为全系统字体） */
 const fonts = ref<string[]>([])
@@ -255,6 +266,17 @@ const aboutRows = computed(
       ['名录库', 'pica_ref.db'],
     ] as [string, string][],
 )
+
+/** 「打开配置文件」失败提示（成功无感；失败展示错误原因，下次点击重置） */
+const configOpenError = ref<string | null>(null)
+async function openConfigFile() {
+  configOpenError.value = null
+  try {
+    await openConfigFileIpc()
+  } catch (e) {
+    configOpenError.value = String(e)
+  }
+}
 </script>
 
 <template>
@@ -281,7 +303,7 @@ const aboutRows = computed(
             v-for="t in TABS"
             :key="t.id"
             :value="t.id"
-            class="justify-start gap-2 rounded-md px-2 py-1.5 data-[state=active]:bg-accent data-[state=active]:text-accent-foreground data-[state=active]:shadow-none"
+            class="justify-start gap-2 rounded-lg px-2 py-1.5 data-[state=active]:bg-secondary-container data-[state=active]:text-on-secondary-container data-[state=active]:shadow-none"
           >
             <component :is="t.icon" class="h-4 w-4" />
             {{ t.label }}
@@ -317,6 +339,33 @@ const aboutRows = computed(
                     <component :is="t.icon" class="size-4" />
                     {{ t.label }}
                   </button>
+                </div>
+              </div>
+
+              <!-- 主题色：Material You seed 色，预设/取色器即时重染整套配色 -->
+              <div class="settings-row">
+                <div class="settings-row-label">
+                  <label class="text-sm font-medium">主题色</label>
+                  <p class="mt-0.5 text-xs text-muted-foreground">Material You seed 色，整套配色即时重染</p>
+                </div>
+                <div class="flex shrink-0 items-center gap-1.5">
+                  <button
+                    v-for="s in ACCENT_PRESETS"
+                    :key="s"
+                    type="button"
+                    :style="{ backgroundColor: s }"
+                    class="size-6 rounded-full transition ring-2 ring-offset-2"
+                    :class="effectiveAccent === s ? 'ring-foreground' : 'ring-transparent hover:ring-outline'"
+                    :aria-label="s"
+                    @click="accentColor = s"
+                  />
+                  <input
+                    type="color"
+                    :value="effectiveAccent"
+                    class="size-6 cursor-pointer appearance-none rounded-full border-0 bg-transparent p-0"
+                    @input="accentColor = ($event.target as HTMLInputElement).value"
+                  />
+                  <Button variant="ghost" size="xs" @click="accentColor = null">默认</Button>
                 </div>
               </div>
 
@@ -449,16 +498,38 @@ const aboutRows = computed(
                   role="switch"
                   :aria-checked="includeSubdirectories"
                   aria-label="扫描包含子目录"
-                  class="relative h-5 w-9 shrink-0 rounded-full transition-colors focus-visible:ring-2 focus-visible:ring-ring"
-                  :class="includeSubdirectories ? 'bg-primary' : 'bg-muted'"
+                  class="relative h-8 w-[3.25rem] shrink-0 rounded-full border-2 transition-colors focus-visible:ring-2 focus-visible:ring-ring"
+                  :class="includeSubdirectories ? 'border-transparent bg-primary' : 'border-outline bg-surface-container-highest'"
                   @click="toggleIncludeSubdirectories"
                 >
                   <span
-                    class="absolute top-0.5 left-0.5 size-4 rounded-full bg-card shadow transition-transform"
-                    :class="includeSubdirectories ? 'translate-x-4' : ''"
+                    class="absolute top-1 left-1 size-6 rounded-full shadow transition-transform"
+                    :class="includeSubdirectories ? 'translate-x-6 bg-on-primary' : 'bg-outline'"
                   />
                 </button>
               </div>
+            </section>
+
+            <!-- 配置文件：打开按钮（用户可见入口，对齐 open_config_file 语义） -->
+            <section class="space-y-4">
+              <h3 class="section-header">配置文件</h3>
+              <div class="settings-row">
+                <div class="settings-row-label">
+                  <label class="text-sm font-medium">打开配置文件</label>
+                  <p class="mt-0.5 text-xs text-muted-foreground">
+                    用系统默认文本编辑器查看 config.toml（未保存过设置时自动生成）
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  class="inline-flex shrink-0 items-center gap-1 text-sm font-medium text-primary underline-offset-4 hover:underline"
+                  @click="openConfigFile"
+                >
+                  <FileTextIcon class="size-4" />
+                  打开配置文件
+                </button>
+              </div>
+              <p v-if="configOpenError" class="text-xs text-destructive">打开失败：{{ configOpenError }}</p>
             </section>
           </TabsContent>
 
@@ -499,10 +570,10 @@ const aboutRows = computed(
                 <span class="text-xs tabular-nums">{{ value }}</span>
               </div>
             </div>
-            <!-- 便携布局说明（对齐 photo-config determine_config_path 语义） -->
+            <!-- 配置位置说明（对齐 photo-config determine_config_path 语义） -->
             <div class="space-y-1.5 rounded-md border border-border bg-card/50 p-3 text-xs text-muted-foreground">
-              <p class="text-sm font-medium text-foreground">便携布局</p>
-              <p>配置存于可执行文件旁的 PT.db（程序不在系统安装目录时始终视为便携版）。</p>
+              <p class="text-sm font-medium text-foreground">配置与缓存位置</p>
+              <p>配置存于用户主目录统一位置（~/.config/pt/config.toml，Windows 为 %USERPROFILE%\.config\pt\config.toml）。</p>
               <p>缩略图缓存随扫描目录存放（每个目录下 .pt/thumbs）。</p>
             </div>
           </TabsContent>

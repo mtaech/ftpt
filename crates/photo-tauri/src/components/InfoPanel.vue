@@ -6,9 +6,15 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useStorage } from '@vueuse/core'
 import {
+  CalendarDaysIcon,
+  CameraIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
+  CrosshairIcon,
   GalleryVerticalEndIcon,
   InfoIcon,
-  PanelRightCloseIcon,
+  LensConvexIcon,
+  MapPinIcon,
   PencilIcon,
   RotateCcwIcon,
   ScanSearchIcon,
@@ -16,12 +22,15 @@ import {
   XIcon,
 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
+import { openUrl } from '@tauri-apps/plugin-opener'
 import { useCapturesStore } from '@/stores/captures'
 import { useSelectionStore } from '@/stores/selection'
 import { usePreviewStore } from '@/stores/preview'
 import { useRecognitionStore } from '@/stores/recognition'
 import { useFilterStore } from '@/stores/filter'
-import { correctBird, getAdjustments, getFrequentSpecies, getHistogram, getRecognition, isTauri, ptimgUrl, setAdjustments } from '@/lib/ipc'
+import { useConfigStore } from '@/stores/config'
+import { correctBird, getAdjustments, getFrequentSpecies, getHistogram, getRecognition, isTauri, setAdjustments } from '@/lib/ipc'
+import { wgs84ToBd09 } from '@/lib/geo'
 import { displayName, formatBytes, formatName, ratingToNumber } from '@/lib/format'
 import type {
   AdjustParams,
@@ -35,19 +44,12 @@ import type {
   RecognitionStatus,
 } from '@/lib/bindings'
 
-defineProps<{
-  /** 右侧面板是否可见（关闭按钮与父级 v-show 保持一致） */
-  visible: boolean
-}>()
-
-/** 关闭面板（App.vue 监听；等价 Ctrl+]） */
-const emit = defineEmits<{ toggle: [] }>()
-
 const captures = useCapturesStore()
 const selection = useSelectionStore()
 const preview = usePreviewStore()
 const recognition = useRecognitionStore()
 const filter = useFilterStore()
+const config = useConfigStore()
 
 /** 主选中拍摄（锚点优先；无选中/越界为 null） */
 const focused = computed<CaptureMeta | null>(() => selection.selected)
@@ -74,11 +76,6 @@ const activeTab = ref<'info' | 'adjust'>('info')
 
 // ══════════════════ 信息 tab ══════════════════
 
-/** 缩略图 src（thumb:ready 后 store 版本号递增强制刷新） */
-function thumbSrc(c: CaptureMeta): string {
-  return ptimgUrl('thumb', c.primaryPath, captures.thumbVersions[c.primaryPath])
-}
-
 /** 相机厂商 + 型号拼接（如 "NIKON Z 9"） */
 function cameraText(c: CaptureMeta): string {
   if (c.cameraMake && c.cameraModel) return `${c.cameraMake} ${c.cameraModel}`
@@ -87,6 +84,9 @@ function cameraText(c: CaptureMeta): string {
 
 /** EXIF 缺失值占位（对齐 GPUI 的 em dash） */
 const DASH = '—'
+
+/** 拍摄信息卡：默认只展示曝光四格，器材/日期/位置等行折叠（展开状态不持久化） */
+const exifExpanded = ref(false)
 
 // ── 评分：1–5 星点选，点击当前星清除（0 = 无评分）──
 function onStarClick(n: number) {
@@ -229,8 +229,14 @@ const displayConfidence = computed<number | null>(() => {
   if (r?.confidence != null) return r.confidence
   return focused.value?.birdConfidence ?? null
 })
-/** 置信度数字色：>=80 绿 / >=50 黄 / <50 蓝（对齐 GPUI confidence_color） */
-const confTextCls = computed(() => confBarCls(displayConfidence.value ?? 0))
+/** 置信度文字色：>=80 绿 / >=50 黄 / <50 蓝（对齐 GPUI confidence_color；数字用文字色，条用 bg 色） */
+function confTextClsOf(conf: number): string {
+  const pct = confPercent(conf)
+  if (pct >= 80) return 'text-label-green'
+  if (pct >= 50) return 'text-label-yellow'
+  return 'text-label-blue'
+}
+const confTextCls = computed(() => confTextClsOf(displayConfidence.value ?? 0))
 /** 待复核失败阶段中文提示（None 为空串，不显示） */
 const failureText = computed(() => FAILURE_STAGE_TEXT[fullRecognition.value?.failureStage ?? 'None'] ?? '')
 /** 待复核最接近候选（candidates 中第一个 bird 非空项，对齐 GPUI render_recognition_content） */
@@ -477,6 +483,9 @@ watch(histCanvas, (el) => {
   histObserver.observe(el)
 })
 
+/** 主题切换后画布颜色取自 CSS 变量，需显式重绘（flush: 'post' 保证 dark class 已应用） */
+watch(() => config.theme, () => drawHistogram(), { flush: 'post' })
+
 // ── GPS：十进制坐标 + OSM 地图链接 ──
 
 /** 十进制坐标显示（6 位小数；负号保留，南纬/西经为负） */
@@ -499,13 +508,25 @@ function focusText(fp: FocusPoint | null): string {
   }
 }
 
-/** OSM 地图链接（zoom 15，坐标居中） */
+/**
+ * 百度地图标注链接：EXIF GPS 为 WGS-84，百度用 BD-09，先做坐标转换
+ * （国内有 GCJ-02/BD-09 加密偏移，境外直通）。marker 端点无需 API key，
+ * 打开后地图居中显示红色标注，title/content 为标注气泡文本。
+ */
 function gpsMapUrl(lat: number, lon: number): string {
-  return `https://www.openstreetmap.org/?mlat=${lat.toFixed(6)}&mlon=${lon.toFixed(6)}&zoom=15`
+  const bd = wgs84ToBd09(lat, lon)
+  const q = new URLSearchParams({
+    location: `${bd.lat.toFixed(6)},${bd.lng.toFixed(6)}`,
+    title: '拍摄位置',
+    content: `拍摄坐标 ${lat.toFixed(6)}, ${lon.toFixed(6)}`,
+    output: 'html',
+  })
+  return `https://api.map.baidu.com/marker?${q}`
 }
 
 /**
- * 打开地图：Tauri 环境用 window.open（WebView2 外部 URL 默认交系统浏览器），
+ * 打开地图：Tauri 环境走 opener 插件（openUrl → 系统默认浏览器；Tauri v2 的
+ * window.open('_blank') 会被静默忽略，不再像 v1 那样转交系统浏览器），
  * 浏览器 mock 环境不拦截，走 anchor target=_blank 默认行为。
  */
 function onOpenMap(e: Event) {
@@ -513,7 +534,7 @@ function onOpenMap(e: Event) {
   if (!c || c.gpsLat == null || c.gpsLon == null) return
   if (isTauri) {
     e.preventDefault()
-    window.open(gpsMapUrl(c.gpsLat, c.gpsLon), '_blank', 'noopener')
+    void openUrl(gpsMapUrl(c.gpsLat, c.gpsLon))
   }
 }
 
@@ -627,7 +648,7 @@ function fmtSigned(v: number): string {
       @pointermove="onHandleMove"
     />
 
-    <!-- 面板标题栏：信息/调整 小 tab + 关闭按钮（对齐 GPUI info_panel 头部） -->
+    <!-- 面板标题栏：信息/调整 小 tab（关闭走右 rail / Ctrl+]） -->
     <div class="flex shrink-0 items-center justify-between gap-2 border-b border-border px-3 py-2">
       <div class="flex gap-1">
         <button
@@ -657,28 +678,32 @@ function fmtSigned(v: number): string {
           调整
         </button>
       </div>
-      <Button
-        size="icon-xs"
-        variant="ghost"
-        title="关闭右侧面板  Ctrl+]"
-        :aria-pressed="visible"
-        @click="emit('toggle')"
-      >
-        <PanelRightCloseIcon class="size-3.5" />
-      </Button>
     </div>
 
     <!-- tab 内容（卡片流，可滚动） -->
     <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3">
       <!-- ════════════ 信息 tab ════════════ -->
       <template v-if="activeTab === 'info'">
-        <!-- ── Hero 卡：缩略图 + 文件名/格式徽标 + 分辨率/大小 ── -->
+        <!-- ── Hero 卡：直方图（替代缩略图——网格/预览已展示缩略图，不重复）+ 文件名/格式徽标 + 分辨率/大小 ── -->
         <div class="panel-card flex flex-col gap-2 p-3">
           <template v-if="focused">
-            <div
-              class="flex h-[8.75rem] w-full items-center justify-center overflow-hidden rounded-md bg-muted"
-            >
-              <img :src="thumbSrc(focused)" :alt="displayName(focused)" class="size-full object-cover" />
+            <!-- 直方图（原缩略图位置）：luma 曲线 + RGB 细线 + 剪切统计 -->
+            <div class="flex flex-col gap-1.5 rounded-md bg-muted p-2.5">
+              <div class="flex items-center justify-between">
+                <span class="text-[0.625rem] font-medium text-muted-foreground">直方图</span>
+                <span v-if="histLoading" class="text-[0.625rem] text-muted-foreground/60">计算中…</span>
+              </div>
+              <template v-if="hist">
+                <canvas ref="histCanvas" class="h-20 w-full" />
+                <div class="flex gap-3 text-[0.625rem] tabular-nums">
+                  <span class="text-label-red">高光剪切 {{ clipHighPct.toFixed(1) }}%</span>
+                  <span class="text-label-blue">死黑 {{ clipLowPct.toFixed(1) }}%</span>
+                </div>
+              </template>
+              <div v-else-if="histError" class="py-1 text-xs text-muted-foreground">
+                直方图不可用（解码失败）
+              </div>
+              <div v-else class="py-1 text-xs text-muted-foreground">计算中…</div>
             </div>
             <div class="flex items-center justify-between gap-2">
               <div class="min-w-0 flex-1 truncate text-[0.8125rem] font-semibold" :title="focused.primaryPath">
@@ -718,45 +743,70 @@ function fmtSigned(v: number): string {
           </template>
         </div>
 
-        <!-- ── EXIF 卡：拍摄参数格（对齐 GPUI render_exif_section）── -->
+        <!-- ── EXIF 卡：拍摄参数（默认折叠，仅曝光四格；展开见器材/拍摄信息行）── -->
         <div class="panel-card flex flex-col gap-2 p-3">
-          <div class="section-header">拍摄信息</div>
+          <div class="flex items-center justify-between">
+            <span class="text-[11px] font-semibold text-muted-foreground">拍摄信息</span>
+            <button
+              type="button"
+              class="flex items-center gap-0.5 rounded-sm px-1 py-0.5 text-xs text-muted-foreground transition-colors select-none hover:bg-element hover:text-foreground"
+              :aria-expanded="exifExpanded"
+              @click="exifExpanded = !exifExpanded"
+            >
+              {{ exifExpanded ? '收起' : '更多' }}
+              <ChevronDownIcon v-if="!exifExpanded" class="size-3" />
+              <ChevronUpIcon v-else class="size-3" />
+            </button>
+          </div>
           <template v-if="focused">
-            <div class="flex gap-2">
-              <div class="flex-1 rounded-md bg-muted px-2 py-1">
+            <!-- 曝光四格：2×2 网格 + 1px 发丝线（bg-border 透出），值加粗等宽对齐读数 -->
+            <div class="grid grid-cols-2 gap-px overflow-hidden rounded-md border border-border bg-border">
+              <div class="bg-muted px-2.5 py-2">
                 <div class="text-[0.625rem] text-muted-foreground">焦距</div>
-                <div class="truncate tabular-nums text-[0.8125rem]">{{ focused.focalLength ?? DASH }}</div>
+                <div class="truncate text-[0.8125rem] font-medium tabular-nums">{{ focused.focalLength ?? DASH }}</div>
               </div>
-              <div class="flex-1 rounded-md bg-muted px-2 py-1">
+              <div class="bg-muted px-2.5 py-2">
                 <div class="text-[0.625rem] text-muted-foreground">光圈</div>
-                <div class="truncate tabular-nums text-[0.8125rem]">{{ focused.fNumber ?? DASH }}</div>
+                <div class="truncate text-[0.8125rem] font-medium tabular-nums">{{ focused.fNumber ?? DASH }}</div>
               </div>
-            </div>
-            <div class="flex gap-2">
-              <div class="flex-1 rounded-md bg-muted px-2 py-1">
+              <div class="bg-muted px-2.5 py-2">
                 <div class="text-[0.625rem] text-muted-foreground">快门</div>
-                <div class="truncate tabular-nums text-[0.8125rem]">{{ focused.exposureTime ?? DASH }}</div>
+                <div class="truncate text-[0.8125rem] font-medium tabular-nums">{{ focused.exposureTime ?? DASH }}</div>
               </div>
-              <div class="flex-1 rounded-md bg-muted px-2 py-1">
+              <div class="bg-muted px-2.5 py-2">
                 <div class="text-[0.625rem] text-muted-foreground">ISO</div>
-                <div class="truncate tabular-nums text-[0.8125rem]">{{ focused.iso ?? DASH }}</div>
+                <div class="truncate text-[0.8125rem] font-medium tabular-nums">{{ focused.iso ?? DASH }}</div>
               </div>
             </div>
+            <!-- 器材/拍摄信息行（默认折叠）：图标 + 标签 + 值 -->
+            <template v-if="exifExpanded">
             <div class="flex items-center justify-between gap-2">
-              <span class="shrink-0 text-xs text-muted-foreground">相机</span>
+              <span class="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+                <CameraIcon class="size-3.5 shrink-0" />
+                相机
+              </span>
               <span class="min-w-0 truncate text-xs">{{ cameraText(focused) }}</span>
             </div>
             <div class="flex items-center justify-between gap-2">
-              <span class="shrink-0 text-xs text-muted-foreground">镜头</span>
+              <span class="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+                <LensConvexIcon class="size-3.5 shrink-0" />
+                镜头
+              </span>
               <span class="min-w-0 truncate text-xs">{{ focused.lens ?? DASH }}</span>
             </div>
             <div class="flex items-center justify-between gap-2">
-              <span class="shrink-0 text-xs text-muted-foreground">日期</span>
+              <span class="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+                <CalendarDaysIcon class="size-3.5 shrink-0" />
+                日期
+              </span>
               <span class="min-w-0 truncate text-xs">{{ focused.dateTaken ?? DASH }}</span>
             </div>
-            <!-- GPS 行（T1 批次）：有坐标显示十进制 6 位 + OSM 地图链接；无坐标显示「无」 -->
+            <!-- GPS 行（T1 批次）：有坐标显示十进制 6 位 + 百度地图链接；无坐标显示「无」 -->
             <div class="flex items-center justify-between gap-2">
-              <span class="shrink-0 text-xs text-muted-foreground">位置</span>
+              <span class="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+                <MapPinIcon class="size-3.5 shrink-0" />
+                位置
+              </span>
               <span
                 v-if="focused.gpsLat != null && focused.gpsLon != null"
                 class="flex min-w-0 items-center gap-1.5 text-xs"
@@ -776,31 +826,15 @@ function fmtSigned(v: number): string {
             </div>
             <!-- 对焦点行：F 键叠加层同数据源（EXIF SubjectArea / RAW makernotes） -->
             <div class="flex items-center justify-between gap-2">
-              <span class="shrink-0 text-xs text-muted-foreground">对焦点</span>
+              <span class="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+                <CrosshairIcon class="size-3.5 shrink-0" />
+                对焦点
+              </span>
               <span class="min-w-0 truncate text-xs tabular-nums">{{ focusText(focused.focusPoint) }}</span>
             </div>
+            </template>
           </template>
           <div v-else class="text-xs text-muted-foreground">未选择图片</div>
-        </div>
-
-        <!-- ── 直方图卡（T1 批次）：luma 曲线 + RGB 细线 + 剪切统计 ── -->
-        <div class="panel-card flex flex-col gap-2 p-3">
-          <div class="flex items-center justify-between">
-            <span class="text-[11px] font-semibold text-muted-foreground">直方图</span>
-            <span v-if="histLoading" class="text-[0.625rem] text-muted-foreground/60">计算中…</span>
-          </div>
-          <template v-if="hist">
-            <canvas ref="histCanvas" class="h-20 w-full" />
-            <div class="flex gap-3 text-[0.625rem] tabular-nums">
-              <span class="text-label-red">高光剪切 {{ clipHighPct.toFixed(1) }}%</span>
-              <span class="text-label-blue">死黑 {{ clipLowPct.toFixed(1) }}%</span>
-            </div>
-          </template>
-          <div v-else-if="histError" class="text-xs text-muted-foreground">
-            直方图不可用（解码失败）
-          </div>
-          <div v-else-if="!focused" class="text-xs text-muted-foreground">未选择图片</div>
-          <div v-else class="text-xs text-muted-foreground">计算中…</div>
         </div>
 
         <!-- ── 识别卡：状态 chip + 完整结果（getRecognition）+ 重新识别/检测框/修正鸟种 ── -->
@@ -839,39 +873,48 @@ function fmtSigned(v: number): string {
           </div>
           <!-- 有识别记录：完整结果渲染 -->
           <template v-else>
-            <div class="flex items-center justify-between gap-2">
-              <span
-                class="rounded-sm border px-2 py-0.5 text-[0.6875rem] select-none"
-                :class="STATUS_META[focused.recognitionStatus].cls"
-              >
-                {{ STATUS_META[focused.recognitionStatus].label }}
-              </span>
-              <span
-                v-if="confPercent(displayConfidence) > 0"
-                class="tabular-nums text-[0.9375rem] font-semibold"
-                :class="confTextCls"
-              >
-                {{ confPercent(displayConfidence).toFixed(1) }}%
-              </span>
-            </div>
-            <!-- 已确认：鸟名 + 置信度条 -->
+            <span
+              class="self-start rounded-sm border px-2 py-0.5 text-[0.6875rem] select-none"
+              :class="STATUS_META[focused.recognitionStatus].cls"
+            >
+              {{ STATUS_META[focused.recognitionStatus].label }}
+            </span>
+            <!-- 已确认：鸟名 + 置信度条（百分比与条同排，替代原右端孤悬大数字） -->
             <template v-if="focused.recognitionStatus === 'Confirmed'">
               <div v-if="displayBirdName" class="truncate text-xs font-medium text-primary">
                 {{ displayBirdName }}
               </div>
-              <div v-if="displayConfidence !== null" class="h-1 w-full overflow-hidden rounded-full bg-muted">
-                <div
-                  class="h-full rounded-full transition-[width]"
-                  :class="confBarCls(displayConfidence)"
-                  :style="{ width: `${confPercent(displayConfidence)}%` }"
-                />
+              <div
+                v-if="displayConfidence !== null"
+                class="flex items-center gap-2"
+              >
+                <div class="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
+                  <div
+                    class="h-full rounded-full transition-[width]"
+                    :class="confBarCls(displayConfidence)"
+                    :style="{ width: `${confPercent(displayConfidence)}%` }"
+                  />
+                </div>
+                <span class="shrink-0 text-xs font-semibold tabular-nums" :class="confTextCls">
+                  {{ confPercent(displayConfidence).toFixed(1) }}%
+                </span>
               </div>
             </template>
-            <!-- 待复核：失败阶段中文提示 + 最接近候选 -->
+            <!-- 待复核：失败阶段中文提示 + 最接近候选（短条 + 百分比，与确认态视觉统一） -->
             <template v-if="focused.recognitionStatus === 'NeedsReview'">
               <div v-if="failureText" class="text-xs text-label-yellow">{{ failureText }}</div>
-              <div v-if="bestCandidate" class="text-xs text-muted-foreground">
-                最接近：{{ bestCandidate.name }} {{ bestCandidate.confidence.toFixed(1) }}%
+              <div v-if="bestCandidate" class="flex items-center gap-2 text-xs">
+                <span class="shrink-0 text-muted-foreground">最接近：{{ bestCandidate.name }}</span>
+                <div class="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
+                  <div
+                    class="h-full rounded-full"
+                    :class="confBarCls(bestCandidate.confidence)"
+                    :style="{ width: `${bestCandidate.confidence}%` }"
+                  />
+                </div>
+                <span class="shrink-0 font-medium tabular-nums" :class="confTextClsOf(bestCandidate.confidence)">
+                  {{ bestCandidate.confidence.toFixed(1) }}%
+                </span>
               </div>
             </template>
             <!-- 眼锐度行（完整结果才有；info 图标悬浮显示评分公式） -->

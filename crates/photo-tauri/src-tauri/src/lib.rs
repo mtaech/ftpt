@@ -281,9 +281,9 @@ pub struct AppState {
     thumb_cache: Option<ThumbnailCache>,
     /// 直方图/剪切叠加内存缓存（按完整路径；切图后复用，避免重复解码）
     hist_cache: parking_lot::Mutex<HistCache>,
-    /// 应用配置（PT.db）
+    /// 应用配置（~/.config/pt/config.toml）
     config: AppConfig,
-    /// 配置文件路径（determine_config_path：便携优先）
+    /// 配置文件路径（determine_config_path：全平台 ~/.config/pt/config.toml）
     config_path: PathBuf,
     /// 扫描换代号：后台 EXIF/缩略图任务按代数丢弃过期结果（防张冠李戴）
     scan_generation: u64,
@@ -1936,6 +1936,8 @@ fn set_app_config(state: State<'_, Mutex<AppState>>, config: AppConfig) -> Resul
         last_directory: config.last_directory,
         recent_directories: config.recent_directories,
         theme: config.theme,
+        // 主题 seed 色：`#RRGGBB` 字符串或 None（前端用默认蓝），无钳制直接透传
+        accent_color: config.accent_color,
         left_panel_width: config.left_panel_width.clamp(200, 480),
         right_panel_visible: config.right_panel_visible,
         right_panel_width: config.right_panel_width.clamp(200, 480),
@@ -1960,6 +1962,73 @@ fn set_app_config(state: State<'_, Mutex<AppState>>, config: AppConfig) -> Resul
     };
     save_config(&st);
     Ok(())
+}
+
+/// 用系统默认文本编辑器打开配置文件（设置面板「打开配置文件」链接）。
+/// 文件不存在时先落盘当前配置（首次运行未保存过设置也能打开）；
+/// 打开失败返回 Err，前端提示。
+#[tauri::command]
+#[specta::specta]
+fn open_config_file(state: State<'_, Mutex<AppState>>) -> Result<(), String> {
+    let (path, config) = {
+        let st = state.lock().expect("AppState 锁中毒");
+        (st.config_path.clone(), st.config.clone())
+    };
+    if !path.exists() {
+        photo_config::save_config(&path, &config).map_err(|e| format!("保存配置失败: {e}"))?;
+    }
+    open_with_text_editor(&path)
+}
+
+/// 用系统默认文本编辑器打开文件：
+/// Windows → notepad.exe（.toml 无默认关联应用，直启记事本最稳）；
+/// macOS → `open -t`（系统默认文本编辑器）；
+/// Linux → $EDITOR（按空白拆参数），回退 xdg-open（按 mime 处理，通常落文本编辑器）。
+fn open_with_text_editor(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        // 直启 notepad.exe 的 CreateProcess 对 Win11 UWP 别名不可靠（spawn 成功但进程不落地），
+        // 改用 `cmd /c start`（ShellExecute 语义）打开系统记事本
+        return std::process::Command::new("cmd.exe")
+            .args(["/C", "start", "", "notepad.exe"])
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("启动文本编辑器失败: {e}"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return std::process::Command::new("open")
+            .arg("-t")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("启动文本编辑器失败: {e}"));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // $EDITOR 可能是 "code --wait" 这类带参数命令，按空白拆成 argv
+        if let Some(editor) = std::env::var_os("EDITOR")
+            && let Some(editor) = editor.to_str()
+            && let Some(bin) = editor.split_whitespace().next()
+            && std::process::Command::new(bin)
+                .args(editor.split_whitespace().skip(1))
+                .arg(path)
+                .spawn()
+                .is_ok()
+        {
+            return Ok(());
+        }
+        return std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("启动文本编辑器失败: {e}"));
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        Err("当前平台不支持打开文本编辑器".to_string())
+    }
 }
 
 // ============================================================================
@@ -3209,6 +3278,7 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             export_adjusted,
             list_system_fonts,
             set_app_config,
+            open_config_file,
             get_species_stats,
             get_species_photos,
             get_correction_stats,
@@ -3238,9 +3308,9 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
 }
 
 pub fn run() {
-    // 配置：便携优先（exe 同级 PT.db / PT.toml），系统安装位置回落到 config_dir
+    // 配置：固定存 ~/.config/pt/config.toml（全平台统一，Windows 为 %USERPROFILE%\.config\pt\config.toml）
     let config_path = photo_config::determine_config_path()
-        .unwrap_or_else(|_| PathBuf::from("PT.db"));
+        .unwrap_or_else(|_| PathBuf::from("config.toml"));
     let config = photo_config::load_config(&config_path).unwrap_or_else(|e| {
         tracing::error!("加载配置失败，沿用默认配置: {e}");
         AppConfig::default()
@@ -3250,6 +3320,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(builder.invoke_handler())
         .register_asynchronous_uri_scheme_protocol("ptimg", ptimg_handler)
         .manage(Mutex::new(AppState::new(config, config_path)))

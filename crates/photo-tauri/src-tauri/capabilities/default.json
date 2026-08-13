@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "默认能力集：主窗口 + dialog 插件（ptimg 自定义协议无 capability 概念，由 CSP img-src 放行）",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default"]
+  "permissions": ["core:default", "dialog:default", "opener:default"]
 }

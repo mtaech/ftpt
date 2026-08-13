@@ -174,6 +174,12 @@ export const commands = {
 	 */
 	setAppConfig: (config: AppConfig) => typedError<null, string>(__TAURI_INVOKE("set_app_config", { config })),
 	/**
+	 *  用系统默认文本编辑器打开配置文件（设置面板「打开配置文件」链接）。
+	 *  文件不存在时先落盘当前配置（首次运行未保存过设置也能打开）；
+	 *  打开失败返回 Err，前端提示。
+	 */
+	openConfigFile: () => typedError<null, string>(__TAURI_INVOKE("open_config_file")),
+	/**
 	 *  全局鸟种统计（统计视图汇总条 + 左栏列表）：全库聚合、张数降序。
 	 *  数据源 = 启动时打开的 exe 同级 data/global.db；打开失败（降级 None）返回空概览。
 	 */
@@ -262,6 +268,8 @@ export type AppConfig = {
 	lastDirectory?: string | null,
 	recentDirectories?: string[],
 	theme?: Theme,
+	/**  Material You 主题 seed 色（`#RRGGBB`）。None = 前端用默认蓝 seed `#3b82f6`。 */
+	accentColor?: string | null,
 	leftPanelWidth?: number,
 	rightPanelVisible?: boolean,
 	/**  右侧信息面板宽度（px）。旧配置无此字段时默认 200。 */
@@ -269,7 +277,10 @@ export type AppConfig = {
 	fontFamily?: string,
 	/**  批量识别线程数（1-4）。低配设备减小，高配设备加大。默认 4（8 核以上 CPU）。 */
 	recognitionThreadCount?: number,
-	/**  识别鸟体定位来源（默认 Yolo = 全图 YOLO 检测；Focus = 优先相机对焦点 ROI，无对焦点时回退 YOLO）。 */
+	/**
+	 *  识别鸟体定位来源（默认 Yolo = 全图 YOLO 检测；Focus = 优先相机对焦点 ROI，
+	 *  无对焦点时回退 YOLO）。枚举无钳制；改动后对下次批量识别生效。
+	 */
 	detectionSource?: DetectionSource,
 	/**  导出预设列表（T1 批次：命名模板/长边/质量组合）。旧配置无此字段时为空。 */
 	exportPresets?: ExportPreset[],
@@ -440,6 +451,13 @@ export type CorrectionStat = {
 	correctedAwayCount: number,
 	accuracy: number | null,
 };
+
+/**
+ *  识别鸟体定位来源：Yolo = 全图 YOLO 检测（默认，现状）；
+ *  Focus = 优先用相机对焦点构造 ROI 直接分类（相机对焦位置先验可靠），
+ *  无对焦点的照片回退 YOLO 全图检测。
+ */
+export type DetectionSource = "Yolo" | "Focus";
 
 /**  `export:done` 事件负载：批量导出汇总（T1 批次） */
 export type ExportDone = {
@@ -690,13 +708,6 @@ export type SpeciesStat = {
 export type StackMode = "None" | "ByFileName" | "ByTime";
 
 /**
- *  识别鸟体定位来源（photo-config DetectionSource；AppConfig.detectionSource）：
- *  Yolo = 全图 YOLO 检测（默认）；Focus = 优先相机对焦点构造 ROI 直接分类，
- *  无对焦点的照片回退 YOLO 全图检测。纯枚举不加 rename（对齐 StackMode 约定）。
- */
-export type DetectionSource = "Yolo" | "Focus";
-
-/**
  *  侧栏目录树节点：name = 目录名，path = 完整路径，photoCount = 该目录**一层**
  *  直接包含的照片数（与 scanner 单层扫描同判据：viewable 扩展名，不含更深层）。
  *  更深层的子目录由前端在展开该节点时再调 list_subdirs 懒加载。
@@ -722,16 +733,6 @@ export type UndoBatchResult = {
 	reverted: number,
 	skipped: ([string, string])[],
 };
-
-/* Tauri Specta runtime */
-async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {
-    try {
-        return { status: "ok", data: await result };
-    } catch (e) {
-        if (e instanceof Error) throw e;
-        return { status: "error", error: e as any };
-    }
-}
 
 // 手写补充类型（specta 生成物不含）：FilterCriteria/SortBy/SortDirection/
 // RecognitionFilter 仅被前端筛选逻辑使用，Rust 侧无 command 引用它们，specta
@@ -767,3 +768,14 @@ export type FilterCriteria = {
   lensFilter: string[]
   keywordFilter: string[]
 }
+
+/* Tauri Specta runtime */
+async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {
+    try {
+        return { status: "ok", data: await result };
+    } catch (e) {
+        if (e instanceof Error) throw e;
+        return { status: "error", error: e as any };
+    }
+}
+

@@ -4,6 +4,7 @@
 import { defineStore } from 'pinia'
 import { getAppConfig, setAppConfig } from '@/lib/ipc'
 import type { AppConfig } from '@/lib/bindings'
+import { applyMaterialTheme, DEFAULT_ACCENT } from '@/lib/m3Theme'
 
 /** 默认配置（对齐 photo-config 默认：thumbnail 220 / Light / Segoe UI / 线程 2；index.html 不写死 dark，默认即亮色） */
 const DEFAULT_CONFIG: AppConfig = {
@@ -12,6 +13,7 @@ const DEFAULT_CONFIG: AppConfig = {
   lastDirectory: null,
   recentDirectories: [],
   theme: 'Light',
+  accentColor: null,
   leftPanelWidth: 180,
   rightPanelVisible: true,
   rightPanelWidth: 200,
@@ -33,6 +35,8 @@ export const useConfigStore = defineStore('config', {
   getters: {
     /** 主题（后端字段可缺省时回退 Light，对齐 index.html 亮色默认） */
     theme: (s) => s.config.theme ?? 'Light',
+    /** Material You seed 色（None = 前端用默认蓝 DEFAULT_ACCENT） */
+    accentColor: (s) => s.config.accentColor ?? null,
     /** 界面字体（回退 Segoe UI，与 style.css body 回退一致） */
     fontFamily: (s) => s.config.fontFamily ?? 'Segoe UI',
     /** 识别线程数（回退 2） */
@@ -56,6 +60,8 @@ export const useConfigStore = defineStore('config', {
     /** 把主题/字体/缩放比例应用到 DOM（启动恢复与设置改动共用） */
     applyDom() {
       document.documentElement.classList.toggle('dark', this.theme === 'Dark')
+      // M3 色彩角色：seed 色 → HCT 动态明暗色调板（内联变量优先于 style.css 静态兜底）
+      applyMaterialTheme(this.accentColor ?? DEFAULT_ACCENT, this.theme === 'Dark')
       document.documentElement.style.setProperty('--font-family-app', this.fontFamily)
       // 全局 UI 缩放：html font-size = 15px × scale/100（Tailwind 全 rem 等比缩放）
       const base = 15 * (this.uiScale / 100)

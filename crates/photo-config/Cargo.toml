@@ -5,13 +5,9 @@ edition.workspace = true
 
 [dependencies]
 dirs.workspace = true
-rusqlite.workspace = true
-rusqlite_migration.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
-tracing.workspace = true
 # 可选：为 Tauri 端导出 TS 类型（tauri-specta）。默认构建不启用，行为零改动
 specta = { workspace = true, optional = true }
 

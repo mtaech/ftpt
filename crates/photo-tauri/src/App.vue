@@ -9,7 +9,6 @@ import {
   FolderOpenIcon,
   GalleryVerticalEndIcon,
   ImageIcon,
-  ListChecksIcon,
   PanelLeftIcon,
   PanelLeftOpenIcon,
   RefreshCwIcon,
@@ -138,16 +137,6 @@ function toggleLeftPanel() {
 }
 function toggleRightPanel() {
   rightPanelVisible.value = !rightPanelVisible.value
-}
-
-/** 顶栏「批量操作」：左栏切到批量 tab（已在批量 tab 则切回目录 tab） */
-function toggleBatchTab() {
-  if (leftTab.value === 'batch' && sidebarVisible.value) {
-    leftTab.value = 'dir'
-  } else {
-    sidebarVisible.value = true
-    leftTab.value = 'batch'
-  }
 }
 
 /**
@@ -416,19 +405,9 @@ function showStats() {
   <div class="flex h-screen flex-col overflow-hidden bg-background text-foreground">
     <!-- 顶栏（全宽，对齐 GPUI toolbar 置顶，高 44px）：左 = 操作按钮 + 目录名/计数；中央 = 网格/预览下划线 tab；右 = 扫描进度/刷新/设置 -->
     <header class="flex h-11 shrink-0 items-center gap-2 border-b bg-card px-2">
-      <!-- 左组：操作按钮 + 目录名（粗体截断，max-w 11rem）+ 计数（muted）。
-           打开/导入已收归左栏文件树 tab 操作区 -->
+      <!-- 左组：目录名（粗体截断，max-w 11rem）+ 计数（muted）。
+           打开/导入/批量操作已收归左栏文件树/批量 tab 操作区 -->
       <div class="flex min-w-0 flex-1 items-center gap-2">
-        <!-- 批量操作：左栏 tab 切换（目录 / 批量，对齐右栏 tabs 模式） -->
-        <Button
-          size="xs"
-          variant="ghost"
-          :class="{ 'bg-accent text-accent-foreground': sidebarVisible && leftTab === 'batch' }"
-          @click="toggleBatchTab"
-        >
-          <ListChecksIcon data-icon="inline-start" />
-          批量操作
-        </Button>
         <span v-if="captures.directory" class="max-w-44 truncate font-semibold" :title="captures.directory">
           {{ dirName(captures.directory) }}
         </span>
@@ -501,15 +480,15 @@ function showStats() {
       </div>
         <!-- 刷新目录（对齐 GPUI toolbar refresh-btn；无目录/扫描中禁用，F5 同义） -->
         <Button
-          size="icon-sm"
+          size="sm"
           variant="outline"
-          class="shadow-none"
+          class="shrink-0"
           :disabled="!captures.directory || captures.scanning"
           title="刷新目录 (F5)"
-          aria-label="刷新目录"
           @click="captures.rescan()"
         >
-          <RefreshCwIcon :class="{ 'animate-spin': captures.scanning }" />
+          <RefreshCwIcon data-icon="inline-start" :class="{ 'animate-spin': captures.scanning }" />
+          刷新目录
         </Button>
         <!-- 设置入口（齿轮按钮，吸最右；对齐 GPUI rail 设置按钮） -->
         <Button
@@ -598,8 +577,6 @@ function showStats() {
       <!-- 右栏（可拖宽；Ctrl+] 隐藏/显示；内部含关闭按钮） -->
       <InfoPanel
         v-show="rightPanelVisible"
-        :visible="rightPanelVisible"
-        @toggle="toggleRightPanel"
       />
 
       <!-- 右 Activity Rail：48px（对齐 GPUI right_rail.rs） -->

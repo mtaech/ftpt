@@ -1,5 +1,5 @@
 import { fileURLToPath, URL } from 'node:url'
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import vue from '@vitejs/plugin-vue'
 import tailwindcss from '@tailwindcss/vite'
 
@@ -21,4 +21,13 @@ export default defineConfig({
     outDir: 'dist',
   },
   envPrefix: ['VITE_', 'TAURI_'],
+  test: {
+    server: {
+      deps: {
+        // @material/material-color-utilities 深部 import 无 .js 扩展名，
+        // Node ESM 严格解析会失败（vitest SSR 外部化）；走 vite 转换管线即可
+        inline: [/@material\/material-color-utilities/],
+      },
+    },
+  },
 })
