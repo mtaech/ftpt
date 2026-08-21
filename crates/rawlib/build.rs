@@ -105,14 +105,21 @@ fn main() {
 
             println!("cargo:rustc-link-search=native={}", lib_dir.display());
 
-            // 优先尝试静态链接，如果不存在则使用动态链接
-            if lib_dir.join("libraw.a").exists() {
-                eprintln!("Using static libraw library from bundle");
+            // 共享对象必须优先于 bundled 静态库：静态 libgomp 的 TLS
+            // 重定位不能用于 Tauri 等 shared 链接场景。
+            let dynamic_lib = PathBuf::from(&manifest_dir)
+                .join("..")
+                .join("..")
+                .join("local-lib");
+            if dynamic_lib.join("libraw.so").exists() {
+                eprintln!("Using PIC dynamic libraw from local-lib");
+                println!("cargo:rustc-link-search=native={}", dynamic_lib.display());
+                println!("cargo:rustc-link-lib=dylib=raw");
+                println!("cargo:rerun-if-changed={}", dynamic_lib.join("libraw.so").display());
+            } else {
+                eprintln!("Using bundled static libraw library");
                 println!("cargo:rustc-link-lib=static=raw");
                 println!("cargo:rerun-if-changed=libraw/gnu/lib/libraw.a");
-
-                // 0.22.2 起 bundled 静态库为全静态构建，需链接其依赖
-                // （静态库按顺序解析，依赖项必须放在 libraw 之后）
                 for dep in ["jpeg", "lcms2", "z", "gomp"] {
                     let dep_file = lib_dir.join(format!("lib{}.a", dep));
                     if dep_file.exists() {
@@ -120,9 +127,6 @@ fn main() {
                         println!("cargo:rerun-if-changed={}", dep_file.display());
                     }
                 }
-            } else {
-                eprintln!("Static library not found in bundle, expecting system dynamic library");
-                println!("cargo:rustc-link-lib=dylib=raw");
             }
 
             // GNU 平台需要链接 C++ 标准库
