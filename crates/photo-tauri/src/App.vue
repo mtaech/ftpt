@@ -4,7 +4,7 @@
 //   → 底部 StatusBar。
 // 左/右栏可独立隐藏（Ctrl+[ / Ctrl+] 切换，右栏初始值跟随后端配置），
 // 拖宽把手在各面板内部（宽度 localStorage 持久化，范围 200–480）。全局快捷键见 keymap.ts。
-import { onMounted, onUnmounted, ref } from 'vue'
+import { nextTick, onMounted, onUnmounted, ref } from 'vue'
 import {
   FolderOpenIcon,
   GalleryVerticalEndIcon,
@@ -14,9 +14,21 @@ import {
   RefreshCwIcon,
   ScanSearchIcon,
   SettingsIcon,
+  CrownIcon,
 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import PhotoGrid from '@/components/PhotoGrid.vue'
+import TitleBar from '@/components/TitleBar.vue'
+import WindowResizeEdges from '@/components/WindowResizeEdges.vue'
 import PhotoPreview from '@/components/PhotoPreview.vue'
 import CompareView from '@/components/CompareView.vue'
 import SlideshowView from '@/components/SlideshowView.vue'
@@ -28,8 +40,11 @@ import RightRail from '@/components/RightRail.vue'
 import StatusBar from '@/components/StatusBar.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
 import SettingsModal from '@/components/SettingsModal.vue'
+import DuplicatesPanel from '@/components/DuplicatesPanel.vue'
 import ImportDialog from '@/components/ImportDialog.vue'
 import ExportDialog from '@/components/ExportDialog.vue'
+import MapView from '@/components/MapView.vue'
+import SpeciesCorrectDialog from '@/components/SpeciesCorrectDialog.vue'
 import { useCapturesStore } from '@/stores/captures'
 import { useSelectionStore } from '@/stores/selection'
 import { usePreviewStore } from '@/stores/preview'
@@ -40,8 +55,13 @@ import { useConfigStore } from '@/stores/config'
 import { useStatsStore } from '@/stores/stats'
 import { useBatchStore } from '@/stores/batch'
 import { useImportDialogStore } from '@/stores/importDialog'
+import { useMapViewStore } from '@/stores/mapView'
+import { useQualityStore } from '@/stores/quality'
+import { useDuplicatesStore } from '@/stores/duplicates'
 import { installKeymap, type KeymapHandlers } from '@/keymap'
 import { zoomHost } from '@/lib/zoomHost'
+import { nonBestPaths } from '@/lib/bestFrame'
+import type { CaptureMeta } from '@/lib/bindings'
 import { deleteCaptures, undoBatchOperation } from '@/lib/ipc'
 
 const captures = useCapturesStore()
@@ -53,6 +73,9 @@ const recognition = useRecognitionStore()
 const configStore = useConfigStore()
 const stats = useStatsStore()
 const batch = useBatchStore()
+const mapView = useMapViewStore()
+const quality = useQualityStore()
+const duplicates = useDuplicatesStore()
 
 /** 左栏可见（对齐 GPUI sidebar_visible，运行时状态，默认可见） */
 const sidebarVisible = ref(true)
@@ -64,6 +87,8 @@ const rightPanelVisible = ref(true)
 const settingsOpen = ref(false)
 /** 导入弹窗显隐（store 驱动：文件树 tab「导入」按钮打开，×/Esc/遮罩关闭） */
 const importDialog = useImportDialogStore()
+/** K 键确认弹窗快照：打开时记录组数/将标记张数/目标路径，确认后按快照应用（避免等待期状态漂移） */
+const keepBest = ref<{ groupCount: number; markCount: number; paths: string[] } | null>(null)
 
 /**
  * 标记键目标路径：对比模式（视图态）作用于聚焦格（单张），幻灯片态作用于
@@ -105,6 +130,44 @@ function enterCompare() {
   if (members.length < 2) return
   compare.open(members)
   preview.openCompare()
+}
+
+/**
+ * K 键目标连拍组（组元数据数组，captures.items 下标 → CaptureMeta）：
+ * 有选中 → 仅当前选中照片所在组；无选中 → 当前筛选结果内全部 size≥2 组
+ * （filter.burstGroups 按显示序登记，天然只含当前筛选内的 size≥2 组）。
+ */
+function collectBurstGroups(): CaptureMeta[][] {
+  const byGroup = new Map<string, number[]>()
+  for (const [i, e] of filter.burstGroups) {
+    const arr = byGroup.get(e.groupId)
+    if (arr) arr.push(i)
+    else byGroup.set(e.groupId, [i])
+  }
+  const idx = selection.selectedIndex
+  if (idx !== null) {
+    const entry = filter.burstGroups.get(idx)
+    if (!entry) return []
+    const members = byGroup.get(entry.groupId) ?? []
+    return [members.map((i) => captures.items[i])]
+  }
+  return [...byGroup.values()].map((members) => members.map((i) => captures.items[i]))
+}
+
+/** K 键：连拍组自动选优。确认后把各组非最优帧批量标 Flag::Rejected（复用现有旗标 mutation）。 */
+function keepBestFrame() {
+  const groups = collectBurstGroups()
+  const paths = groups.flatMap(nonBestPaths)
+  if (paths.length === 0) return
+  keepBest.value = { groupCount: groups.length, markCount: paths.length, paths }
+}
+
+/** 确认弹窗「标记 Reject」：按打开时快照应用（乐观更新 + 失败重拉回滚由 captures.applyFlag 承担） */
+function confirmKeepBest() {
+  const pending = keepBest.value
+  if (!pending) return
+  keepBest.value = null
+  void captures.applyFlag(pending.paths, 'Reject')
 }
 
 /** 回到网格：对比模式先清对比集，再走预览关闭（顶栏「网格」按钮 / G 共用） */
@@ -162,6 +225,8 @@ const keymapHandlers: KeymapHandlers = {
   flagPick: () => void captures.applyFlag(markPaths(), 'Pick'),
   flagReject: () => void captures.applyFlag(markPaths(), 'Reject'),
   flagNone: () => void captures.applyFlag(markPaths(), null),
+  // 连拍选优：K 保留组内最优帧（其余标 Reject；有选中仅作用其所在组，无选中作用于当前筛选全部连拍组）
+  keepBestFrame,
   // 识别：B 单张/所选（多选时批量）、Ctrl+B 全部未识别、Ctrl+Shift+B 重新识别全部
   recognize: () => void recognition.recognize(selection.selectedPaths),
   recognizeUnrecognized: () => recognition.recognizeUnrecognized(),
@@ -269,6 +334,11 @@ const keymapHandlers: KeymapHandlers = {
   deselectAll: () => selection.clear(),
   // Esc：优先级对齐 GPUI layout.rs escape 分支（settings > 批量识别取消 > 对比退出 > 框选清除 > 预览退出）
   closePreview: () => {
+    // 地图 overlay 分支：全屏浮层置顶，Esc 优先关地图（再次按 M 同效果）
+    if (mapView.isOpen) {
+      mapView.close()
+      return
+    }
     // settings 分支：设置弹窗打开时 Esc 优先关闭（对齐 GPUI：settings > 批量识别取消 > 框选清除 > 预览退出）
     if (settingsOpen.value) {
       settingsOpen.value = false
@@ -303,6 +373,8 @@ const keymapHandlers: KeymapHandlers = {
   // 面板开关：Ctrl+[ / Ctrl+]（对齐 GPUI Action::ToggleLeftPanel / ToggleRightPanel）
   toggleLeftPanel,
   toggleRightPanel,
+  // 地图：M 进入/退出全屏 GPS 地图 overlay（无事件订阅，纯本地开关）
+  toggleMap: () => mapView.toggle(),
 }
 
 /**
@@ -328,6 +400,7 @@ let disposeKeymap: (() => void) | null = null
 onMounted(async () => {
   captures.init()
   recognition.init()
+  quality.init()
   disposeKeymap = installKeymap(keymapHandlers)
   // 主题/字体/右栏可见性跟随后端配置（config store 集中处理 DOM 应用；GPUI 版默认 Light）
   await configStore.load()
@@ -399,10 +472,28 @@ function showStats() {
   if (compare.active) compare.close()
   preview.openStats()
 }
+
+/**
+ * 地图 popup「定位到网格」：关闭地图 → 回网格视图（复用 showGrid 退出分支，
+ * 统计/幻灯片/对比/预览态全部收敛）→ 选中该照片。PhotoGrid 监听
+ * selectedIndex 的 watch 自动滚动到可见区；若刚从其他视图切回网格，等
+ * nextTick 让 PhotoGrid 挂载后再选中，保证滚动逻辑拿到真实滚动容器。
+ */
+async function locateFromMap(item: CaptureMeta) {
+  mapView.close()
+  showGrid()
+  const i = captures.items.findIndex((c) => c.primaryPath === item.primaryPath)
+  if (i < 0) return
+  await nextTick()
+  selection.select(i)
+}
 </script>
 
 <template>
   <div class="flex h-screen flex-col overflow-hidden bg-background text-foreground">
+    <!-- 自绘标题栏（decorations:false 后接管原生标题栏；居顶，全宽，拖拽 + 三窗口按钮） -->
+    <TitleBar />
+
     <!-- 顶栏（全宽，对齐 GPUI toolbar 置顶，高 44px）：左 = 操作按钮 + 目录名/计数；中央 = 网格/预览下划线 tab；右 = 扫描进度/刷新/设置 -->
     <header class="flex h-11 shrink-0 items-center gap-2 border-b bg-card px-2">
       <!-- 左组：目录名（粗体截断，max-w 11rem）+ 计数（muted）。
@@ -589,9 +680,39 @@ function showStats() {
     <ContextMenu />
     <!-- 设置弹窗（Teleport 到 body；齿轮按钮打开、Esc/×/遮罩关闭） -->
     <SettingsModal v-model:open="settingsOpen" />
+    <!-- 重复照片面板（Sidebar 底部按钮打开；自身 store 管理显隐，对齐 ExportDialog 模式） -->
+    <DuplicatesPanel />
     <!-- 导入弹窗（文件树 tab「导入」按钮打开；选源 → 计划预览 → 执行） -->
     <ImportDialog v-model:open="importDialog.open" />
     <!-- 导出弹窗（右键菜单「导出…」/ 批量面板「导出」打开；自身 store 管理显隐） -->
     <ExportDialog />
+    <!-- K 键确认弹窗：连拍组自动选优 → 非最优帧批量标 Reject（组数 + 将标记张数确认） -->
+    <Dialog :open="keepBest !== null" @update:open="(v: boolean) => !v && (keepBest = null)">
+      <DialogContent class="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle class="flex items-center gap-1.5 text-amber-300">
+            <CrownIcon class="size-4" />
+            连拍组自动选优
+          </DialogTitle>
+          <DialogDescription>
+            将按眼锐度（并列取文件更大、再取路径序，无锐度信息时垫底）保留
+            {{ keepBest?.groupCount }} 个连拍组的最优帧，并把
+            {{ keepBest?.markCount }} 张非最优帧标记为 Reject（可被 U 键清除）。确认继续？
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter class="justify-between" :show-close-button="false">
+          <DialogClose as-child>
+            <Button size="sm" variant="outline">取消</Button>
+          </DialogClose>
+          <Button size="sm" variant="destructive" @click="confirmKeepBest">标记 Reject</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    <!-- 地图 overlay（M 键开关；全屏浮层 z-50 参照设置弹窗；Esc/关闭按钮/M 键退出） -->
+    <MapView v-if="mapView.isOpen" @locate="locateFromMap" />
+    <!-- 识别纠错弹窗（InfoPanel「纠正…」/ 网格右键「纠正鸟种…」打开；自身 store 管理显隐） -->
+    <SpeciesCorrectDialog />
+    <!-- 窗口边缘缩放热区（decorations:false 无原生边框；8 向手柄，顶层覆盖全部浮层之下） -->
+    <WindowResizeEdges />
   </div>
 </template>

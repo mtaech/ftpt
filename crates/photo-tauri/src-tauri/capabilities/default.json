@@ -3,5 +3,17 @@
   "identifier": "default",
   "description": "默认能力集：主窗口 + dialog 插件（ptimg 自定义协议无 capability 概念，由 CSP img-src 放行）",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default", "opener:default"]
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "opener:default",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging",
+    "core:window:allow-is-maximized",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize"
+  ]
 }
