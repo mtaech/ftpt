@@ -19,8 +19,24 @@ use std::path::Path;
 
 use photo_domain::{BirdCandidate, BirdMatch};
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 
 use crate::RecognizeError;
+
+/// 名录搜索/纠正条目（与 animal_info 行一一对应；跨边界 serde + specta 导出，
+/// 供 photo-tauri `search_catalog` command 返回——前端 SpeciesCorrectDialog 数据源）。
+/// 字段与 domain::BirdMatch 同构，独立命名承载「名录检索结果」语义。
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogEntry {
+    /// 名录库 animal_info 主键
+    pub bird_id: i64,
+    /// 中文名
+    pub cn_name: String,
+    /// 学名（拉丁名）
+    pub latin_name: String,
+}
 
 /// 名录库只读连接
 pub struct CatalogDb {
@@ -107,6 +123,72 @@ impl CatalogDb {
             }
         };
         rows.filter_map(|r| r.ok()).collect()
+    }
+
+    /// 名录搜索（人工纠错对话框数据源）：按中文名/拼音/拉丁名做 LIKE 子串匹配，
+    /// 仅鸟纲（对齐 [`all_species`] 口径）。匹配优先级：中文名命中 > 拼音命中 >
+    /// 拉丁名命中（拼音检索符合中文用户输入习惯；cn_name_pinyin 缺失时排序回退
+    /// 中文名，见 memory），组内按拼音排序。`query` 去首尾空白后为空 / `limit` 为 0
+    /// 时返回空列表（前端防抖后无输入不发请求）。
+    /// 名录库损坏/缺失 schema 时记录警告并返回空 Vec，绝不 panic。
+    pub fn search_catalog(&self, query: &str, limit: usize) -> Vec<CatalogEntry> {
+        let q = query.trim();
+        if q.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let mut stmt = match self.conn.prepare_cached(
+            "SELECT id, cn_name, latin_name FROM animal_info \
+             WHERE gang_cn = '鸟纲' AND cn_name IS NOT NULL AND cn_name != '' \
+               AND (cn_name LIKE '%' || ?1 || '%' \
+                    OR cn_name_pinyin LIKE '%' || ?1 || '%' \
+                    OR latin_name LIKE '%' || ?1 || '%') \
+             ORDER BY CASE \
+                 WHEN cn_name LIKE '%' || ?1 || '%' THEN 0 \
+                 WHEN cn_name_pinyin LIKE '%' || ?1 || '%' THEN 1 \
+                 ELSE 2 END, \
+                 COALESCE(NULLIF(cn_name_pinyin, ''), cn_name) \
+             LIMIT ?2",
+        ) {
+            Ok(stmt) => stmt,
+            Err(e) => {
+                tracing::warn!("[名录] 搜索语句编译失败（schema 不符？）: {e}");
+                return Vec::new();
+            }
+        };
+        let rows = match stmt.query_map(rusqlite::params![q, limit as i64], |row| {
+            Ok(CatalogEntry {
+                bird_id: row.get(0)?,
+                cn_name: row.get(1)?,
+                latin_name: row.get(2)?,
+            })
+        }) {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("[名录] 搜索执行失败: {e}");
+                return Vec::new();
+            }
+        };
+        rows.filter_map(|r| r.ok()).collect()
+    }
+
+    /// 按名录库主键查单一鸟种（`correct_recognition` 入参校验用）：
+    /// 不存在 / 非鸟纲 / 无中文名返回 None。
+    pub fn get_species_by_id(&self, bird_id: i64) -> Option<CatalogEntry> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT id, cn_name, latin_name FROM animal_info \
+                 WHERE id = ?1 AND gang_cn = '鸟纲' AND cn_name IS NOT NULL AND cn_name != ''",
+            )
+            .ok()?;
+        stmt.query_row(rusqlite::params![bird_id], |row| {
+            Ok(CatalogEntry {
+                bird_id: row.get(0)?,
+                cn_name: row.get(1)?,
+                latin_name: row.get(2)?,
+            })
+        })
+        .ok()
     }
 
     /// 内部：查询类别号对应的动物记录。
@@ -270,5 +352,66 @@ mod tests {
         assert!(candidates[1].bird.is_none()); // 歧义保留无 bird
         assert_eq!(candidates[2].class_index, 400);
         assert!(candidates[2].bird.is_none()); // 无映射保留无 bird
+    }
+
+    #[test]
+    fn test_search_catalog_by_cn_and_pinyin_and_latin() {
+        let (_dir, db) = create_test_db();
+        // 中文名子串
+        let by_cn = db.search_catalog("大山", 10);
+        assert_eq!(by_cn.len(), 1);
+        assert_eq!(by_cn[0].cn_name, "大山雀");
+        assert_eq!(by_cn[0].bird_id, 2);
+        assert_eq!(by_cn[0].latin_name, "Parus major");
+        // 拼音子串（cn_name_pinyin LIKE）
+        let by_py = db.search_catalog("wudong", 10);
+        assert_eq!(by_py.len(), 1);
+        assert_eq!(by_py[0].cn_name, "乌鸫");
+        // 拉丁名子串（SQLite LIKE 对 ASCII 大小写不敏感）
+        let by_la = db.search_catalog("PARUS", 10);
+        assert_eq!(by_la.len(), 1);
+        assert_eq!(by_la[0].cn_name, "大山雀");
+    }
+
+    #[test]
+    fn test_search_catalog_priority_and_order() {
+        let (_dir, db) = create_test_db();
+        // 空查询 / 纯空白 → 空列表（前端无输入不发请求）
+        assert!(db.search_catalog("", 10).is_empty());
+        assert!(db.search_catalog("   ", 10).is_empty());
+        // 'wu' 仅命中拼音（乌鸫 wudong / 物种A wuzhonga / 物种B wuzhongb），
+        // 同优先级组内按拼音排序：wudong < wuzhonga < wuzhongb
+        let wu = db.search_catalog("wu", 10);
+        let names: Vec<&str> = wu.iter().map(|e| e.cn_name.as_str()).collect();
+        assert_eq!(names, vec!["乌鸫", "物种A", "物种B"]);
+    }
+
+    #[test]
+    fn test_search_catalog_limit_and_non_bird_excluded() {
+        let (_dir, db) = create_test_db();
+        // limit = 0 → 空；limit 截断
+        assert!(db.search_catalog("wu", 0).is_empty());
+        let one = db.search_catalog("wu", 1);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].cn_name, "乌鸫");
+        // 非鸟纲（昆虫纲某虫）不参与搜索：中文名与拼音均搜不到
+        assert!(db.search_catalog("某虫", 10).is_empty());
+        assert!(db.search_catalog("mouchong", 10).is_empty());
+        // 无中文名的记录（鱼）不参与搜索
+        assert!(db.search_catalog("Fish", 10).is_empty());
+    }
+
+    #[test]
+    fn test_get_species_by_id() {
+        let (_dir, db) = create_test_db();
+        let e = db.get_species_by_id(2).expect("id=2 应存在");
+        assert_eq!(e.cn_name, "大山雀");
+        assert_eq!(e.latin_name, "Parus major");
+        // 不存在的 id
+        assert!(db.get_species_by_id(999).is_none());
+        // 非鸟纲（昆虫纲 id=5）不可作为纠正目标
+        assert!(db.get_species_by_id(5).is_none());
+        // 无中文名（id=6）不可作为纠正目标
+        assert!(db.get_species_by_id(6).is_none());
     }
 }

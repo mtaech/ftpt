@@ -169,7 +169,8 @@ impl ThumbnailCache {
         Ok(bytes)
     }
 
-    fn cache_key(&self, source: &SourceFile, size: u32, variant: &str) -> String {
+    /// 缓存键（`{:016x}.jpg`）：供 phash 近重复检测按同键直接读磁盘缓存（零解码）
+    pub(crate) fn cache_key(&self, source: &SourceFile, size: u32, variant: &str) -> String {
         use std::hash::{Hash, Hasher};
         // 缓存格式版本：解码逻辑修复（如行宽错位）时递增，旧缓存自动失效
         const CACHE_VERSION: u8 = 4;

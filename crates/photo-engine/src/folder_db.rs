@@ -355,6 +355,52 @@ impl FolderDb {
         Ok(())
     }
 
+    /// 人工修正鸟种：更新识别行的鸟种字段（bird_id/bird_name）并置状态 Confirmed。
+    ///
+    /// 「人工来源」用现有字段表达（不加列/表）：status=confirmed + confidence=100
+    /// （人工指定即权威结论，恒 100；模型置信恒 <100）+ recognized_at 刷新为当前时间；
+    /// 持久审计在 global_db 的 correction_log（old→new + 时间，photo-tauri 侧写入）。
+    /// 保留原 class_index/bbox/眼数据；清空 Top-5 候选（模型备选对人工结论无意义，
+    /// 对齐 correct_bird 语义）。行不存在时插入一条全新 Confirmed 行（从未识别
+    /// 直接人工指定，对齐 correct_bird「无预测记录直接人工指定」）。
+    ///
+    /// 键约定与其他 recognition 方法一致：rel_path = 相对文件夹根的正斜杠路径
+    /// （学名不持久化——recognition 表无学名列，名录库可按 bird_id 反查）。
+    pub fn update_recognition_species(
+        &self,
+        rel_path: &str,
+        sp_id: i64,
+        cn_name: &str,
+    ) -> Result<(), FolderDbError> {
+        let conn = self.conn.lock();
+        let normalized = rel_path.replace('\\', "/");
+        let now = chrono::Utc::now().to_rfc3339();
+        let exists = conn
+            .prepare_cached("SELECT 1 FROM recognition WHERE rel_path = ?1")?
+            .exists(rusqlite::params![normalized])?;
+        if exists {
+            conn.execute(
+                "UPDATE recognition
+                 SET status = 'confirmed', bird_id = ?1, bird_name = ?2,
+                     confidence = 100.0, candidates = '[]',
+                     failure_stage = 'none', recognized_at = ?3
+                 WHERE rel_path = ?4",
+                rusqlite::params![sp_id, cn_name, now, normalized],
+            )?;
+        } else {
+            conn.execute(
+                "INSERT INTO recognition
+                 (rel_path, status, bird_id, bird_name, class_index, confidence,
+                  bbox, candidates, failure_stage, recognized_at,
+                  eye_sharpness, eye_bbox)
+                 VALUES (?1, 'confirmed', ?2, ?3, NULL, 100.0, NULL, '[]', 'none', ?4,
+                         NULL, NULL)",
+                rusqlite::params![normalized, sp_id, cn_name, now],
+            )?;
+        }
+        Ok(())
+    }
+
     /// 查询单条识别结果。
     pub fn get_recognition(&self, rel_path: &str) -> Result<Option<Recognition>, FolderDbError> {
         let conn = self.conn.lock();
@@ -1274,6 +1320,60 @@ mod tests {
         let got = db.get_recognition("photos/crow.jpg").unwrap().expect("should exist");
         assert!(got.eye_sharpness.is_none());
         assert!(got.eye_bbox.is_none());
+    }
+
+    #[test]
+    fn test_update_recognition_species_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        // 预置一条 NeedsReview 记录（含候选/检测框/眼数据），人工纠错后应只改鸟种与状态
+        let rec = make_recognition();
+        db.upsert_recognition("photos/sparrow.jpg", &rec).unwrap();
+        db.update_recognition_species("photos/sparrow.jpg", 7, "乌鸫")
+            .unwrap();
+        let got = db.get_recognition("photos/sparrow.jpg").unwrap().expect("should exist");
+        // 鸟种字段 + 状态 Confirmed + 人工来源标记（confidence=100 / candidates 清空）
+        assert_eq!(got.status, RecognitionStatus::Confirmed);
+        assert_eq!(got.bird.as_ref().map(|b| b.bird_id), Some(7));
+        assert_eq!(got.bird.as_ref().map(|b| b.cn_name.as_str()), Some("乌鸫"));
+        assert_eq!(got.confidence, Some(100.0));
+        assert!(got.candidates.is_empty());
+        assert_eq!(got.failure_stage, RecognitionFailureStage::None);
+        // 原检测框/眼数据保留（对齐 correct_bird 语义）
+        assert_eq!(got.bbox, rec.bbox);
+        assert_eq!(got.eye_sharpness, rec.eye_sharpness);
+        assert_eq!(got.eye_bbox, rec.eye_bbox);
+        // recognized_at 刷新为当前时间（不再是预置时间戳）
+        assert_ne!(got.recognized_at, rec.recognized_at);
+    }
+
+    #[test]
+    fn test_update_recognition_species_insert_when_missing() {
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        // 从未识别直接人工指定：应插入一条全新 Confirmed 行（对齐 correct_bird）
+        assert!(db.get_recognition("photos/new.jpg").unwrap().is_none());
+        db.update_recognition_species("photos/new.jpg", 2, "大山雀")
+            .unwrap();
+        let got = db.get_recognition("photos/new.jpg").unwrap().expect("should exist");
+        assert_eq!(got.status, RecognitionStatus::Confirmed);
+        assert_eq!(got.bird.as_ref().map(|b| b.cn_name.as_str()), Some("大山雀"));
+        assert_eq!(got.confidence, Some(100.0));
+        assert!(got.candidates.is_empty());
+        assert!(got.bbox.is_none());
+        assert!(got.class_index.is_none());
+    }
+
+    #[test]
+    fn test_update_recognition_species_backslash_normalized() {
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        // Windows 风格反斜杠 rel 键归一化为正斜杠（与其他 recognition 方法同约定）
+        db.update_recognition_species("sub\\a.jpg", 1, "麻雀").unwrap();
+        let got = db.get_recognition("sub/a.jpg").unwrap().expect("正斜杠键");
+        assert_eq!(got.bird.as_ref().map(|b| b.cn_name.as_str()), Some("麻雀"));
+        // 读取侧同样归一化：反斜杠键命中同一行（写读键约定一致）
+        assert!(db.get_recognition("sub\\a.jpg").unwrap().is_some());
     }
 
     #[test]

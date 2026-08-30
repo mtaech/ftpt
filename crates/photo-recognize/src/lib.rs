@@ -40,6 +40,7 @@ pub use catalog::CatalogDb;
 pub use catalog::ClassificationOutput;
 pub use detect::DetectionResult;
 pub use pipeline::{ProgressCallback, RecognitionProgress};
+pub use catalog::CatalogEntry;
 
 // ---------------------------------------------------------------------------
 // RecognizeError
@@ -281,6 +282,24 @@ impl Recognizer {
 /// 名录库路径与 [`Recognizer::new`] 的 `catalog_db` 参数相同（exe 同级 `data/pica_ref.db`）。
 pub fn list_all_species(catalog_db: &Path) -> Result<Vec<photo_domain::BirdMatch>, RecognizeError> {
     CatalogDb::open(catalog_db).map(|db| db.all_species())
+}
+
+/// 名录搜索（人工纠错对话框数据源）：按中文名/拼音/拉丁名 LIKE 子串匹配，仅鸟纲。
+/// 名录库路径与 [`list_all_species`] 相同（exe 同级 `data/pica_ref.db`）。
+pub fn search_catalog(
+    catalog_db: &Path,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<CatalogEntry>, RecognizeError> {
+    CatalogDb::open(catalog_db).map(|db| db.search_catalog(query, limit))
+}
+
+/// 按名录库主键查单一鸟种（`correct_recognition` 入参校验用；非鸟纲返回 None）。
+pub fn get_catalog_entry(
+    catalog_db: &Path,
+    bird_id: i64,
+) -> Result<Option<CatalogEntry>, RecognizeError> {
+    CatalogDb::open(catalog_db).map(|db| db.get_species_by_id(bird_id))
 }
 
 // ---------------------------------------------------------------------------

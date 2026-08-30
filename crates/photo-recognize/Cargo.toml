@@ -12,6 +12,13 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 rusqlite = { workspace = true }
+serde = { workspace = true }
+# 可选：为 Tauri 端导出 TS 类型（tauri-specta）。默认构建不启用，行为零改动
+# （对齐 photo-domain 的 specta feature 门控）
+specta = { workspace = true, optional = true }
+
+[features]
+specta = ["dep:specta"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

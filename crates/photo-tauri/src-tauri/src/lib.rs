@@ -17,7 +17,7 @@ use tauri_plugin_dialog::DialogExt;
 use photo_config::AppConfig;
 use photo_domain::{
     AdjustParams, CaptureMeta, ColorLabel, FilterCriteria, Flag, ImageFormat, Rating,
-    Recognition, RecognitionFailureStage, RecognitionStatus, SourceFile,
+    Recognition, RecognitionStatus, SourceFile,
 };
 use photo_engine::folder_db::{FileEntry, FolderDb};
 use photo_engine::global_db::{GlobalDb, SpeciesRow};
@@ -119,6 +119,24 @@ pub struct ExportProgress {
 pub struct ExportDone {
     pub success: u32,
     pub failed: u32,
+}
+
+/// `duplicates:progress` 事件负载：近重复检测逐张哈希进度
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicatesProgress {
+    pub done: u32,
+    pub total: u32,
+}
+
+/// `duplicates:done` 事件负载：近重复分组结果（groups 每组 = 组内照片完整路径
+/// 列表，组内首张为保留锚点；error = 整体失败原因，非 None 时 groups 为空，
+/// 前端据此提示而非显示空态）
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicatesDone {
+    pub groups: Vec<Vec<String>>,
+    pub error: Option<String>,
 }
 
 // ============================================================================
@@ -267,6 +285,52 @@ struct HistCache {
 // 后端状态
 // ============================================================================
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DirectoryTaskToken {
+    id: u64,
+    scan_generation: u64,
+}
+
+/// 目录级后台任务追踪器。任务 ID 防止旧 worker 清除新任务状态，扫描代际防止
+/// 切换目录后旧结果写回当前页面。
+#[derive(Debug, Default)]
+struct DirectoryTaskTracker {
+    next_id: u64,
+    active: Option<DirectoryTaskToken>,
+}
+
+impl DirectoryTaskTracker {
+    fn start(&mut self, scan_generation: u64) -> DirectoryTaskToken {
+        self.next_id = self.next_id.wrapping_add(1);
+        let token = DirectoryTaskToken {
+            id: self.next_id,
+            scan_generation,
+        };
+        self.active = Some(token);
+        token
+    }
+
+    fn is_current(&self, token: DirectoryTaskToken, scan_generation: u64) -> bool {
+        self.active == Some(token) && token.scan_generation == scan_generation
+    }
+
+    fn finish(&mut self, token: DirectoryTaskToken, scan_generation: u64) -> bool {
+        if !self.is_current(token, scan_generation) {
+            return false;
+        }
+        self.active = None;
+        true
+    }
+
+    fn invalidate(&mut self) {
+        self.active = None;
+    }
+
+    fn is_running(&self) -> bool {
+        self.active.is_some()
+    }
+}
+
 /// 后端权威状态。扫描结果全量持有（前端经 get_captures 一次拉取）。
 pub struct AppState {
     /// 当前打开的照片目录（None = 尚未打开）
@@ -287,12 +351,21 @@ pub struct AppState {
     config_path: PathBuf,
     /// 扫描换代号：后台 EXIF/缩略图任务按代数丢弃过期结果（防张冠李戴）
     scan_generation: u64,
-    /// 批量识别取消令牌：cancel_recognition 置位，识别循环逐张检查后提前退出
-    recognition_cancel: Arc<AtomicBool>,
-    /// 批量识别进行中标记：防并发识别（与 GPUI batch_recognizing 守卫一致）
-    recognition_running: bool,
+    /// 当前批量识别任务的独立取消令牌；切换目录时只取消该任务，不复用旧令牌。
+    recognition_cancel: Option<Arc<AtomicBool>>,
+    /// 批量识别任务：防并发并隔离切目录后的旧 worker
+    recognition_task: DirectoryTaskTracker,
+    /// 近重复检测结果（内存缓存，禁止入库；find_duplicates 完成后填充，前端经
+    /// duplicates:done 事件取用，同时保留一份供后续扩展直接读取）
+    duplicate_groups: Vec<Vec<String>>,
+    /// 近重复检测任务：防并发并隔离切目录后的旧 worker
+    duplicates_task: DirectoryTaskTracker,
     /// 批量操作撤销日志（内存单槽，重启失效可接受：只记最近一次 Move/Copy 的逆操作）
     op_journal: photo_engine::undo::OpJournal,
+    /// 技术质量评分（完整路径 → 0..1 技术分；仅内存，禁止入库，切换目录清空）
+    quality_scores: HashMap<String, f64>,
+    /// 技术质量评分任务：防并发并隔离切目录后的旧 worker
+    quality_task: DirectoryTaskTracker,
 }
 
 impl AppState {
@@ -319,9 +392,13 @@ impl AppState {
             config,
             config_path,
             scan_generation: 0,
-            recognition_cancel: Arc::new(AtomicBool::new(false)),
-            recognition_running: false,
+            recognition_cancel: None,
+            recognition_task: DirectoryTaskTracker::default(),
+            duplicate_groups: Vec::new(),
+            duplicates_task: DirectoryTaskTracker::default(),
             op_journal: photo_engine::undo::OpJournal::new(),
+            quality_scores: HashMap::new(),
+            quality_task: DirectoryTaskTracker::default(),
         }
     }
 }
@@ -366,12 +443,30 @@ async fn scan_impl(app: AppHandle, dir: PathBuf) -> u32 {
         let state = app.state::<Mutex<AppState>>();
         let mut st = state.lock().expect("AppState 锁中毒");
         st.scan_generation += 1;
+        // 目录换代后，所有目录级后台结果都失效。识别使用独立令牌，避免
+        // 新目录启动新任务时把旧任务的取消状态重置回来。
+        st.recognition_task.invalidate();
+        if let Some(cancel) = st.recognition_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        st.duplicates_task.invalidate();
+        st.quality_task.invalidate();
+        st.duplicate_groups.clear();
+        st.quality_scores.clear();
         (st.scan_generation, st.config.include_subdirectories)
     };
     match do_scan(&app, &dir, recursive).await {
         Ok((metas, folder_db)) => {
             let total = metas.len() as u32;
             let dir_str = dir.to_string_lossy().to_string();
+            {
+                // 扫描可能与另一次扫描并发；只有最后启动的代际允许提交快照。
+                let state = app.state::<Mutex<AppState>>();
+                let st = state.lock().expect("AppState 锁中毒");
+                if st.scan_generation != generation {
+                    return 0;
+                }
+            }
             {
                 let state = app.state::<Mutex<AppState>>();
                 let mut st = state.lock().expect("AppState 锁中毒");
@@ -406,6 +501,11 @@ async fn scan_impl(app: AppHandle, dir: PathBuf) -> u32 {
         }
         Err(e) => {
             tracing::error!("扫描失败: {e}");
+            // 旧扫描失败不能结束新扫描的加载态。
+            let state = app.state::<Mutex<AppState>>();
+            if state.lock().expect("AppState 锁中毒").scan_generation != generation {
+                return 0;
+            }
             // 哨兵复位：前端按 scan:done 结束加载态（GPUI 的 worker panic 兜底由前端状态机承担）
             let _ = app.emit(
                 "scan:done",
@@ -764,29 +864,32 @@ fn list_bird_species() -> Result<Vec<String>, String> {
 #[specta::specta]
 async fn recognize_captures(app: AppHandle, paths: Vec<String>) -> Result<(), String> {
     // 守卫：已有识别任务进行中时拒绝并发（与 GPUI recognize_selected 一致）
-    let (cancel, folder_db, thumb_cache, thread_count, dir, generation, global_db, dir_str, use_focus) = {
+    let (cancel, folder_db, thumb_cache, thread_count, dir, generation, global_db, dir_str, use_focus, task_token) = {
         let st = app.state::<Mutex<AppState>>();
         let mut st = st.lock().expect("AppState 锁中毒");
-        if st.recognition_running {
+        if st.recognition_task.is_running() {
             return Err("已有识别任务进行中".to_string());
         }
-        st.recognition_running = true;
-        st.recognition_cancel.store(false, Ordering::Relaxed);
         let dir = st
             .current_dir
             .clone()
             .ok_or_else(|| "尚未打开目录".to_string())?;
+        let generation = st.scan_generation;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let task_token = st.recognition_task.start(generation);
+        st.recognition_cancel = Some(cancel.clone());
         (
-            st.recognition_cancel.clone(),
+            cancel,
             st.folder_db.clone(),
             st.thumb_cache.clone(),
             st.config.recognition_thread_count,
             dir.clone(),
-            st.scan_generation,
+            generation,
             st.global_db.clone(),
             dir.to_string_lossy().to_string(),
             // 识别鸟体定位来源：Focus = 优先相机对焦点 ROI（无对焦点回退 YOLO）
             st.config.detection_source == photo_config::DetectionSource::Focus,
+            task_token,
         )
     };
 
@@ -813,7 +916,9 @@ async fn recognize_captures(app: AppHandle, paths: Vec<String>) -> Result<(), St
     let total = targets.len();
     if total == 0 {
         let st = app.state::<Mutex<AppState>>();
-        st.lock().expect("AppState 锁中毒").recognition_running = false;
+        let mut st = st.lock().expect("AppState 锁中毒");
+        st.recognition_task.finish(task_token, generation);
+        st.recognition_cancel = None;
         return Err("没有可识别的照片".to_string());
     }
 
@@ -899,7 +1004,17 @@ async fn recognize_captures(app: AppHandle, paths: Vec<String>) -> Result<(), St
                                     current_path: path.clone(),
                                 },
                             );
-                            // 写库（rel 键与代际无关，工作线程直接 upsert，照 GPUI B3①）
+                            // 切目录后不再写旧目录数据库或全局索引。
+                            let current_task = {
+                                let st = app.state::<Mutex<AppState>>();
+                                let st = st.lock().expect("AppState 锁中毒");
+                                st.recognition_task.is_current(task_token, *generation)
+                            };
+                            if !current_task {
+                                cancel.store(true, Ordering::Relaxed);
+                                continue;
+                            }
+                            // 写库（只允许当前目录代际的任务写入）
                             if let Ok(rec) = &rec_result
                                 && let Some(db) = db
                             {
@@ -939,7 +1054,15 @@ async fn recognize_captures(app: AppHandle, paths: Vec<String>) -> Result<(), St
                 }
             }
         });
-        // 汇总 emit recognize:done（取消也照常 emit，前端据此结束加载态）
+        // 旧任务不能向新目录发送完成事件，也不能清理新任务的状态。
+        let is_current = {
+            let st = app_work.state::<Mutex<AppState>>();
+            let st = st.lock().expect("AppState 锁中毒");
+            st.recognition_task.is_current(task_token, generation)
+        };
+        if !is_current {
+            return;
+        }
         let _ = app_work.emit(
             "recognize:done",
             RecognizeDone {
@@ -950,9 +1073,13 @@ async fn recognize_captures(app: AppHandle, paths: Vec<String>) -> Result<(), St
                 failed: shared.failed.load(Ordering::Relaxed) as u32,
             },
         );
-        // 复位进行中标记
+        // 只有当前任务可以清理运行状态；旧任务不能清掉新任务的哨兵。
         let st = app_work.state::<Mutex<AppState>>();
-        st.lock().expect("AppState 锁中毒").recognition_running = false;
+        let mut st = st.lock().expect("AppState 锁中毒");
+        st.recognition_task.finish(task_token, generation);
+        if st.recognition_cancel.as_ref().is_some_and(|c| Arc::ptr_eq(c, &cancel)) {
+            st.recognition_cancel = None;
+        }
     })
     .await
     .map_err(|e| format!("识别任务中断: {e}"))?;
@@ -963,11 +1090,14 @@ async fn recognize_captures(app: AppHandle, paths: Vec<String>) -> Result<(), St
 #[tauri::command]
 #[specta::specta]
 fn cancel_recognition(state: State<'_, Mutex<AppState>>) {
-    state
+    if let Some(cancel) = state
         .lock()
         .expect("AppState 锁中毒")
         .recognition_cancel
-        .store(true, Ordering::Relaxed);
+        .as_ref()
+    {
+        cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 /// 批量操作干跑：只计算操作集与目标路径，不碰文件。
@@ -1379,7 +1509,7 @@ fn reverse_sync_metadata(
             from_db_owned = db;
             &mut from_db_owned
         };
-        let Some(mut to_db) = open_db_if_exists(&to_dir) else { continue };
+        let Some(to_db) = open_db_if_exists(&to_dir) else { continue };
         // xmp/keywords 键 = 完整路径（entries 直接可用）
         if let Err(e) = photo_engine::ops::sync_move_xmp(&to_db, from_db, &entries) {
             tracing::warn!("撤销移动：xmp_meta 逆向同步失败 ({to_dir:?} → {from_dir:?}): {e}");
@@ -1619,19 +1749,12 @@ fn get_recognition(
     db.get_recognition(&rel).map_err(|e| e.to_string())
 }
 
-/// 手动修正鸟种（对齐 GPUI correct_bird_by_name）：名录库按中文名匹配 → 构造
-/// Confirmed Recognition（人工指定即权威结论：置信度 100%，保留原检测框/眼锐度/
-/// 眼框数据）→ 写 recognition 表 → 同步内存 CaptureMeta（bird_name/confidence/
-/// status）→ emit thumb:ready 供前端刷新网格识别 chip。
+/// 名录搜索（SpeciesCorrectDialog 数据源）：按中文名/拼音/拉丁名子串匹配，
+/// 仅鸟纲，中文名命中优先、拼音次之、拉丁名最后（组内拼音排序）。
+/// 名录库在 exe 同级 data/pica_ref.db（与 list_bird_species 同路径约定）。
 #[tauri::command]
 #[specta::specta]
-fn correct_bird(
-    app: AppHandle,
-    state: State<'_, Mutex<AppState>>,
-    path: String,
-    bird_name: String,
-) -> Result<(), String> {
-    // 名录库查找（exe 同级 data/pica_ref.db，与 list_bird_species 同路径约定）
+fn search_catalog(query: String, limit: u32) -> Result<Vec<photo_recognize::CatalogEntry>, String> {
     let Some(exe_dir) = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
@@ -1639,13 +1762,46 @@ fn correct_bird(
         return Err("无法确定 exe 目录".to_string());
     };
     let catalog_db = exe_dir.join("data").join("pica_ref.db");
-    let bird = photo_recognize::list_all_species(&catalog_db)
-        .map_err(|e| format!("加载名录失败: {e}"))?
-        .into_iter()
-        .find(|b| b.cn_name == bird_name)
-        .ok_or_else(|| format!("名录中不存在鸟种: {bird_name}"))?;
+    photo_recognize::search_catalog(&catalog_db, &query, limit as usize)
+        .map_err(|e| format!("名录搜索失败: {e}"))
+}
 
-    // 克隆句柄后释放锁：SQLite 读写不持 AppState 锁
+/// 批量人工纠正鸟种（SpeciesCorrectDialog）：对 `paths` 逐文件执行
+/// 1) folder_db `update_recognition_species`（改鸟种 + 状态置 Confirmed +
+///    人工来源标记：confidence=100 + recognized_at 刷新，不加列/表）
+/// 2) global_db 修正审计日志 `log_correction`（old→new + 时间；原行无预测时跳过）
+/// 3) global_db 索引 `upsert_rows`（人工指定 = 权威结论）+ 内存 CaptureMeta 同步 +
+///    emit thumb:ready 供网格刷新识别 chip。
+///
+/// 入参校验：sp_id 必须在名录库存在且为鸟纲，且 cn_name/sci_name 与名录一致
+/// （防陈旧前端状态写脏数据；名录条目为权威值）。
+/// 单张失败不中止整体（逐文件报告，照 delete_captures 语义）；全部失败才返回 Err。
+#[tauri::command]
+#[specta::specta]
+fn correct_recognition(
+    app: AppHandle,
+    state: State<'_, Mutex<AppState>>,
+    paths: Vec<String>,
+    sp_id: i64,
+    cn_name: String,
+    sci_name: String,
+) -> Result<(), String> {
+    // 名录校验（exe 同级 data/pica_ref.db，与 search_catalog 同路径约定）
+    let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    else {
+        return Err("无法确定 exe 目录".to_string());
+    };
+    let catalog_db = exe_dir.join("data").join("pica_ref.db");
+    let entry = photo_recognize::get_catalog_entry(&catalog_db, sp_id)
+        .map_err(|e| format!("加载名录失败: {e}"))?
+        .ok_or_else(|| format!("名录中不存在鸟种 id={sp_id}"))?;
+    if entry.cn_name != cn_name || entry.latin_name != sci_name {
+        return Err(format!("鸟种信息与名录不一致：{cn_name} / {sci_name}"));
+    }
+
+    // 克隆句柄后释放锁：SQLite 读写不持 AppState 锁（照 correct_bird 模式）
     let (db, dir) = {
         let st = state.lock().expect("AppState 锁中毒");
         (
@@ -1653,63 +1809,88 @@ fn correct_bird(
             st.current_dir.clone().ok_or("尚未打开目录")?,
         )
     };
-    let rel = rel_path_of(&dir, &path).ok_or("路径不在当前目录内")?;
+    let dir_str = dir.to_string_lossy().to_string();
 
-    // 人工指定鸟种名在 rec 构造前取出（bird 随后被 move 进 rec，日志引用需独立副本）
-    let new_bird_name = bird.cn_name.clone();
-
-    // 保留原检测框/眼数据，只改鸟种与状态（照 GPUI correct_bird_by_name）
-    let prev = db.get_recognition(&rel).map_err(|e| e.to_string())?;
-    let rec = Recognition {
-        status: RecognitionStatus::Confirmed,
-        bird: Some(bird),
-        class_index: prev.as_ref().and_then(|r| r.class_index),
-        confidence: Some(100.0),
-        bbox: prev.as_ref().and_then(|r| r.bbox),
-        eye_sharpness: prev.as_ref().and_then(|r| r.eye_sharpness),
-        eye_bbox: prev.as_ref().and_then(|r| r.eye_bbox),
-        candidates: vec![],
-        failure_stage: RecognitionFailureStage::None,
-        recognized_at: chrono::Utc::now().to_rfc3339(),
-    };
-    db.upsert_recognition(&rel, &rec).map_err(|e| e.to_string())?;
-
-    // 同步内存 CaptureMeta + 全局鸟种索引 upsert（人工修正 = 权威结论；
-    // bird 恒为 Some，行必然写入；date_taken 取内存 meta 的 EXIF 拍摄时间）
-    {
-        let mut st = state.lock().expect("AppState 锁中毒");
-        let dir_str = dir.to_string_lossy().to_string();
-        let date_taken = st
-            .captures
-            .iter()
-            .find(|m| m.primary_path == path)
-            .and_then(|m| m.date_taken.clone());
-        if let Some(gdb) = &st.global_db
-            && let Some(row) = species_row(&dir_str, &rel, &rec, date_taken)
+    let mut failures: Vec<String> = Vec::new();
+    for path in &paths {
+        let rel = match rel_path_of(&dir, path) {
+            Some(r) => r,
+            None => {
+                failures.push(format!("{path}: 不在当前目录内"));
+                continue;
+            }
+        };
+        // 修正前原值（审计日志用；读失败按无原值处理，跳过日志不中止）
+        let prev = db.get_recognition(&rel).ok().flatten();
+        // 写 folder_db（改鸟种 + Confirmed + 人工来源标记；无行时插入全新 Confirmed 行）
+        if let Err(e) = db.update_recognition_species(&rel, sp_id, &cn_name) {
+            failures.push(format!("{path}: {e}"));
+            continue;
+        }
+        // 读回新行（权威值构造全局索引行/内存同步；写后必存在）
+        let rec = match db.get_recognition(&rel) {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                failures.push(format!("{path}: 写回后读不到识别行"));
+                continue;
+            }
+            Err(e) => {
+                failures.push(format!("{path}: {e}"));
+                continue;
+            }
+        };
+        // 内存 CaptureMeta + global_db 索引 + 审计日志（best-effort，失败仅记日志）
         {
-            if let Err(e) = gdb.upsert_rows(&[row]) {
-                tracing::error!("全局鸟种索引 upsert 失败 {rel}: {e}");
+            let mut st = state.lock().expect("AppState 锁中毒");
+            let date_taken = st
+                .captures
+                .iter()
+                .find(|m| m.primary_path == path.as_str())
+                .and_then(|m| m.date_taken.clone());
+            if let Some(gdb) = &st.global_db {
+                if let Some(row) = species_row(&dir_str, &rel, &rec, date_taken)
+                    && let Err(e) = gdb.upsert_rows(&[row])
+                {
+                    tracing::error!("全局鸟种索引 upsert 失败 {rel}: {e}");
+                }
+                // 修正审计日志（只追加）：old = 修正前模型预测（无预测记录则跳过，
+                // 如从未识别直接人工指定），new = 人工指定鸟种；供命中率统计反查
+                if let Some(old) = prev
+                    .as_ref()
+                    .and_then(|r| r.bird.as_ref())
+                    .map(|b| b.cn_name.as_str())
+                    && let Err(e) = gdb.log_correction(
+                        &dir_str,
+                        &rel,
+                        old,
+                        &cn_name,
+                        prev.as_ref()
+                            .and_then(|r| r.confidence)
+                            .map(|c| c as f64),
+                    )
+                {
+                    tracing::error!("修正审计日志写入失败 {rel}: {e}");
+                }
             }
-            // 修正审计日志（只追加）：old = 修正前模型预测（无预测记录则跳过，
-            // 如从未识别直接人工指定），new = 人工指定鸟种；供命中率统计反查
-            if let Some(old) = prev.as_ref().and_then(|r| r.bird.as_ref()).map(|b| b.cn_name.as_str())
-                && let Err(e) = gdb.log_correction(
-                    &dir_str,
-                    &rel,
-                    old,
-                    &new_bird_name,
-                    prev.as_ref().and_then(|r| r.confidence).map(|c| c as f64),
-                )
-            {
-                tracing::error!("修正审计日志写入失败 {rel}: {e}");
+            if let Some(meta) = st.captures.iter_mut().find(|m| m.primary_path == path.as_str()) {
+                meta.enrich_with_recognition(&rec);
             }
         }
-        if let Some(meta) = st.captures.iter_mut().find(|m| m.primary_path == path) {
-            meta.enrich_with_recognition(&rec);
-        }
+        // emit thumb:ready：前端按事件刷新网格识别 chip（缩略图命中缓存，开销可忽略）
+        let _ = app.emit("thumb:ready", ThumbReady { path: path.clone() });
     }
-    // emit thumb:ready：前端按事件刷新网格识别 chip
-    let _ = app.emit("thumb:ready", ThumbReady { path });
+
+    if !failures.is_empty() {
+        if failures.len() == paths.len() {
+            return Err(format!("全部纠正失败：{}", failures.join("；")));
+        }
+        tracing::warn!(
+            "识别纠正部分失败（{} / {} 张）: {}",
+            failures.len(),
+            paths.len(),
+            failures.join("；")
+        );
+    }
     Ok(())
 }
 
@@ -2362,6 +2543,92 @@ async fn export_captures(
 }
 
 // ============================================================================
+// pHash 近重复检测（重复照片）：dHash 哈希 → 汉明距离贪心聚类
+// ============================================================================
+
+/// 近重复检测：对当前扫描结果全量计算 dHash（优先读缩略图磁盘缓存，命中零解码；
+/// 未命中走现有缩略图生成路径），按汉明距离 ≤ threshold 贪心聚类。
+/// spawn_blocking 内执行；逐张 emit `duplicates:progress`，完成 emit
+/// `duplicates:done`（携带分组结果；整体失败时 done 的 error 字段非空，前端
+/// 据此提示而非显示「未发现重复」空态）。结果只存 AppState 内存
+/// （duplicate_groups），禁止写库。
+#[tauri::command]
+#[specta::specta]
+async fn find_duplicates(app: AppHandle, threshold: Option<u32>) -> Result<(), String> {
+    let threshold = threshold.unwrap_or(photo_engine::phash::DEFAULT_HASH_THRESHOLD);
+    if !(1..=64).contains(&threshold) {
+        return Err(format!("汉明距离阈值必须在 1-64 之间，收到 {threshold}"));
+    }
+    // 守卫 + 快照（对齐 recognize_captures：防并发；thumb_cache 跟随目录）
+    let (paths, cache_dir, task_token, generation) = {
+        let st = app.state::<Mutex<AppState>>();
+        let mut st = st.lock().expect("AppState 锁中毒");
+        if st.duplicates_task.is_running() {
+            return Err("已有近重复检测任务进行中".to_string());
+        }
+        st.current_dir
+            .as_ref()
+            .ok_or_else(|| "尚未打开目录".to_string())?;
+        let cache_dir = st
+            .thumb_cache
+            .as_ref()
+            .map(|c| c.cache_dir().to_path_buf())
+            .ok_or_else(|| "缩略图缓存未就绪".to_string())?;
+        let paths: Vec<String> = st.captures.iter().map(|m| m.primary_path.clone()).collect();
+        if paths.is_empty() {
+            return Err("没有可检测的照片".to_string());
+        }
+        let generation = st.scan_generation;
+        let task_token = st.duplicates_task.start(generation);
+        (paths, cache_dir, task_token, generation)
+    };
+    let total = paths.len();
+    if total == 0 {
+        let st = app.state::<Mutex<AppState>>();
+        let mut st = st.lock().expect("AppState 锁中毒");
+        st.duplicates_task.finish(task_token, generation);
+        return Err("没有可检测的照片".to_string());
+    }
+
+    let app_work = app.clone();
+    let total_work = total as u32;
+    tauri::async_runtime::spawn_blocking(move || {
+        // 新实例只用于取 cache_dir 路径与生成函数（cache_key/get_or_generate 与
+        // AppState 内实例同目录同键，落盘互斥一致）
+        let cache = ThumbnailCache::new(cache_dir);
+        let result = photo_engine::phash::compute_hashes(&cache, &paths, |done| {
+            let _ = app_work.emit(
+                "duplicates:progress",
+                DuplicatesProgress {
+                    done,
+                    total: total_work,
+                },
+            );
+        });
+        let (groups, error) = match result {
+            Ok(pairs) => (photo_engine::phash::group_duplicates(pairs, threshold), None),
+            Err(e) => (Vec::new(), Some(format!("近重复检测失败: {e}"))),
+        };
+        if let Some(msg) = &error {
+            tracing::error!("{msg}");
+        }
+        {
+            let st = app_work.state::<Mutex<AppState>>();
+            let mut st = st.lock().expect("AppState 锁中毒");
+            if st.duplicates_task.is_current(task_token, generation) {
+                st.duplicate_groups = groups.clone();
+                st.duplicates_task.finish(task_token, generation);
+            }
+        }
+        // 完成事件照常 emit（成功/失败都通知，前端据此复位加载态）
+        let _ = app_work.emit("duplicates:done", DuplicatesDone { groups, error });
+    })
+    .await
+    .map_err(|e| format!("近重复检测任务中断: {e}"))?;
+    Ok(())
+}
+
+// ============================================================================
 // Phase 3.5 commands：全局鸟种索引（统计视图）
 // ============================================================================
 
@@ -2734,7 +3001,12 @@ fn path_under(base: &Path, dest: &Path) -> bool {
     }
     #[cfg(not(windows))]
     {
-        let norm = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let norm = |p: &Path| {
+            std::fs::canonicalize(p)
+                .unwrap_or_else(|_| p.to_path_buf())
+                .to_string_lossy()
+                .into_owned()
+        };
         dest_normalized_starts_with(norm(base), norm(dest))
     }
 }
@@ -2745,6 +3017,54 @@ fn dest_normalized_starts_with(base: String, dest: String) -> bool {
         return true;
     }
     dest.starts_with(&format!("{}\\", base)) || dest.starts_with(&format!("{}/", base))
+}
+
+// ============================================================================
+// eBird/观鸟记录 CSV 导出（统计视图「导出记录」按钮）
+// ============================================================================
+
+/// 导出当前文件夹的 eBird/观鸟记录 CSV：engine 按（鸟种, 日期）聚合 recognition
+/// 表（Confirmed 全计、NeedsReview 计入并标注「待确认」），写 UTF-8 BOM CSV。
+/// `dest_path` = 前端计算的目标路径（照片目录 exports/ebird_YYYY-MM-DD.csv）。
+/// 返回写入行数（0 = 该文件夹尚无已确认鸟种）。同步执行（聚合/写盘均轻量，
+/// 对齐 get_recognition/get_species_stats 同步命令形态）。
+#[tauri::command]
+#[specta::specta]
+fn export_bird_records(
+    state: State<'_, Mutex<AppState>>,
+    dest_path: String,
+) -> Result<u32, String> {
+    let current_dir = state
+        .lock()
+        .expect("AppState 锁中毒")
+        .current_dir
+        .clone()
+        .ok_or_else(|| "未打开照片目录".to_string())?;
+    let mut rows =
+        photo_engine::export_ebird::build_rows(&current_dir).map_err(|e| e.to_string())?;
+    // 学名补全：folder_db 只存中文名（bird_name），EbirdRow.species_sci 恒为空；
+    // 经名录库 all_species 建 中文名→学名 映射回填（名录库缺失时降级留空，不报错）
+    if rows.iter().any(|r| r.species_sci.is_empty())
+        && let Some(catalog_path) = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("data").join("pica_ref.db")))
+        && let Ok(catalog) = photo_recognize::CatalogDb::open(&catalog_path)
+    {
+        let latin_by_cn: std::collections::HashMap<String, String> = catalog
+            .all_species()
+            .into_iter()
+            .map(|b| (b.cn_name, b.latin_name))
+            .collect();
+        for row in &mut rows {
+            if row.species_sci.is_empty()
+                && let Some(latin) = latin_by_cn.get(&row.species_cn)
+            {
+                row.species_sci = latin.clone();
+            }
+        }
+    }
+    photo_engine::export_ebird::write_csv(&rows, Path::new(&dest_path)).map_err(|e| e.to_string())?;
+    Ok(rows.len() as u32)
 }
 
 // ============================================================================
@@ -3273,7 +3593,8 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             set_adjustments,
             get_app_config,
             get_recognition,
-            correct_bird,
+            search_catalog,
+            correct_recognition,
             delete_captures,
             export_adjusted,
             list_system_fonts,
@@ -3289,6 +3610,10 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             execute_import,
             batch_rename,
             export_captures,
+            export_bird_records,
+            find_duplicates,
+            compute_quality_scores,
+            get_quality_scores,
         ])
         // 事件走 app.emit 明文通道（契约事件名含冒号，非 specta Event 命名），
         // 负载类型在此登记以便导出到 bindings.ts 供前端 listen 使用
@@ -3305,6 +3630,11 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .typ::<ExportDone>()
         .typ::<ImportProgress>()
         .typ::<ImportDone>()
+        .typ::<DuplicatesProgress>()
+        .typ::<DuplicatesDone>()
+        .typ::<photo_recognize::CatalogEntry>()
+        .typ::<QualityProgress>()
+        .typ::<QualityDone>()
 }
 
 pub fn run() {
@@ -3380,6 +3710,40 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    use super::DirectoryTaskTracker;
+
+    #[test]
+    fn directory_task_rejects_result_after_scan_generation_changes() {
+        let mut tracker = DirectoryTaskTracker::default();
+        let token = tracker.start(7);
+
+        assert!(tracker.is_current(token, 7));
+        assert!(!tracker.is_current(token, 8));
+    }
+
+    #[test]
+    fn stale_task_cannot_finish_newer_task() {
+        let mut tracker = DirectoryTaskTracker::default();
+        let stale = tracker.start(4);
+        let current = tracker.start(4);
+
+        assert!(!tracker.finish(stale, 4));
+        assert!(tracker.is_current(current, 4));
+        assert!(tracker.finish(current, 4));
+        assert!(!tracker.is_running());
+    }
+
+    #[test]
+    fn invalidating_directory_task_clears_running_state() {
+        let mut tracker = DirectoryTaskTracker::default();
+        let token = tracker.start(2);
+
+        tracker.invalidate();
+
+        assert!(!tracker.is_current(token, 2));
+        assert!(!tracker.is_running());
+    }
+
     /// 导出 TS 绑定到前端 lib 目录（集成时以本测试的生成物为准，覆盖手写 stub）
     #[test]
     fn export_bindings() {
@@ -3391,4 +3755,112 @@ mod tests {
             )
             .expect("导出 TS 绑定失败");
     }
+}
+
+// ============================================================================
+// QualityScore 批次：技术质量机筛评分（眼锐度 + 直方图剪切 + 检测置信度）
+// ============================================================================
+
+/// `quality:progress` 事件负载：批量技术质量评分逐张进度（对齐 recognize:progress 模式）
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct QualityProgress {
+    pub done: u32,
+    pub total: u32,
+    pub current_path: String,
+}
+
+/// `quality:done` 事件负载：批量技术质量评分完成（scores = 完整路径 → 0..1 技术分，
+/// 顺序与入参 paths 一致）
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct QualityDone {
+    pub total: u32,
+    pub scores: Vec<(String, f64)>,
+}
+
+/// 批量计算技术质量评分：spawn_blocking 后台逐张合成眼锐度（权重 0.5）+ 直方图
+/// 剪切（0.3）+ 检测置信度（0.2）→ 0..1 技术分（engine::quality::score 纯函数）。
+/// 直方图优先命中 AppState.hist_cache（InfoPanel 查看过的图免重复解码，clip 占比
+/// 由缓存负载折算注入），未命中现场调 histogram::compute_histogram_from_file；
+/// 眼锐度/置信度由 engine 批量接口读 folder_db recognition 表（rel 键）。
+/// 逐张 emit `quality:progress`，完成 emit `quality:done`；分数只存 AppState 内存
+/// Map（禁止入库，重启即失）。单张解码失败不中止整体（该分量缺失，权重重归一化）。
+#[tauri::command]
+#[specta::specta]
+async fn compute_quality_scores(app: AppHandle, paths: Vec<String>) -> Result<(), String> {
+    // 当前目录（recognition 表键的相对根）
+    let dir = {
+        let st = app.state::<Mutex<AppState>>();
+        st.lock()
+            .expect("AppState 锁中毒")
+            .current_dir
+            .clone()
+            .ok_or_else(|| "尚未打开目录".to_string())?
+    };
+    // 直方图缓存覆盖：命中 hist_cache 的路径注入剪切占比（(高光, 死黑)），免重复解码
+    let clip_override = {
+        let st = app.state::<Mutex<AppState>>();
+        let st = st.lock().expect("AppState 锁中毒");
+        let cache = st.hist_cache.lock();
+        let mut map = HashMap::with_capacity(paths.len());
+        for p in &paths {
+            let key = hist_cache_key(p);
+            if let Some(payload) = cache.histogram.get(&key) {
+                let total = payload.total_pixels.max(1) as f64;
+                map.insert(
+                    p.clone(),
+                    (
+                        payload.clip_high_count as f64 / total,
+                        payload.clip_low_count as f64 / total,
+                    ),
+                );
+            }
+        }
+        map
+    };
+    let app_work = app.clone();
+    let dir_work = dir;
+    tauri::async_runtime::spawn_blocking(move || {
+        let total = paths.len();
+        let scores = photo_engine::quality::compute_scores_with_clip(
+            &dir_work,
+            &paths,
+            &clip_override,
+            |done, total| {
+                // 顺序处理：当前文件 = 已处理的最新一张（done 后 paths[done-1]）
+                let current_path = paths.get(done.saturating_sub(1)).cloned().unwrap_or_default();
+                let _ = app_work.emit(
+                    "quality:progress",
+                    QualityProgress {
+                        done: done as u32,
+                        total: total as u32,
+                        current_path,
+                    },
+                );
+            },
+        );
+        // 分数存内存 Map（禁止入库；重新评分即整体覆盖，防旧目录残留）
+        {
+            let st = app_work.state::<Mutex<AppState>>();
+            let mut st = st.lock().expect("AppState 锁中毒");
+            st.quality_scores = scores.iter().cloned().collect();
+        }
+        let _ = app_work.emit("quality:done", QualityDone { total: total as u32, scores });
+    })
+    .await
+    .map_err(|e| format!("技术质量评分任务中断: {e}"))?;
+    Ok(())
+}
+
+/// 拉取技术质量评分快照（完整路径 → 0..1 技术分；尚未计算过返回空）。
+/// 供前端启动自愈/重拉（对应 captures.reload 模式）。
+#[tauri::command]
+#[specta::specta]
+fn get_quality_scores(state: State<'_, Mutex<AppState>>) -> Vec<(String, f64)> {
+    let st = state.lock().expect("AppState 锁中毒");
+    st.quality_scores
+        .iter()
+        .map(|(p, s)| (p.clone(), *s))
+        .collect()
 }

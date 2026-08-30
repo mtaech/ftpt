@@ -375,6 +375,9 @@ pub enum SortBy {
     Modified,
     /// 鸟眼锐度分排序（None 排最前；排序逻辑在前端 filter.ts，Rust 侧仅做序列化传递）
     EyeSharpness,
+    /// 技术质量机筛分排序（QualityScore 批次；None = 未评分排最后，与 EyeSharpness
+    /// 的 None 排最前语义相反；排序逻辑在前端 filter.ts，Rust 侧仅做序列化传递）
+    Quality,
 }
 
 /// 排序方向
@@ -1260,5 +1263,14 @@ mod tests {
             serde_json::from_str::<SortBy>("\"Modified\"").expect("反序列化失败"),
             SortBy::Modified
         );
+    }
+
+    #[test]
+    fn test_sort_by_quality_serde_roundtrip() {
+        // 外部标签枚举：Quality ↔ "Quality"（前端 bindings.ts 手写段同步维护）
+        let json = serde_json::to_string(&SortBy::Quality).expect("序列化失败");
+        assert_eq!(json, "\"Quality\"");
+        let back: SortBy = serde_json::from_str(&json).expect("反序列化失败");
+        assert_eq!(back, SortBy::Quality);
     }
 }

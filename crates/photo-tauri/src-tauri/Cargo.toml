@@ -23,7 +23,7 @@ specta.workspace = true
 specta-typescript.workspace = true
 photo-domain = { path = "../../photo-domain", features = ["specta"] }
 photo-engine = { path = "../../photo-engine" }
-photo-recognize = { path = "../../photo-recognize" }
+photo-recognize = { path = "../../photo-recognize", features = ["specta"] }
 photo-config = { path = "../../photo-config", features = ["specta"] }
 # 系统字体枚举（设置面板字体下拉）：workspace 已 pin zed-industries/font-kit fork
 font-kit.workspace = true
