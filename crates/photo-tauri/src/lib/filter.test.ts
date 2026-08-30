@@ -350,6 +350,49 @@ describe('applyFilterAndSort', () => {
     expect(applyFilterAndSort(mixed, opts('Rating', 'Ascending'))).toEqual([0, 2, 1])
   })
 
+  it('技术分排序：按分数升序，None（未评分）排最后', () => {
+    const q = [
+      mk({ baseName: 'a', primaryPath: 'E:/Mock/Birds/a.jpg' }),
+      mk({ baseName: 'b', primaryPath: 'E:/Mock/Birds/b.jpg' }),
+      mk({ baseName: 'c', primaryPath: 'E:/Mock/Birds/c.jpg' }),
+    ]
+    const qs = {
+      'E:/Mock/Birds/a.jpg': 0.9,
+      'E:/Mock/Birds/b.jpg': 0.3,
+      // c 未评分
+    }
+    const qOpts = (dir: SortDirection) => ({
+      criteria: defaultFilterCriteria(),
+      sortBy: 'Quality' as SortBy,
+      sortDirection: dir,
+      qualityScores: qs,
+    })
+    // 升序：b(0.3) → a(0.9) → c(None 垫底)
+    expect(applyFilterAndSort(q, qOpts('Ascending'))).toEqual([1, 0, 2])
+    // 降序 = 升序反转（None 排最前，与其他排序键的降序反转语义一致）
+    expect(applyFilterAndSort(q, qOpts('Descending'))).toEqual([2, 0, 1])
+  })
+
+  it('技术分排序：分数相等保持原序（稳定）', () => {
+    const q = [
+      mk({ baseName: 'a', primaryPath: 'E:/Mock/Birds/a.jpg' }),
+      mk({ baseName: 'b', primaryPath: 'E:/Mock/Birds/b.jpg' }),
+      mk({ baseName: 'c', primaryPath: 'E:/Mock/Birds/c.jpg' }),
+    ]
+    const qs = { 'E:/Mock/Birds/a.jpg': 0.5, 'E:/Mock/Birds/b.jpg': 0.5 }
+    const qOpts = (dir: SortDirection) => ({
+      criteria: defaultFilterCriteria(),
+      sortBy: 'Quality' as SortBy,
+      sortDirection: dir,
+      qualityScores: qs,
+    })
+    // a/b 同分保持原序，c(None) 垫底
+    expect(applyFilterAndSort(q, qOpts('Ascending'))).toEqual([0, 1, 2])
+    // 缺省 qualityScores = 全 None（未评分）：任何方向均保持原序
+    expect(applyFilterAndSort(q, opts('Quality', 'Ascending'))).toEqual([0, 1, 2])
+    expect(applyFilterAndSort(q, opts('Quality', 'Descending'))).toEqual([0, 1, 2])
+  })
+
   it('降序为升序反转', () => {
     expect(applyFilterAndSort(items, opts('Rating', 'Descending'))).toEqual([1, 2, 0])
     expect(applyFilterAndSort(items, opts('FileName', 'Descending'))).toEqual([1, 0, 2])
@@ -388,7 +431,7 @@ describe('边界', () => {
 
   it('单条列表：任何排序下仍返回自身', () => {
     const items = [mk({ baseName: 'only' })]
-    for (const sortBy of ['FileName', 'DateTaken', 'FileSize', 'Rating', 'Modified', 'EyeSharpness'] as SortBy[]) {
+    for (const sortBy of ['FileName', 'DateTaken', 'FileSize', 'Rating', 'Modified', 'EyeSharpness', 'Quality'] as SortBy[]) {
       expect(applyFilterAndSort(items, opts(sortBy, 'Ascending'))).toEqual([0])
       expect(applyFilterAndSort(items, opts(sortBy, 'Descending'))).toEqual([0])
     }

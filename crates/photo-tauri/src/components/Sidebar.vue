@@ -2,9 +2,10 @@
 // 左栏「目录」tab 内容：打开目录 / 收藏当前目录 / 当前目录卡片 / 收藏列表 / 最近打开列表。
 // 收藏与最近经 '@/lib/ipc' 命令读取（mock 模式走内存态）；外壳（宽度/拖宽/tab 头）在 LeftPanel.vue。
 import { computed, onMounted, ref, watch } from 'vue'
-import { ChevronRightIcon, ClockIcon, FolderIcon, FolderOpenIcon, ImportIcon, StarIcon, XIcon } from '@lucide/vue'
+import { ChevronRightIcon, ClockIcon, CopyIcon, FolderIcon, FolderOpenIcon, ImportIcon, StarIcon, XIcon } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { useCapturesStore } from '@/stores/captures'
+import { useDuplicatesStore } from '@/stores/duplicates'
 import { useContextMenuStore, type ContextMenuItem } from '@/stores/contextMenu'
 import { useImportDialogStore } from '@/stores/importDialog'
 import type { SubdirInfo } from '@/lib/bindings'
@@ -19,6 +20,7 @@ import {
 } from '@/lib/ipc'
 
 const captures = useCapturesStore()
+const duplicates = useDuplicatesStore()
 const contextMenu = useContextMenuStore()
 const importDialog = useImportDialogStore()
 
@@ -339,6 +341,14 @@ watch(
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- 底部工具区：重复照片检测（pHash 近重复分组；打开面板后逐张哈希 → 分组列表） -->
+    <div class="shrink-0 border-t px-3 py-2">
+      <Button size="sm" variant="ghost" class="w-full" @click="duplicates.openPanel()">
+        <CopyIcon data-icon="inline-start" />
+        重复照片
+      </Button>
     </div>
   </div>
 </template>

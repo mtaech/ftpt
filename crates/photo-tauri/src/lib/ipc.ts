@@ -10,6 +10,7 @@ import {
   type BatchOpResult,
   type BatchOpType,
   type CaptureMeta,
+  type CatalogEntry,
   type ColorLabel,
   type CorrectionStat,
   type Flag,
@@ -133,8 +134,6 @@ export const exportCaptures: (
 
 export const getRecognition: (path: string) => Promise<Recognition | null> = (path) =>
   unwrap(api.getRecognition(path))
-export const correctBird: (path: string, birdName: string) => Promise<void> = (path, birdName) =>
-  unwrapVoid(api.correctBird(path, birdName))
 export const deleteCaptures: (paths: string[]) => Promise<void> = (paths) =>
   unwrapVoid(api.deleteCaptures(paths))
 export const exportAdjusted: (path: string, outputDir: string | null) => Promise<string> = (
@@ -162,6 +161,23 @@ export const getCorrectionStats: () => Promise<CorrectionStat[]> = () =>
 /** 高频鸟种（修正鸟种下拉「常用」分组；张数降序，本机使用频次即区域相关性代理） */
 export const getFrequentSpecies: (limit: number) => Promise<string[]> = (limit) =>
   unwrap(api.getFrequentSpecies(limit))
+
+// ── 识别纠错（SpeciesCorrectDialog）：名录搜索 + 批量纠正 ──
+
+/** 名录搜索（中文名/拼音/拉丁名子串匹配，仅鸟纲；修正对话框数据源） */
+export const searchCatalog: (query: string, limit: number) => Promise<CatalogEntry[]> = (
+  query,
+  limit,
+) => unwrap(api.searchCatalog(query, limit))
+
+/** 批量人工纠正鸟种（写 folder_db recognition + global_db 修正日志；逐文件失败不中止） */
+export const correctRecognition: (
+  paths: string[],
+  spId: number,
+  cnName: string,
+  sciName: string,
+) => Promise<void> = (paths, spId, cnName, sciName) =>
+  unwrapVoid(api.correctRecognition(paths, spId, cnName, sciName))
 
 // ── ptimg:// 自定义协议 URL ───────────────────────────
 
@@ -261,3 +277,42 @@ export const onImportProgress = (cb: (p: ImportProgressPayload) => void) =>
   listenEvent<ImportProgressPayload>('import:progress', cb)
 export const onImportDone = (cb: (p: ImportDonePayload) => void) =>
   listenEvent<ImportDonePayload>('import:done', cb)
+
+// ── eBird/观鸟记录 CSV 导出（统计视图「导出记录」按钮） ──
+
+/** 导出当前文件夹 eBird 记录 CSV（返回写入行数；0 = 无已确认鸟种） */
+export const exportBirdRecords: (destPath: string) => Promise<number> = (destPath) =>
+  unwrap(api.exportBirdRecords(destPath))
+
+// ── pHash 近重复检测（重复照片）：dHash → 汉明距离贪心聚类 ─────
+
+export type DuplicatesProgressPayload = { done: number; total: number }
+export type DuplicatesDonePayload = { groups: string[][]; error: string | null }
+
+/** 触发近重复检测（异步：进度/结果经 duplicates:progress / duplicates:done 事件推送）。
+ *  threshold = 汉明距离阈值（null 用后端默认 10）。 */
+export const findDuplicates: (threshold: number | null) => Promise<void> = (threshold) =>
+  unwrapVoid(api.findDuplicates(threshold))
+
+export const onDuplicatesProgress = (cb: (p: DuplicatesProgressPayload) => void) =>
+  listenEvent<DuplicatesProgressPayload>('duplicates:progress', cb)
+export const onDuplicatesDone = (cb: (p: DuplicatesDonePayload) => void) =>
+  listenEvent<DuplicatesDonePayload>('duplicates:done', cb)
+
+// ── QualityScore 批次：技术质量评分（眼锐度 + 直方图剪切 + 检测置信度） ──
+
+export type QualityProgressPayload = { done: number; total: number; currentPath: string }
+export type QualityDonePayload = { total: number; scores: [string, number][] }
+
+/** 批量计算技术质量评分（异步：逐张 emit quality:progress，完成 emit quality:done） */
+export const computeQualityScores: (paths: string[]) => Promise<void> = (paths) =>
+  unwrapVoid(api.computeQualityScores(paths))
+/** 拉取技术质量评分快照（完整路径 → 0..1 技术分；尚未计算过返回空）。
+ *  specta 把 f64 生成为 number | null（JSON 无 NaN）；本应用分数恒有限，窄化为 number */
+export const getQualityScores: () => Promise<[string, number][]> = () =>
+  api.getQualityScores() as Promise<[string, number][]>
+
+export const onQualityProgress = (cb: (p: QualityProgressPayload) => void) =>
+  listenEvent<QualityProgressPayload>('quality:progress', cb)
+export const onQualityDone = (cb: (p: QualityDonePayload) => void) =>
+  listenEvent<QualityDonePayload>('quality:done', cb)

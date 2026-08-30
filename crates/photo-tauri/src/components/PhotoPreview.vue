@@ -2,7 +2,7 @@
 // 单图预览：ptimg master 图源（1:1 时切 full），滚轮光标中心缩放（×1.25 步进，
 // 数学走 previewMath 纯函数），左键拖拽平移，工具条 −/%/+/适应/1:1/返回网格。
 import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue'
-import { CrosshairIcon, MinusIcon, PlusIcon, MaximizeIcon, ScanIcon, ScanLineIcon, Grid2x2Icon, ImageIcon } from '@lucide/vue'
+import { CrosshairIcon, CrownIcon, MinusIcon, PlusIcon, MaximizeIcon, ScanIcon, ScanLineIcon, Grid2x2Icon, ImageIcon } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import Filmstrip from '@/components/Filmstrip.vue'
 import { useCapturesStore } from '@/stores/captures'
@@ -14,6 +14,7 @@ import { useContextMenuStore, captureMenuItems } from '@/stores/contextMenu'
 import { getClippingMask, getRecognition, ptimgUrl } from '@/lib/ipc'
 import { registerZoomHost } from '@/lib/zoomHost'
 import { displayName, formatBadgeLabel } from '@/lib/format'
+import { pickBestFrame } from '@/lib/bestFrame'
 import type { BBox } from '@/lib/bindings'
 import type { Vec2 } from '@/lib/previewMath'
 
@@ -69,6 +70,29 @@ function activateStackMember(m: number) {
   if (!g || m === selection.selectedIndex) return
   filter.setStackActive(g.key, m)
   selection.select(m)
+}
+
+/**
+ * 当前照片所在连拍组的最优帧路径（与网格皇冠同源：filter.burstGroups +
+ * pickBestFrame 确定性全序）。不在连拍组（或组内仅 1 张）返回 null，分段选择器
+ * 据此在最优帧段前置皇冠。
+ */
+const stackBestPath = computed(() => {
+  const i = selection.selectedIndex
+  if (i === null) return null
+  const entry = filter.burstGroups.get(i)
+  if (!entry) return null
+  const members: number[] = []
+  for (const [m, e] of filter.burstGroups) {
+    if (e.groupId === entry.groupId) members.push(m)
+  }
+  return pickBestFrame(members.map((m) => captures.items[m]))
+})
+
+/** 分段选择器滚轮横滚：纵向滚轮转横向（prevent+stop 阻断冒泡触发预览缩放） */
+function onStackWheel(e: WheelEvent) {
+  const el = e.currentTarget as HTMLElement
+  el.scrollLeft += e.deltaY !== 0 ? e.deltaY : e.deltaX
 }
 
 /** 显示尺寸与定位（渲染公式 = previewMath，与 GPUI 一致） */
@@ -650,23 +674,32 @@ function onImageContextMenu(e: MouseEvent) {
           1:1
         </Button>
         <!-- 堆叠成员分段选择器：多格式组显示格式徽标（JPG/CR3…）、连拍组显示帧号；
-             点击直达目标成员，替代原「格式 n/m」循环按钮（要点多次才知道有什么） -->
+             点击直达目标成员，替代原「格式 n/m」循环按钮（要点多次才知道有什么）。
+             成员多时滚轮直接横滚；连拍组最优帧带皇冠（口径与网格成员带一致） -->
         <div
           v-if="canCycleStack"
           class="flex max-w-56 items-center gap-0.5 overflow-x-auto rounded-full bg-element/80 p-0.5 [scrollbar-width:none]! [&::-webkit-scrollbar]:hidden"
+          @wheel.prevent.stop="onStackWheel"
         >
           <button
             v-for="m in currentStack!.members"
             :key="m"
-            class="flex h-6 min-w-6 shrink-0 cursor-pointer items-center justify-center rounded-full px-1.5 text-[11px] leading-none font-medium transition-colors"
+            class="flex h-6 min-w-6 shrink-0 cursor-pointer items-center justify-center gap-0.5 rounded-full border px-1.5 text-[11px] leading-none font-medium transition-colors"
             :class="
               m === selection.selectedIndex
-                ? 'bg-primary text-primary-foreground shadow-sm'
-                : 'text-muted-foreground hover:bg-element-hover hover:text-foreground'
+                ? 'border-primary bg-primary text-primary-foreground shadow-sm'
+                : 'border-border/70 bg-background/40 text-muted-foreground hover:bg-element-hover hover:text-foreground'
             "
-            :title="displayName(captures.items[m])"
+            :title="
+              displayName(captures.items[m]) +
+              (captures.items[m].primaryPath === stackBestPath ? '（连拍组最优帧）' : '')
+            "
             @click="activateStackMember(m)"
           >
+            <CrownIcon
+              v-if="captures.items[m].primaryPath === stackBestPath"
+              class="size-3 shrink-0 text-amber-500 dark:text-amber-300"
+            />
             {{ stackMemberLabel(m) }}
           </button>
         </div>

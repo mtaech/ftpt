@@ -3,9 +3,10 @@
 // 信息 tab：Hero/EXIF/评分/色标/旗标/识别六卡片，数据来自选中拍摄（selection.selected，
 // 主选中项优先锚点）；调整 tab：曝光/对比度/饱和度 slider，拖动 350ms 去抖持久化。
 // 宽度自持：左缘把手可拖拽，localStorage('ftpt.rightPanelWidth') 持久化，钳制 200–480。
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onUnmounted, reactive, ref, watch } from 'vue'
 import { useStorage } from '@vueuse/core'
 import {
+  BadgeCheckIcon,
   CalendarDaysIcon,
   CameraIcon,
   ChevronDownIcon,
@@ -15,7 +16,6 @@ import {
   InfoIcon,
   LensConvexIcon,
   MapPinIcon,
-  PencilIcon,
   RotateCcwIcon,
   ScanSearchIcon,
   SlidersHorizontalIcon,
@@ -27,9 +27,8 @@ import { useCapturesStore } from '@/stores/captures'
 import { useSelectionStore } from '@/stores/selection'
 import { usePreviewStore } from '@/stores/preview'
 import { useRecognitionStore } from '@/stores/recognition'
-import { useFilterStore } from '@/stores/filter'
 import { useConfigStore } from '@/stores/config'
-import { correctBird, getAdjustments, getFrequentSpecies, getHistogram, getRecognition, isTauri, setAdjustments } from '@/lib/ipc'
+import { getAdjustments, getHistogram, getRecognition, isTauri, setAdjustments } from '@/lib/ipc'
 import { wgs84ToBd09 } from '@/lib/geo'
 import { displayName, formatBytes, formatName, ratingToNumber } from '@/lib/format'
 import type {
@@ -48,7 +47,6 @@ const captures = useCapturesStore()
 const selection = useSelectionStore()
 const preview = usePreviewStore()
 const recognition = useRecognitionStore()
-const filter = useFilterStore()
 const config = useConfigStore()
 
 /** 主选中拍摄（锚点优先；无选中/越界为 null） */
@@ -259,84 +257,39 @@ function onRecognize() {
   if (path) void recognition.recognize([path])
 }
 
+/** 打开人工纠错对话框（识别卡「纠正…」按钮）：作用于当前选中集（多选批量应用） */
+function onCorrectOpen() {
+  const paths =
+    selection.selectedPaths.length > 0
+      ? selection.selectedPaths
+      : focusedPath.value
+        ? [focusedPath.value]
+        : []
+  recognition.openCorrection(paths)
+}
+
+// 人工纠错成功（correctionVersion 递增）后重拉完整结果：状态可能不变
+// （Confirmed→Confirmed），status watcher 不会触发，以版本号为显式信号（seq 守卫去重）
+watch(
+  () => recognition.correctionVersion,
+  () => {
+    const path = focusedPath.value
+    if (!path || !focused.value?.recognitionStatus) return
+    loadRecognition(path)
+  },
+)
+
 /** 检测框开关（V 键同一入口） */
 function onToggleBbox() {
   preview.toggleBbox()
 }
 
-// ── 修正鸟种下拉：展开 → 高频「常用」分组前置 + 名录全量 + 搜索过滤，选即 correctBird（对齐 GPUI correction_open）──
-const correctOpen = ref(false)
-const correctSearch = ref('')
-const correctBoxEl = ref<HTMLElement | null>(null)
+// ══════════════════ 直方图卡 / GPS（T1 批次 HistogramPanel 切片）══════════════════
 
-/**
- * 高频鸟种（get_frequent_species(10)，全局索引张数降序）——本机使用频次即区域
- * 相关性代理（离线替代区域名录）。加载失败降级空数组（不阻塞下拉主流程）。
- */
-const frequentSpecies = ref<string[]>([])
-
-/**
- * 候选 = 高频常用分组（frequent ∩ 名录，保持频次序）+ 其余名录（原名录顺序）。
- * 搜索词命中与否均分组展示：常用组只留命中的，未命中整组隐藏。
- */
-const correctOptions = computed(() => {
-  const all = filter.speciesOptions
-  const freq = frequentSpecies.value.filter((n) => all.includes(n))
-  const rest = all.filter((n) => !freq.includes(n))
-  const q = correctSearch.value.trim().toLowerCase()
-  const match = (n: string) => (q ? n.toLowerCase().includes(q) : true)
-  return {
-    frequent: freq.filter(match),
-    rest: rest.filter(match),
-  }
-})
-
-function toggleCorrect() {
-  correctOpen.value = !correctOpen.value
-  correctSearch.value = ''
-  if (correctOpen.value) {
-    // 名录未加载时补齐（InfoPanel 与 FilterBar 独立挂载，不依赖其 watcher）；
-    // 高频列表同理首次展开时拉取
-    if (filter.speciesOptions.length === 0) void filter.loadSpecies()
-    if (frequentSpecies.value.length === 0) {
-      void getFrequentSpecies(10)
-        .then((list) => {
-          frequentSpecies.value = list
-        })
-        .catch((e) => console.error('加载高频鸟种失败', e))
-    }
-  }
-}
-
-/** 选择即修正：correctBird 写识别表 → 重拉完整结果 + 全量刷新网格摘要 */
-async function onCorrectSelect(name: string) {
-  correctOpen.value = false
-  correctSearch.value = ''
-  const path = focusedPath.value
-  if (!path) return
-  try {
-    await correctBird(path, name)
-    loadRecognition(path)
-    void captures.reload()
-  } catch (e) {
-    console.error('鸟种修正失败', e)
-  }
-}
-
-/** 点击下拉外部关闭（对齐 FilterBar 鸟种下拉模式） */
-function onDocMouseDown(e: MouseEvent) {
-  if (correctOpen.value && correctBoxEl.value && !correctBoxEl.value.contains(e.target as Node)) {
-    correctOpen.value = false
-  }
-}
-onMounted(() => document.addEventListener('mousedown', onDocMouseDown))
 onUnmounted(() => {
-  document.removeEventListener('mousedown', onDocMouseDown)
   histObserver?.disconnect()
   histObserver = null
 })
-
-// ══════════════════ 直方图卡 / GPS（T1 批次 HistogramPanel 切片）══════════════════
 
 /** 直方图数据（null = 未加载；失败置 histError） */
 const hist = ref<HistogramPayload | null>(null)
@@ -926,8 +879,12 @@ function fmtSigned(v: number): string {
               <span class="tabular-nums">眼锐度 {{ fullRecognition.eyeSharpness.toFixed(2) }}</span>
               <InfoIcon class="size-3 shrink-0 text-muted-foreground/70" />
             </div>
-            <!-- 动作行：重新识别 + 检测框 -->
+            <!-- 动作行：纠正 + 重新识别 + 检测框 -->
             <div class="flex justify-end gap-1">
+              <Button size="sm" variant="ghost" @click="onCorrectOpen">
+                <BadgeCheckIcon data-icon="inline-start" />
+                纠正…
+              </Button>
               <Button size="sm" variant="ghost" @click="onRecognize">
                 <RotateCcwIcon data-icon="inline-start" />
                 重新识别
@@ -935,61 +892,6 @@ function fmtSigned(v: number): string {
               <Button size="sm" variant="ghost" @click="onToggleBbox">
                 {{ preview.bboxVisible ? '隐藏检测框' : '显示检测框' }}
               </Button>
-            </div>
-            <!-- 修正鸟种：展开 → 搜索下拉（名录全量，选即修正，对齐 GPUI correction_open） -->
-            <div ref="correctBoxEl" class="relative">
-              <Button size="sm" variant="ghost" class="w-full justify-start" @click="toggleCorrect">
-                <PencilIcon data-icon="inline-start" />
-                {{ correctOpen ? '收起修正' : '修正鸟种…' }}
-              </Button>
-              <!-- 向上展开：识别卡位于面板底部，向下会被滚动容器裁切 -->
-              <div
-                v-if="correctOpen"
-                class="absolute right-0 bottom-full z-20 mb-1 w-full overflow-hidden rounded-md border border-border bg-popover shadow-md"
-              >
-                <input
-                  v-model="correctSearch"
-                  type="text"
-                  class="w-full border-b border-border bg-transparent px-2 py-1.5 text-xs outline-none placeholder:text-muted-foreground"
-                  placeholder="搜索鸟种…"
-                  @click.stop
-                />
-                <div class="max-h-40 overflow-y-auto">
-                  <template v-if="correctOptions.frequent.length > 0">
-                    <div class="px-2 pt-1 pb-0.5 text-[10px] font-medium text-muted-foreground/70">
-                      常用
-                    </div>
-                    <button
-                      v-for="n in correctOptions.frequent"
-                      :key="n"
-                      type="button"
-                      class="block w-full truncate px-2 py-1 text-left text-xs hover:bg-accent hover:text-accent-foreground"
-                      @click="onCorrectSelect(n)"
-                    >
-                      {{ n }}
-                    </button>
-                  </template>
-                  <div
-                    v-if="correctOptions.frequent.length > 0 && correctOptions.rest.length > 0"
-                    class="my-1 border-t border-border/60"
-                  ></div>
-                  <button
-                    v-for="n in correctOptions.rest"
-                    :key="n"
-                    type="button"
-                    class="block w-full truncate px-2 py-1 text-left text-xs hover:bg-accent hover:text-accent-foreground"
-                    @click="onCorrectSelect(n)"
-                  >
-                    {{ n }}
-                  </button>
-                  <div
-                    v-if="correctOptions.frequent.length === 0 && correctOptions.rest.length === 0"
-                    class="px-2 py-1 text-xs text-muted-foreground"
-                  >
-                    无匹配鸟种
-                  </div>
-                </div>
-              </div>
             </div>
           </template>
         </div>

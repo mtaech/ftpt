@@ -10,6 +10,7 @@ import type {
   BatchOpResult,
   BatchOpType,
   CaptureMeta,
+  CatalogEntry,
   ColorLabel,
   CorrectionStat,
   Flag,
@@ -366,15 +367,6 @@ export const mockCommands = {
       },
     }
   },
-  async correctBird(path: string, birdName: string): Promise<MockResult<null>> {
-    const c = captures.find((x) => x.primaryPath === path)
-    if (c) {
-      c.recognitionStatus = 'Confirmed'
-      c.birdName = birdName
-      c.birdConfidence = 1
-    }
-    return { status: 'ok', data: null }
-  },
   async deleteCaptures(paths: string[]): Promise<MockResult<null>> {
     captures = captures.filter((c) => !paths.includes(c.primaryPath))
     // 与后端 delete_captures 语义一致：删除后 emit scan:done 驱动前端重扫
@@ -528,7 +520,116 @@ export const mockCommands = {
     mockEmit('export:done', { success, failed: failures.length })
     return { status: 'ok', data: { success, failed: failures.length, failures } }
   },
+
+  // ── eBird/观鸟记录 CSV 导出（统计视图「导出记录」按钮） mock ──
+  // 无真实后端：不写文件，返回统计 mock 的确定性行数（SPECIES_MOCK 张数合计），
+  // 前端 toast 展示目标路径即可验证入口链路。
+
+  async exportBirdRecords(_destPath: string): Promise<MockResult<number>> {
+    const count = SPECIES_MOCK.reduce((acc, x) => acc + x.count, 0)
+    return { status: 'ok', data: count }
+  },
+
+  // ── pHash 近重复检测（重复照片）：确定性 mock 分组 ──────────
+
+  async findDuplicates(_threshold: number | null): Promise<MockResult<null>> {
+    const total = captures.length
+    if (total === 0) return { status: 'error', error: '没有可检测的照片' }
+    // 模拟逐张哈希进度（抽 10 个 tick，避免 200 次 sleep 拖慢 mock）
+    for (let done = 1; done <= 10; done++) {
+      await sleep(30)
+      mockEmit('duplicates:progress', { done, total })
+    }
+    // 确定性假分组：索引 (5,6) 与 (10,11,12) 两组（渲染可验证；路径越界自动过滤）
+    const pick = (...is: number[]) =>
+      is.filter((i) => i < captures.length).map((i) => captures[i].primaryPath)
+    const groups = [pick(5, 6), pick(10, 11, 12)].filter((g) => g.length >= 2)
+    mockEmit('duplicates:done', { groups, error: null })
+    return { status: 'ok', data: null }
+  },
+
+  // ── 识别纠错（SpeciesCorrectDialog） mock ─────────────
+  // 名录为确定性小样本（中文名/拉丁名可命中；真实后端含拼音列 cn_name_pinyin）
+
+  async searchCatalog(query: string, limit: number): Promise<MockResult<CatalogEntry[]>> {
+    const q = query.trim().toLowerCase()
+    if (q === '' || limit <= 0) return { status: 'ok', data: [] }
+    const hit = MOCK_CATALOG.filter(
+      (e) => e.cnName.includes(q) || e.latinName.toLowerCase().includes(q),
+    ).slice(0, limit)
+    return { status: 'ok', data: hit }
+  },
+
+  /** 模拟批量纠正：仅更新内存 captures 摘要（真实后端额外写 folder_db + global_db 日志） */
+  async correctRecognition(
+    paths: string[],
+    _spId: number,
+    cnName: string,
+    _sciName: string,
+  ): Promise<MockResult<null>> {
+    for (const c of captures) {
+      if (paths.includes(c.primaryPath)) {
+        c.recognitionStatus = 'Confirmed'
+        c.birdName = cnName
+        c.birdConfidence = 1
+      }
+    }
+    return { status: 'ok', data: null }
+  },
+
+  // ── QualityScore 批次：技术质量评分 mock ─────────────
+
+  async computeQualityScores(paths: string[]): Promise<MockResult<null>> {
+    const total = paths.length
+    let done = 0
+    const scores: [string, number][] = []
+    for (const path of paths) {
+      await sleep(30)
+      done += 1
+      mockEmit('quality:progress', { done, total, currentPath: path })
+      const c = captures.find((x) => x.primaryPath === path)
+      if (c) {
+        // 合成（对齐后端权重语义：眼锐度 0.5 + 剪切 0.3 + 置信度 0.2，缺失分量
+        // 权重重归一化）；mock 无直方图/眼锐度，用确定性伪随机填充使徽标红/绿档可验证
+        const eye = c.eyeSharpness ?? 10 + ((path.charCodeAt(path.length - 1) * 7) % 90)
+        const conf =
+          c.birdConfidence === null
+            ? null
+            : c.birdConfidence > 1
+              ? c.birdConfidence
+              : c.birdConfidence * 100
+        const clipOk = 0.75 + ((path.length * 13) % 25) / 100 // 0.75–0.99
+        let weighted = 0.5 * Math.min(1, eye / 100) + 0.3 * clipOk
+        let weight = 0.8
+        if (conf !== null) {
+          weighted += 0.2 * Math.min(1, conf / 100)
+          weight += 0.2
+        }
+        const s = Math.min(1, weighted / weight)
+        mockQualityScores[path] = s
+        scores.push([path, s])
+      }
+    }
+    mockEmit('quality:done', { total, scores })
+    return { status: 'ok', data: null }
+  },
+
+  async getQualityScores(): Promise<[string, number][]> {
+    return Object.entries(mockQualityScores) as [string, number][]
+  },
 }
+
+/** mock 名录（search_catalog 数据源；与 listBirdSpecies mock 名单一致便于对照） */
+const MOCK_CATALOG: CatalogEntry[] = [
+  { birdId: 1, cnName: '北红尾鸲', latinName: 'Phoenicurus auroreus' },
+  { birdId: 2, cnName: '斑嘴鸭', latinName: 'Anas zonorhyncha' },
+  { birdId: 3, cnName: '白鹭', latinName: 'Egretta garzetta' },
+  { birdId: 4, cnName: '苍鹭', latinName: 'Ardea cinerea' },
+  { birdId: 5, cnName: '翠鸟', latinName: 'Alcedo atthis' },
+  { birdId: 6, cnName: '红嘴蓝鹊', latinName: 'Urocissa erythroryncha' },
+  { birdId: 7, cnName: '麻雀', latinName: 'Passer montanus' },
+  { birdId: 8, cnName: '山斑鸠', latinName: 'Streptopelia orientalis' },
+]
 
 /** 取路径扩展名（含点；无扩展名返回空串） */
 function extOf(p: string): string {
@@ -543,6 +644,9 @@ const adjustments = new Map<string, AdjustParams>()
 
 /** mock 撤销日志（对齐后端 OpJournal：只记最近一次 Move/Copy 批次，Delete 不记录） */
 let mockUndoJournal: { kind: 'Move' | 'Copy'; count: number } | null = null
+
+/** mock 技术质量评分（完整路径 → 0..1；computeQualityScores 填充，getQualityScores 读取） */
+let mockQualityScores: Record<string, number> = {}
 
 // ── T1 批次（SpeciesIndex）：全局鸟种统计 mock 数据 ────────
 // 确定性合成：5 种鸟（张数降序，含无锐度样本）+ 照片指向 mock captures 路径

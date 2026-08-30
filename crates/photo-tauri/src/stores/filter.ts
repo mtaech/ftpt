@@ -22,6 +22,7 @@ import { computeBurstGroups, type BurstEntry } from '@/lib/burst'
 import { groupByTime, groupSingles, groupStacks, type StackGroup } from '@/lib/stacks'
 import { useCapturesStore } from './captures'
 import { useConfigStore } from './config'
+import { useQualityStore } from './quality'
 
 export const useFilterStore = defineStore('filter', {
   state: () => ({
@@ -44,6 +45,8 @@ export const useFilterStore = defineStore('filter', {
         criteria: this.criteria,
         sortBy: this.sortBy,
         sortDirection: this.sortDirection,
+        // Quality 排序键数据源（技术质量机筛分；缺省 = 未评分 None 排最后）
+        qualityScores: useQualityStore().scores,
       })
     },
     /** 过滤+排序后的拍摄列表（下标映射） */

@@ -24,6 +24,8 @@ export type KeymapAction =
   | 'flagPick'
   | 'flagReject'
   | 'flagNone'
+  // 连拍选优（前端新增）：K 保留组内最优帧（其余标 Reject）
+  | 'keepBestFrame'
   // 识别（B 单张 / Ctrl+B 批量未识别 / Ctrl+Shift+B 重新识别全部）
   | 'recognize'
   | 'recognizeUnrecognized'
@@ -63,6 +65,8 @@ export type KeymapAction =
   | 'refresh'
   | 'toggleLeftPanel'
   | 'toggleRightPanel'
+  // 地图视图（M 键切换全屏 GPS 地图 overlay，前端新增键，GPUI 版无对应分支）
+  | 'toggleMap'
 
 /** 动作分发表：调用方把 action 名接到真实 store 调用上（Phase 3 项可先 no-op） */
 export type KeymapHandlers = Partial<Record<KeymapAction, () => void>>
@@ -100,6 +104,8 @@ export const BINDINGS: readonly KeyBinding[] = [
   { key: 'p', ctrl: false, action: 'flagPick' },
   { key: 'x', ctrl: false, action: 'flagReject' },
   { key: 'u', ctrl: false, action: 'flagNone' },
+  // 连拍选优：K 保留组内最优帧（其余标 Reject；前端新增键，GPUI layout.rs 无对应分支）
+  { key: 'k', ctrl: false, action: 'keepBestFrame' },
   // 识别：B 单张 / Ctrl+B 批量未识别 / Ctrl+Shift+B 重新识别全部
   // （b 键的 ctrl/shift 精确匹配，保证 Ctrl 按下时不落到单张识别，不双重触发）
   { key: 'b', ctrl: false, action: 'recognize' },
@@ -145,6 +151,8 @@ export const BINDINGS: readonly KeyBinding[] = [
   { key: 'f5', ctrl: false, action: 'refresh' },
   { key: '[', ctrl: true, action: 'toggleLeftPanel' },
   { key: ']', ctrl: true, action: 'toggleRightPanel' },
+  // 地图：M 进入/退出全屏 GPS 地图 overlay（前端新增键，M 未被占用）
+  { key: 'm', ctrl: false, action: 'toggleMap' },
 ]
 
 /** 把浏览器 e.key 规范化为绑定表键名（对齐 GPUI keystroke 命名：left/right/home/end/escape/f5） */

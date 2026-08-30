@@ -136,12 +136,24 @@ export const commands = {
 	recognizedAt: string,
 } | null, string>(__TAURI_INVOKE("get_recognition", { path })),
 	/**
-	 *  手动修正鸟种（对齐 GPUI correct_bird_by_name）：名录库按中文名匹配 → 构造
-	 *  Confirmed Recognition（人工指定即权威结论：置信度 100%，保留原检测框/眼锐度/
-	 *  眼框数据）→ 写 recognition 表 → 同步内存 CaptureMeta（bird_name/confidence/
-	 *  status）→ emit thumb:ready 供前端刷新网格识别 chip。
+	 *  名录搜索（SpeciesCorrectDialog 数据源）：按中文名/拼音/拉丁名子串匹配，
+	 *  仅鸟纲，中文名命中优先、拼音次之、拉丁名最后（组内拼音排序）。
+	 *  名录库在 exe 同级 data/pica_ref.db（与 list_bird_species 同路径约定）。
 	 */
-	correctBird: (path: string, birdName: string) => typedError<null, string>(__TAURI_INVOKE("correct_bird", { path, birdName })),
+	searchCatalog: (query: string, limit: number) => typedError<CatalogEntry[], string>(__TAURI_INVOKE("search_catalog", { query, limit })),
+	/**
+	 *  批量人工纠正鸟种（SpeciesCorrectDialog）：对 `paths` 逐文件执行
+	 *  1) folder_db `update_recognition_species`（改鸟种 + 状态置 Confirmed +
+	 *     人工来源标记：confidence=100 + recognized_at 刷新，不加列/表）
+	 *  2) global_db 修正审计日志 `log_correction`（old→new + 时间；原行无预测时跳过）
+	 *  3) global_db 索引 `upsert_rows`（人工指定 = 权威结论）+ 内存 CaptureMeta 同步 +
+	 *     emit thumb:ready 供网格刷新识别 chip。
+	 * 
+	 *  入参校验：sp_id 必须在名录库存在且为鸟纲，且 cn_name/sci_name 与名录一致
+	 *  （防陈旧前端状态写脏数据；名录条目为权威值）。
+	 *  单张失败不中止整体（逐文件报告，照 delete_captures 语义）；全部失败才返回 Err。
+	 */
+	correctRecognition: (paths: string[], spId: number, cnName: string, sciName: string) => typedError<null, string>(__TAURI_INVOKE("correct_recognition", { paths, spId, cnName, sciName })),
 	/**
 	 *  单张/多张删除（回收站，无确认——对齐 GPUI Delete 键语义）。
 	 *  与 batch_op_execute 的 Delete 分支同编排：重扫源目录取完整 Capture（ops 层
@@ -246,6 +258,38 @@ export const commands = {
 	 *  进度互踩）。返回 `BatchOpResult` 形态汇总。
 	 */
 	exportCaptures: (paths: string[], outputDir: string, longEdge: number | null, quality: number, template: string, startSeq: number) => typedError<BatchOpResult, string>(__TAURI_INVOKE("export_captures", { paths, outputDir, longEdge, quality, template, startSeq })),
+	/**
+	 *  导出当前文件夹的 eBird/观鸟记录 CSV：engine 按（鸟种, 日期）聚合 recognition
+	 *  表（Confirmed 全计、NeedsReview 计入并标注「待确认」），写 UTF-8 BOM CSV。
+	 *  `dest_path` = 前端计算的目标路径（照片目录 exports/ebird_YYYY-MM-DD.csv）。
+	 *  返回写入行数（0 = 该文件夹尚无已确认鸟种）。同步执行（聚合/写盘均轻量，
+	 *  对齐 get_recognition/get_species_stats 同步命令形态）。
+	 */
+	exportBirdRecords: (destPath: string) => typedError<number, string>(__TAURI_INVOKE("export_bird_records", { destPath })),
+	/**
+	 *  近重复检测：对当前扫描结果全量计算 dHash（优先读缩略图磁盘缓存，命中零解码；
+	 *  未命中走现有缩略图生成路径），按汉明距离 ≤ threshold 贪心聚类。
+	 *  spawn_blocking 内执行；逐张 emit `duplicates:progress`，完成 emit
+	 *  `duplicates:done`（携带分组结果；整体失败时 done 的 error 字段非空，前端
+	 *  据此提示而非显示「未发现重复」空态）。结果只存 AppState 内存
+	 *  （duplicate_groups），禁止写库。
+	 */
+	findDuplicates: (threshold: number | null) => typedError<null, string>(__TAURI_INVOKE("find_duplicates", { threshold })),
+	/**
+	 *  批量计算技术质量评分：spawn_blocking 后台逐张合成眼锐度（权重 0.5）+ 直方图
+	 *  剪切（0.3）+ 检测置信度（0.2）→ 0..1 技术分（engine::quality::score 纯函数）。
+	 *  直方图优先命中 AppState.hist_cache（InfoPanel 查看过的图免重复解码，clip 占比
+	 *  由缓存负载折算注入），未命中现场调 histogram::compute_histogram_from_file；
+	 *  眼锐度/置信度由 engine 批量接口读 folder_db recognition 表（rel 键）。
+	 *  逐张 emit `quality:progress`，完成 emit `quality:done`；分数只存 AppState 内存
+	 *  Map（禁止入库，重启即失）。单张解码失败不中止整体（该分量缺失，权重重归一化）。
+	 */
+	computeQualityScores: (paths: string[]) => typedError<null, string>(__TAURI_INVOKE("compute_quality_scores", { paths })),
+	/**
+	 *  拉取技术质量评分快照（完整路径 → 0..1 技术分；尚未计算过返回空）。
+	 *  供前端启动自愈/重拉（对应 captures.reload 模式）。
+	 */
+	getQualityScores: () => __TAURI_INVOKE<([string, number | null])[]>("get_quality_scores"),
 };
 
 /* Types */
@@ -435,6 +479,20 @@ export type CaptureMeta = {
 	eyeSharpness: number | null,
 };
 
+/**
+ *  名录搜索/纠正条目（与 animal_info 行一一对应；跨边界 serde + specta 导出，
+ *  供 photo-tauri `search_catalog` command 返回——前端 SpeciesCorrectDialog 数据源）。
+ *  字段与 domain::BirdMatch 同构，独立命名承载「名录检索结果」语义。
+ */
+export type CatalogEntry = {
+	/**  名录库 animal_info 主键 */
+	birdId: number,
+	/**  中文名 */
+	cnName: string,
+	/**  学名（拉丁名） */
+	latinName: string,
+};
+
 /**  颜色标签 */
 export type ColorLabel = "None" | "Red" | "Yellow" | "Green" | "Blue" | "Purple";
 
@@ -458,6 +516,22 @@ export type CorrectionStat = {
  *  无对焦点的照片回退 YOLO 全图检测。
  */
 export type DetectionSource = "Yolo" | "Focus";
+
+/**
+ *  `duplicates:done` 事件负载：近重复分组结果（groups 每组 = 组内照片完整路径
+ *  列表，组内首张为保留锚点；error = 整体失败原因，非 None 时 groups 为空，
+ *  前端据此提示而非显示空态）
+ */
+export type DuplicatesDone = {
+	groups: string[][],
+	error: string | null,
+};
+
+/**  `duplicates:progress` 事件负载：近重复检测逐张哈希进度 */
+export type DuplicatesProgress = {
+	done: number,
+	total: number,
+};
 
 /**  `export:done` 事件负载：批量导出汇总（T1 批次） */
 export type ExportDone = {
@@ -607,6 +681,22 @@ export type ImportSkipped = {
 	reason: string,
 };
 
+/**
+ *  `quality:done` 事件负载：批量技术质量评分完成（scores = 完整路径 → 0..1 技术分，
+ *  顺序与入参 paths 一致）
+ */
+export type QualityDone = {
+	total: number,
+	scores: ([string, number | null])[],
+};
+
+/**  `quality:progress` 事件负载：批量技术质量评分逐张进度（对齐 recognize:progress 模式） */
+export type QualityProgress = {
+	done: number,
+	total: number,
+	currentPath: string,
+};
+
 /**  评分 */
 export type Rating = "None" | "One" | "Two" | "Three" | "Four" | "Five";
 
@@ -734,14 +824,15 @@ export type UndoBatchResult = {
 	skipped: ([string, string])[],
 };
 
+// ============================================================================
 // 手写补充类型（specta 生成物不含）：FilterCriteria/SortBy/SortDirection/
 // RecognitionFilter 仅被前端筛选逻辑使用，Rust 侧无 command 引用它们，specta
 // 不会导出；此处按 domain.rs 的 serde 输出（camelCase、外部标签枚举）补齐。
 // 注意：重新运行 export-bindings 会覆盖此段，需手动保留。
 // ============================================================================
 
-/** 排序方式（domain.rs SortBy；EyeSharpness = 鸟眼锐度，T0 批次新增） */
-export type SortBy = 'FileName' | 'DateTaken' | 'FileSize' | 'Rating' | 'Modified' | 'EyeSharpness'
+/** 排序方式（domain.rs SortBy；EyeSharpness = 鸟眼锐度；Quality = 技术质量分，None 排最后） */
+export type SortBy = 'FileName' | 'DateTaken' | 'FileSize' | 'Rating' | 'Modified' | 'EyeSharpness' | 'Quality'
 
 /** 排序方向（domain.rs SortDirection） */
 export type SortDirection = 'Ascending' | 'Descending'

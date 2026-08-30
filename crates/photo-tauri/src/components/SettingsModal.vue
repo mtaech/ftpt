@@ -168,6 +168,8 @@ const ACTION_DESC: Record<KeymapAction, string> = {
   stackNext: '堆叠内下一个成员（网格）',
   delete: '删除到回收站',
   undoBatch: '撤销批量操作（移动/复制/重命名）',
+  keepBestFrame: '连拍选优：非最优帧标记淘汰',
+  toggleMap: '切换 GPS 地图视图',
   selectAll: '全选',
   deselectAll: '取消全选',
   closePreview: '取消/关闭',

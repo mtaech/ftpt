@@ -9,6 +9,7 @@ import { useFilterStore } from '@/stores/filter'
 import { useCapturesStore } from '@/stores/captures'
 import { usePreviewStore } from '@/stores/preview'
 import { useConfigStore } from '@/stores/config'
+import { useQualityStore } from '@/stores/quality'
 import { formatToString } from '@/lib/filter'
 import { ratingToNumber } from '@/lib/format'
 import type {
@@ -25,6 +26,15 @@ const filter = useFilterStore()
 const captures = useCapturesStore()
 const preview = usePreviewStore()
 const config = useConfigStore()
+const quality = useQualityStore()
+
+/** 批量计算当前目录全部照片的技术质量分（QualityScore 批次；无照片 no-op）。
+ *  分数经 quality:progress / quality:done 事件回流，网格角标与「技术分」排序即时生效。 */
+function onQualityTrigger() {
+  const paths = captures.items.map((c) => c.primaryPath)
+  if (paths.length === 0) return
+  void quality.trigger(paths)
+}
 
 /** 折叠态（对齐 GPUI filter_bar_expanded；默认折叠） */
 const expanded = ref(false)
@@ -88,6 +98,7 @@ const SORT_OPTIONS: { value: SortBy; label: string }[] = [
   { value: 'Rating', label: '评分' },
   { value: 'Modified', label: '修改时间' },
   { value: 'EyeSharpness', label: '眼锐度' },
+  { value: 'Quality', label: '技术分' },
 ]
 
 /** 格式相等（null = 未激活；Raw 需比较载荷，对齐 GPUI format_chip 的 active 判断） */
@@ -376,6 +387,17 @@ watch(
         <option value="Ascending">升序</option>
         <option value="Descending">降序</option>
       </select>
+
+      <!-- 技术质量分触发（QualityScore 批次）：批量计算当前目录全部照片技术分，
+           网格角标 + 「技术分」排序消费；进行中显示进度并禁用 -->
+      <button
+        class="flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded-sm border border-border bg-card px-2 text-xs text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground disabled:cursor-wait disabled:opacity-60"
+        :disabled="quality.running"
+        :title="quality.running ? '技术质量评分进行中' : '批量计算技术质量评分（眼锐度 + 剪切 + 置信度）'"
+        @click="onQualityTrigger"
+      >
+        {{ quality.running ? `评分中 ${quality.progress?.done ?? 0}/${quality.progress?.total ?? 0}` : '技术分' }}
+      </button>
 
       <!-- 网格密度：每行图片数下拉（2-5，网格即时重排；替代原缩略图尺寸滑块，仅网格态显示） -->
       <label class="flex shrink-0 items-center gap-1 text-xs text-muted-foreground" title="每行图片数">

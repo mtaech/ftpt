@@ -6,14 +6,16 @@
 // 选择交互：单击 select、Ctrl+单击 toggle、Shift+单击 selectRange、双击进预览。
 // thumb:ready → store 版本号递增 → img src ?v= 刷新。
 import { computed, onMounted, onUnmounted, reactive, ref, watch, type Component } from 'vue'
-import { CheckIcon, ChevronLeftIcon, ChevronRightIcon, CopyIcon, LayersIcon, XIcon } from '@lucide/vue'
+import { CheckIcon, ChevronLeftIcon, ChevronRightIcon, CopyIcon, CrownIcon, LayersIcon, XIcon } from '@lucide/vue'
 import { useCapturesStore } from '@/stores/captures'
 import { useFilterStore } from '@/stores/filter'
 import { useSelectionStore } from '@/stores/selection'
 import { usePreviewStore } from '@/stores/preview'
 import { useContextMenuStore, captureMenuItems } from '@/stores/contextMenu'
 import { useConfigStore } from '@/stores/config'
+import { useQualityStore } from '@/stores/quality'
 import { ptimgUrl } from '@/lib/ipc'
+import { pickBestFrame } from '@/lib/bestFrame'
 import {
   displayName,
   formatBadgeLabel,
@@ -31,6 +33,7 @@ const selection = useSelectionStore()
 const preview = usePreviewStore()
 const contextMenu = useContextMenuStore()
 const config = useConfigStore()
+const quality = useQualityStore()
 
 /** 网格布局常量：行高跟随后端配置 thumbnailSize（cell = thumbnailSize + 56，对齐 GPUI grid.rs cell_size），
  * 行距 8px、容器内边距 4px（对齐 GPUI p_1；值与模板 gap-[8px]/px-[4px] 保持一致，保证滚动定位精确） */
@@ -153,6 +156,27 @@ function burstOf(i: number) {
 }
 
 /**
+ * 连拍组最优帧下标集合（captures.items 下标；仅 size≥2 组）：驱动最优帧皇冠徽标。
+ * 每组独立选优（pickBestFrame 确定性全序），无锐度信息时按文件大小/路径序兜底。
+ */
+const bestFrameIndices = computed(() => {
+  const best = new Set<number>()
+  const byGroup = new Map<string, number[]>()
+  for (const [i, e] of filter.burstGroups) {
+    const arr = byGroup.get(e.groupId)
+    if (arr) arr.push(i)
+    else byGroup.set(e.groupId, [i])
+  }
+  for (const members of byGroup.values()) {
+    const bestPath = pickBestFrame(members.map((i) => captures.items[i]))
+    if (bestPath === null) continue
+    const bestIdx = members.find((i) => captures.items[i].primaryPath === bestPath)
+    if (bestIdx !== undefined) best.add(bestIdx)
+  }
+  return best
+})
+
+/**
  * 堆叠语义：按组内成员格式多样性区分两种堆叠——
  * 多格式 = 同画面（JPG/RAW 等，Copy 图标 + 蓝）；单格式 = 连拍多帧（Layers 图标 + 橙）。
  */
@@ -204,6 +228,23 @@ const RATING_COLORS = ['#ef4444', '#f97316', '#e8ab07', '#22c55e', '#3b82f6']
 function confPct(conf: number | null): number | null {
   if (conf === null) return null
   return conf <= 1 ? conf * 100 : conf
+}
+
+// ── 技术质量机筛分角标（QualityScore 批次）：分档阈值常量顶置 ──
+/** 技术分 ≥ 此值 = 绿点（优） */
+const QUALITY_GOOD = 0.75
+/** 技术分 < 此值 = 红点（劣）；中间档不显示角标 */
+const QUALITY_BAD = 0.4
+
+/** 质量角标：≥0.75 绿点 / <0.4 红点；未评分（null）不显示。
+ *  返回 null 时模板不渲染（与旗标/连拍徽标互不冲突，占位右下角） */
+function qualityDot(path: string): { cls: string; title: string } | null {
+  const s = quality.scoreOf(path)
+  if (s === null) return null
+  const title = `技术分 ${s.toFixed(2)}`
+  if (s >= QUALITY_GOOD) return { cls: 'bg-green-500', title }
+  if (s < QUALITY_BAD) return { cls: 'bg-red-500', title }
+  return null
 }
 
 /** Confirmed 鸟名着色（GPUI 置信度三档）：≥80 success / ≥50 warning / 否则 primary（无置信度回退 primary） */
@@ -360,11 +401,28 @@ watch([rowCount, ROW_STEP], () => {
               <XIcon v-else class="size-3 text-white" />
             </div>
 
-            <!-- 连拍组徽标（左下，仅单成员组：堆叠组的连拍语义由成员带+语义徽标表达，避免双徽标重复） -->
+            <!-- 技术质量分角标（右下 8px 圆点：≥0.75 绿 / <0.4 红，中档与未评分不显示；
+                 阈值常量见脚本 QUALITY_GOOD/QUALITY_BAD） -->
+            <div
+              v-if="qualityDot(cell.c.primaryPath)"
+              class="absolute right-1 bottom-1 size-2 rounded-full ring-1 ring-black/40"
+              :class="qualityDot(cell.c.primaryPath)!.cls"
+              :title="qualityDot(cell.c.primaryPath)!.title"
+            />
+
+            <!-- 连拍组徽标（左下，仅单成员组：堆叠组的连拍语义由成员带+语义徽标表达，避免双徽标重复）。
+                 组内最优帧在徽标行前置皇冠（amber，仅 size≥2 组存在；样式对齐 OTHER 格式徽标黑底） -->
             <div
               v-if="cell.g.members.length === 1 && burstOf(cell.g.active)"
               class="absolute bottom-1 left-1 flex items-center gap-0.5 rounded-sm bg-black/70 px-1 text-[0.625rem] leading-4 text-white"
             >
+              <span
+                v-if="bestFrameIndices.has(cell.g.active)"
+                class="flex items-center text-amber-300"
+                title="连拍组最优帧（K 键保留）"
+              >
+                <CrownIcon class="size-3" />
+              </span>
               <LayersIcon class="size-3" />
               <span class="tabular-nums">{{ burstOf(cell.g.active)!.size }}</span>
             </div>
@@ -425,6 +483,14 @@ watch([rowCount, ROW_STEP], () => {
                     class="absolute bottom-0 left-0 rounded-sm bg-black/70 px-0.5 text-[8px] leading-3 text-white"
                   >
                     {{ formatBadgeLabel(captures.items[m]) }}
+                  </span>
+                  <!-- 连拍组最优帧皇冠（右上角；仅 size≥2 组的选优帧，样式对齐语义徽标黑底） -->
+                  <span
+                    v-if="bestFrameIndices.has(m)"
+                    class="absolute top-0 right-0 rounded-sm bg-black/70 p-0.5 text-amber-300"
+                    title="连拍组最优帧（K 键保留）"
+                  >
+                    <CrownIcon class="size-2.5" />
                   </span>
                 </button>
               </div>

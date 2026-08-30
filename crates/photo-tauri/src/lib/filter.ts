@@ -168,8 +168,16 @@ function cmpStr(a: string, b: string): number {
  * = None 排最前（模拟 Rust Option<SystemTime> 的 None < Some 语义）。
  * EyeSharpness 为 T0 新增（Rust 侧无比较器，纯前端实现）：None 语义对齐 Modified
  * （None 排最前），有值按数值升序；降序由 applyFilterAndSort 外层反转统一处理。
+ * Quality（技术质量机筛分，QualityScore 批次）为前端扩展：分数来自 quality store
+ * 的 scores Map（经 applyFilterAndSort options.qualityScores 注入），None = 未评分
+ * 排最后（与 EyeSharpness 的 None 排最前语义相反）；降序同样由外层反转统一处理。
  */
-export function compareCaptures(sortBy: SortBy, a: CaptureMeta, b: CaptureMeta): number {
+export function compareCaptures(
+  sortBy: SortBy,
+  a: CaptureMeta,
+  b: CaptureMeta,
+  qualityScores?: Record<string, number>,
+): number {
   switch (sortBy) {
     case 'FileName':
       return cmpStr(a.baseName.toLowerCase(), b.baseName.toLowerCase())
@@ -187,6 +195,15 @@ export function compareCaptures(sortBy: SortBy, a: CaptureMeta, b: CaptureMeta):
       if (sb === null) return 1
       return sa - sb // 数值升序；降序由外层 sortDirection 处理
     }
+    case 'Quality': {
+      // 技术质量机筛分：None（未评分）排最后——未评分照片不参与机筛排序
+      const sa = qualityScores?.[a.primaryPath] ?? null
+      const sb = qualityScores?.[b.primaryPath] ?? null
+      if (sa === null && sb === null) return 0
+      if (sa === null) return 1
+      if (sb === null) return -1
+      return sa - sb // 数值升序；降序由外层 sortDirection 处理
+    }
     case 'Modified': {
       const ta = a.dateTaken
       const tb = b.dateTaken
@@ -201,15 +218,22 @@ export function compareCaptures(sortBy: SortBy, a: CaptureMeta, b: CaptureMeta):
 /**
  * 过滤 + 排序 → 下标数组（display_order，即 captures.items 下标）。
  * Array.prototype.sort 在现代引擎为稳定排序，与 Rust 稳定 sort_by 一致。
+ * qualityScores（完整路径 → 技术分）为 Quality 排序键的数据源，可选：缺省时
+ * Quality 比较器按全 None（未评分）处理（稳定保序）。
  */
 export function applyFilterAndSort(
   items: CaptureMeta[],
-  options: { criteria: FilterCriteria; sortBy: SortBy; sortDirection: SortDirection },
+  options: {
+    criteria: FilterCriteria
+    sortBy: SortBy
+    sortDirection: SortDirection
+    qualityScores?: Record<string, number>
+  },
 ): number[] {
-  const { criteria, sortBy, sortDirection } = options
+  const { criteria, sortBy, sortDirection, qualityScores } = options
   const indices = filterCaptures(items, criteria)
   indices.sort((a, b) => {
-    const cmp = compareCaptures(sortBy, items[a], items[b])
+    const cmp = compareCaptures(sortBy, items[a], items[b], qualityScores)
     return sortDirection === 'Ascending' ? cmp : -cmp // 对齐 Descending => cmp.reverse()
   })
   return indices

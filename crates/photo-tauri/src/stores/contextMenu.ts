@@ -142,6 +142,11 @@ export function captureMenuItems(opts: {
         selectedCount > 1 ? `识别所选照片 (${selectedCount}张) (b)` : '识别此照片 (b)',
       action: () => void recognition.recognize(paths),
     },
+    {
+      kind: 'item',
+      label: selectedCount > 1 ? `纠正鸟种 (${selectedCount}张)…` : '纠正鸟种…',
+      action: () => recognition.openCorrection(paths),
+    },
   ]
   if (!meta) return items
   items.push(

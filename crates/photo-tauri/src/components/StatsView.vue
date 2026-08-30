@@ -10,6 +10,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import {
   BirdIcon,
   ChevronDownIcon,
+  DownloadIcon,
   FolderIcon,
   ImageIcon,
   ImageOffIcon,
@@ -22,7 +23,7 @@ import { useCapturesStore } from '@/stores/captures'
 import { useSelectionStore } from '@/stores/selection'
 import { usePreviewStore } from '@/stores/preview'
 import { useStatsStore } from '@/stores/stats'
-import { ptimgUrl } from '@/lib/ipc'
+import { exportBirdRecords, ptimgUrl } from '@/lib/ipc'
 import type { SpeciesPhoto, SpeciesStat } from '@/lib/bindings'
 
 const captures = useCapturesStore()
@@ -154,6 +155,44 @@ watch(
   },
 )
 
+// ── eBird/观鸟记录 CSV 导出 ────────────────────────────
+// 无 @tauri-apps/plugin-dialog（不新装依赖）：固定导出到照片目录
+// exports/ebird_YYYY-MM-DD.csv，完成后 toast 展示路径与行数。
+
+/** 导出进行中（防重复点击） */
+const exporting = ref(false)
+/** 瞬态 toast（4s 自动消失，对齐 BatchOpsPanel/ImportDialog 模式） */
+const toast = ref<string | null>(null)
+let toastTimer: ReturnType<typeof setTimeout> | null = null
+watch(toast, (t) => {
+  if (toastTimer) clearTimeout(toastTimer)
+  toastTimer = null
+  if (!t) return
+  toastTimer = setTimeout(() => (toast.value = null), 4000)
+})
+
+/** 导出当前文件夹的 eBird 记录：固定路径 exports/ebird_YYYY-MM-DD.csv */
+async function exportRecords() {
+  if (exporting.value) return
+  if (!captures.directory) {
+    toast.value = '未打开照片目录，无法导出'
+    return
+  }
+  exporting.value = true
+  try {
+    const now = new Date()
+    const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+    const dest = `${captures.directory}/exports/ebird_${dateStr}.csv`
+    const count = await exportBirdRecords(dest)
+    toast.value =
+      count > 0 ? `已导出 ${count} 条观鸟记录：${dest}` : `暂无已确认鸟种记录（${dest}）`
+  } catch (e) {
+    toast.value = `导出失败：${String(e)}`
+  } finally {
+    exporting.value = false
+  }
+}
+
 onMounted(() => {
   void stats.load()
 })
@@ -204,7 +243,17 @@ const hasAny = computed(() => stats.overview.stats.length > 0)
           </div>
         </div>
       </div>
-      <div class="shrink-0">
+      <div class="flex shrink-0 items-center gap-1">
+        <Button
+          size="sm"
+          variant="ghost"
+          :disabled="exporting"
+          title="导出当前文件夹观鸟记录 CSV（exports/ebird_YYYY-MM-DD.csv）"
+          @click="exportRecords"
+        >
+          <DownloadIcon class="size-3.5" />
+          {{ exporting ? '导出中…' : '导出记录' }}
+        </Button>
         <Button size="sm" variant="ghost" title="退出统计视图 (Esc / G)" @click="exitStats">
           <XIcon class="size-3.5" />
           退出
@@ -370,4 +419,14 @@ const hasAny = computed(() => stats.overview.stats.length > 0)
       </div>
     </div>
   </div>
+
+  <!-- toast（瞬态提示：导出成功/失败/无记录；4s 自动消失） -->
+  <Teleport to="body">
+    <div
+      v-if="toast"
+      class="fixed top-2 left-1/2 z-[70] max-w-[80vw] -translate-x-1/2 rounded-lg border bg-popover px-3 py-1.5 text-xs shadow-lg"
+    >
+      {{ toast }}
+    </div>
+  </Teleport>
 </template>
