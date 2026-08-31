@@ -57,7 +57,6 @@ import { useBatchStore } from '@/stores/batch'
 import { useImportDialogStore } from '@/stores/importDialog'
 import { useMapViewStore } from '@/stores/mapView'
 import { useQualityStore } from '@/stores/quality'
-import { useDuplicatesStore } from '@/stores/duplicates'
 import { installKeymap, type KeymapHandlers } from '@/keymap'
 import { zoomHost } from '@/lib/zoomHost'
 import { nonBestPaths } from '@/lib/bestFrame'
@@ -75,7 +74,6 @@ const stats = useStatsStore()
 const batch = useBatchStore()
 const mapView = useMapViewStore()
 const quality = useQualityStore()
-const duplicates = useDuplicatesStore()
 
 /** 左栏可见（运行时状态，默认可见） */
 const sidebarVisible = ref(true)
@@ -83,6 +81,8 @@ const sidebarVisible = ref(true)
 const leftTab = ref('dir')
 /** 右栏可见（初始值跟随后端配置，默认可见） */
 const rightPanelVisible = ref(true)
+/** 窗口是否最大化（影响根容器圆角：最大化贴满屏幕时圆角/边框会露出桌面间隙，应去角） */
+const isMaximized = ref(false)
 /** 设置弹窗开关（顶栏齿轮按钮打开、Esc 分支关闭，v-model 传给 SettingsModal） */
 const settingsOpen = ref(false)
 /** 导入弹窗显隐（store 驱动：文件树 tab「导入」按钮打开，×/Esc/遮罩关闭） */
@@ -396,6 +396,23 @@ async function handleUndoBatch() {
 
 /** keymap 安装后的卸载函数（onUnmounted 调用） */
 let disposeKeymap: (() => void) | null = null
+/** 卸载时解除窗口 resize 监听（最大化/还原切换会改窗口内容尺寸，借此同步圆角） */
+let unlistenResize: (() => void) | null = null
+
+/** 刷新最大化状态（maximize/toggleMaximize 后重读；mock 模式降级保持非最大化语义） */
+async function refreshMaximized() {
+  // mock 浏览器模式或无 Tauri 环境：窗口不可能是最大化，直接保持 false
+  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) {
+    isMaximized.value = false
+    return
+  }
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    isMaximized.value = await (await getCurrentWindow()).isMaximized()
+  } catch {
+    // 权限缺失或窗口不可用时静默，保持当前值
+  }
+}
 
 onMounted(async () => {
   captures.init()
@@ -405,10 +422,20 @@ onMounted(async () => {
   // 主题/字体/右栏可见性跟随后端配置（config store 集中处理 DOM 应用；默认 Light）
   await configStore.load()
   rightPanelVisible.value = configStore.config.rightPanelVisible ?? true
+  // 根容器圆角跟窗口最大化状态联动（本应用默认 maximized:true，需在挂载后读真实状态）
+  await refreshMaximized()
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    unlistenResize = await (await getCurrentWindow()).onResized(() => void refreshMaximized())
+  } catch {
+    // 权限缺失静默
+  }
 })
 onUnmounted(() => {
   disposeKeymap?.()
   disposeKeymap = null
+  unlistenResize?.()
+  unlistenResize = null
 })
 
 /** 目录显示名（路径末段） */
@@ -490,7 +517,10 @@ async function locateFromMap(item: CaptureMeta) {
 </script>
 
 <template>
-  <div class="flex h-screen flex-col overflow-hidden bg-background text-foreground">
+  <div
+    class="flex h-screen flex-col overflow-hidden border border-window-border bg-background text-foreground"
+    :class="isMaximized ? 'rounded-none' : 'rounded-lg'"
+  >
     <!-- 自绘标题栏（decorations:false 后接管原生标题栏；居顶，全宽，拖拽 + 三窗口按钮） -->
     <TitleBar />
 
@@ -644,24 +674,31 @@ async function locateFromMap(item: CaptureMeta) {
         <div class="min-h-0 flex-1">
           <!-- 主区视图单链互斥：统计 → 空态 → 幻灯片 → 对比 → 预览 → 网格。
                统计/空态优先于其余视图；无目录时非统计视图一律落到空态。
-               注意 v-if 链必须连续，否则 v-else 的 PhotoGrid 会在统计态下误渲染 -->
+               空态包在 `<Transition>`（一次性入场）里，而 Transition 不是 v-if 链节点，
+               故本区块改用显式 v-if 条件（preview 各视图因 view 同值而互斥，仅一处渲染），
+               替代 v-else 链——避免 Transition 打断连续链导致 PhotoGrid 在统计态误渲染。 -->
           <StatsView v-if="preview.isStats" />
-          <!-- 空态：无目录时（统计态优先于空态） -->
-          <div
-            v-else-if="!captures.directory"
-            class="flex h-full flex-col items-center justify-center gap-3"
-          >
-            <GalleryVerticalEndIcon class="size-12 text-muted-foreground/20" />
-            <div class="text-sm text-muted-foreground">打开目录开始浏览照片</div>
-            <Button :disabled="captures.scanning" @click="captures.openDirectory()">
-              <FolderOpenIcon data-icon="inline-start" />
-              打开目录
-            </Button>
-          </div>
-          <SlideshowView v-else-if="preview.isSlideshow" />
-          <CompareView v-else-if="preview.isCompare" />
-          <PhotoPreview v-else-if="preview.isPreview" />
-          <PhotoGrid v-else />
+          <!-- 空态：无目录时（统计态优先于空态）。
+               一次性入场：淡入 + 上移 6px，300ms ease-out；退出仅淡出（见 fade-rise 过渡）。 -->
+          <Transition name="fade-rise">
+            <div
+              v-if="!preview.isStats && !captures.directory"
+              class="flex h-full flex-col items-center justify-center gap-3"
+            >
+              <GalleryVerticalEndIcon class="size-12 text-muted-foreground/20" />
+              <div class="text-sm text-muted-foreground">打开目录开始浏览照片</div>
+              <Button :disabled="captures.scanning" @click="captures.openDirectory()">
+                <FolderOpenIcon data-icon="inline-start" />
+                打开目录
+              </Button>
+            </div>
+          </Transition>
+          <SlideshowView v-if="!preview.isStats && captures.directory && preview.isSlideshow" />
+          <CompareView v-if="!preview.isStats && captures.directory && preview.isCompare" />
+          <PhotoPreview v-if="!preview.isStats && captures.directory && preview.isPreview" />
+          <PhotoGrid
+            v-if="!preview.isStats && captures.directory && !preview.isSlideshow && !preview.isCompare && !preview.isPreview"
+          />
         </div>
       </main>
 
@@ -716,3 +753,34 @@ async function locateFromMap(item: CaptureMeta) {
     <WindowResizeEdges />
   </div>
 </template>
+
+<style scoped>
+/* 空态一次性入场（首发/无目录的第一屏“delight budget”）：淡入 + 上移 6px，300ms ease-out；
+   退出仅淡出（同 easing）。设计意图：仅在“打开目录开始浏览照片”这种第一屏给一次轻入场，
+   网格 cell / 顶栏 / tab 一律无动效（高密度工具界面，动效预算只在空态用一次）。 */
+.fade-rise-enter-active {
+  transition:
+    opacity 300ms cubic-bezier(0.23, 1, 0.32, 1),
+    transform 300ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.fade-rise-leave-active {
+  transition: opacity 200ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.fade-rise-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+.fade-rise-leave-to {
+  opacity: 0;
+}
+/* 弱动效偏好：仅做 opacity 过渡，去掉位移 */
+@media (prefers-reduced-motion: reduce) {
+  .fade-rise-enter-active,
+  .fade-rise-leave-active {
+    transition: opacity 300ms ease-out;
+  }
+  .fade-rise-enter-from {
+    transform: none;
+  }
+}
+</style>

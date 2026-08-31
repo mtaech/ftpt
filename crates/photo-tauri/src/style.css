@@ -4,110 +4,166 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
- * 双主题 → shadcn 语义变量全套映射。
- * 配色逐值移植自 GPUI 版 theme.rs（git 历史 545921a:crates/photo-tool-app/src/ui/theme.rs）：
- * 亮色 = 灰阶层次（gray-100 底 / 白面板 / gray-200 弱边框 / blue-500 accent），
- * 深色 = 交易终端式近黑（#0b0d11 底 / #12151b 面板 / 近不可见边框 / cyan accent）。
- * 取色分层：background(网格区画布) < sidebar/card(面板，白) < element(面板内卡片)。
+ * 观片灯箱 / 校色台（Light Table World）——全局视觉世界。
+ *
+ * 专业照片筛选（culling）工具的界面：用户键盘优先、高密度网格、常对大量照片
+ * 连续过片。新世界取“背光校色灯箱 / 中灰透写台”的隐喻：灯光均匀、色温中性、
+ * 灰底衬托照片，照片本身是屏幕上唯一的高亮。所以表面为校准级中性冷调，
+ * 发丝分隔 + tabular 等宽数据（快门/ISO/眼锐度/置信度），单一提亮 accent 为琥珀。
+ *
+ * 亮色 = 主形象（灯箱环衬冷中灰 + 白卡 + 深琥珀 accent，保证主按钮白字 ≥5:1）；
+ * 暗色 = 忠实副场（关灯的暗室：近黑暖底 + 琥珀安全灯）。
+ *
+ * 色彩分层：background(网格区画布) < sidebar/card(面板，白) < element(面板内卡片)。
+ * accent 系（--primary/--ring/--accent-dim/--primary-container 等）在运行时由
+ * m3Theme 根据主题色 seed 覆盖（仅此一族随 seed 变，表面/中性色为静态）。
  */
 
-/* ── 亮色（默认）：GPUI theme.rs ThemeColors::light() 原值 ────── */
+/* ── 亮色（主形象：校色灯箱，冷中灰 + 白卡 + 深琥珀） ────── */
 :root {
-  --background: #f3f4f6; /* gray-100：网格区画布，衬托白色面板与卡片 */
-  --foreground: #111827; /* gray-900 */
-  --card: #ffffff; /* surface_background：面板/工具栏/网格卡片 */
-  --card-foreground: #111827;
-  --popover: #ffffff; /* elevated_surface_background */
-  --popover-foreground: #111827;
-  --primary: #3b82f6; /* blue-500：text_accent */
+  --background: #e9ebee; /* 灯箱环衬冷中灰，衬托照片 */
+  --foreground: #1b1d21; /* 冷近黑 */
+  --card: #ffffff; /* 白卡/工具条 */
+  --card-foreground: #1b1d21;
+  --popover: #ffffff;
+  --popover-foreground: #1b1d21;
+  --primary: #a8661d; /* 深琥珀 accent：选中环/主按钮/焦点/激活（白字 ≥5:1） */
   --primary-foreground: #ffffff;
-  --secondary: #f9fafb; /* element_background */
-  --secondary-foreground: #111827;
-  --muted: #f9fafb;
-  --muted-foreground: #6b7280; /* gray-500 */
-  --accent: #f3f4f6; /* element_hover：悬浮底 */
-  --accent-foreground: #111827;
-  --destructive: #ef4444;
-  --border: #e5e7eb; /* border_variant：弱边框（卡片/分隔线主力） */
-  --input: #d1d5db; /* border：强边框（输入控件） */
-  --ring: #3b82f6;
-  --chart-1: #3b82f6;
-  --chart-2: #10b981;
-  --chart-3: #22c55e;
-  --chart-4: #f59e0b;
-  --chart-5: #ef4444;
-  --sidebar: #ffffff; /* 侧栏 = surface 白 */
-  --sidebar-foreground: #111827;
-  --sidebar-primary: #3b82f6;
+  --secondary: #f0f1f3; /* element_background（暖白） */
+  --secondary-foreground: #1b1d21;
+  --muted: #eef0f2;
+  --muted-foreground: #63676e; /* 次级层级 */
+  --accent: #e4e6e9; /* element_hover 悬浮底 */
+  --accent-foreground: #1b1d21;
+  --destructive: #d64c44; /* 哑红 */
+  --border: #d9dbdf; /* border_variant：发丝分隔 */
+  --input: #bcc1c8; /* 强边框（输入控件） */
+  --ring: #a8661d;
+  --chart-1: #a8661d;
+  --chart-2: #3a9a5f;
+  --chart-3: #4f7fd0;
+  --chart-4: #c2571f;
+  --chart-5: #8b6fd0;
+  --sidebar: #ffffff;
+  --sidebar-foreground: #1b1d21;
+  --sidebar-primary: #a8661d;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #f3f4f6;
-  --sidebar-accent-foreground: #111827;
-  --sidebar-border: #e5e7eb;
-  --sidebar-ring: #3b82f6;
-  /* GPUI 元素层（element_*，面板内卡片/悬浮/选中） */
-  --element-background: #f9fafb; /* gray-50 */
-  --element-hover: #f3f4f6; /* gray-100 */
-  --element-active: #e5e7eb; /* gray-200 */
-  --element-selected: #eff6ff; /* blue-50 */
+  --sidebar-accent: #e4e6e9;
+  --sidebar-accent-foreground: #1b1d21;
+  --sidebar-border: #d9dbdf;
+  --sidebar-ring: #a8661d;
+  /* 元素层（element_*，面板内卡片/悬浮/选中） */
+  --element-background: #f0f1f3; /* 暖白 */
+  --element-hover: #e4e6e9;
+  --element-active: #d7dade;
+  --element-selected: #faf1e4; /* amber-50 浅琥珀底 */
   /* 状态色（识别置信度等） */
-  --success: #10b981;
-  --warning: #f59e0b;
-  /* 对焦框叠加色（F 键）：amber-500，与检测框 primary 蓝区分，重叠时可辨 */
-  --focus: #f59e0b;
-  /* 派生色：primaryContainer 45% 弱化底（选中行/当前目录底，M3 tonal 语义，JS 运行时按主题填充） */
+  --success: #3a9a5f;
+  --warning: #c2571f; /* 待复核：更暖橙，与主体金区分 */
+  --focus: #c98a1c; /* 对焦框叠加色（amber，与检测框区分） */
+  --window-border: #aeb3ba;
+  /* M3 容器/表面/轮廓层（组件经 @theme inline 映射） */
+  --primary-container: #f7e6cc;
+  --on-primary-container: #5c3a12;
+  --secondary-container: #f0eee7;
+  --on-secondary-container: #3a352b;
+  --tertiary-container: #e7e1ee;
+  --on-tertiary-container: #453a55;
+  --error-container: #fbe4e2;
+  --on-error-container: #7a231f;
+  --surface-dim: #d6d9dd;
+  --surface-bright: #ffffff;
+  --surface-container-lowest: #ffffff;
+  --surface-container-low: #f5f6f7;
+  --surface-container: #eef0f2;
+  --surface-container-high: #e5e7ea;
+  --surface-container-highest: #dbdee2;
+  --on-surface: #1b1d21;
+  --on-surface-variant: #4a4e55;
+  --outline: #bcc1c8;
+  --outline-variant: #d0d4da;
+  --inverse-surface: #2b2e33;
+  --inverse-on-surface: #f2f3f5;
+  --inverse-primary: #d9a657;
+  --scrim: rgba(0, 0, 0, 0.4);
+  /* 派生色：primaryContainer 弱化底（选中行/当前目录底，M3 tonal 语义） */
   --accent-dim: color-mix(in srgb, var(--primary-container) 45%, transparent);
-  /* M3 阴影（elevation 1-5 级；亮暗共用，暗色 .dark 覆盖加重） */
-  --shadow-2xs: 0 1px 2px rgb(0 0 0 / 0.3), 0 1px 3px 1px rgb(0 0 0 / 0.15);
-  --shadow-xs: 0 1px 2px rgb(0 0 0 / 0.3), 0 1px 3px 1px rgb(0 0 0 / 0.15);
-  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.3), 0 2px 6px 2px rgb(0 0 0 / 0.15);
-  --shadow-md: 0 1px 3px rgb(0 0 0 / 0.3), 0 4px 8px 3px rgb(0 0 0 / 0.15);
-  --shadow-lg: 0 2px 3px rgb(0 0 0 / 0.3), 0 6px 10px 4px rgb(0 0 0 / 0.15);
-  --shadow-xl: 0 4px 4px rgb(0 0 0 / 0.3), 0 8px 12px 6px rgb(0 0 0 / 0.15);
+  /* M3 阴影（elevation，亮/暗共用；带色投影，不纯黑） */
+  --shadow-2xs: 0 1px 2px rgb(27 29 33 / 0.14), 0 1px 3px 1px rgb(27 29 33 / 0.08);
+  --shadow-xs: 0 1px 2px rgb(27 29 33 / 0.14), 0 1px 3px 1px rgb(27 29 33 / 0.08);
+  --shadow-sm: 0 1px 2px rgb(27 29 33 / 0.14), 0 2px 6px 2px rgb(27 29 33 / 0.08);
+  --shadow-md: 0 1px 3px rgb(27 29 33 / 0.14), 0 4px 8px 3px rgb(27 29 33 / 0.08);
+  --shadow-lg: 0 2px 3px rgb(27 29 33 / 0.14), 0 6px 10px 4px rgb(27 29 33 / 0.09);
+  --shadow-xl: 0 4px 4px rgb(27 29 33 / 0.14), 0 8px 12px 6px rgb(27 29 33 / 0.1);
 }
 
-/* ── 深色：GPUI theme.rs ThemeColors::dark() 原值（交易终端式近黑 + cyan） ────── */
+/* ── 暗色（副场：暗室，近黑暖底 + 琥珀安全灯） ────── */
 .dark {
-  --background: #0b0d11; /* 网格区最暗一档 */
-  --foreground: #f9fafb;
-  --card: #12151b; /* surface_background：面板 */
-  --card-foreground: #f9fafb;
-  --popover: #1a1e26; /* elevated_surface_background */
-  --popover-foreground: #f9fafb;
-  --primary: #22d3ee; /* cyan-400：text_accent */
-  --primary-foreground: #0b0d11;
-  --secondary: #171b22;
-  --secondary-foreground: #f9fafb;
-  --muted: #171b22;
-  --muted-foreground: #9ca3af;
-  --accent: #1c212b; /* element_hover */
-  --accent-foreground: #f9fafb;
-  --destructive: #f87171;
-  --border: #1b1f27; /* border_variant：近不可见细边框 */
-  --input: #23272f; /* border */
-  --ring: #22d3ee;
-  --chart-1: #22d3ee;
-  --chart-2: #34d399;
-  --chart-3: #a3e635;
-  --chart-4: #fbbf24;
-  --chart-5: #f87171;
-  --sidebar: #12151b;
-  --sidebar-foreground: #f9fafb;
-  --sidebar-primary: #22d3ee;
-  --sidebar-primary-foreground: #0b0d11;
-  --sidebar-accent: #1c212b;
-  --sidebar-accent-foreground: #f9fafb;
-  --sidebar-border: #1b1f27;
-  --sidebar-ring: #22d3ee;
-  --element-background: #171b22;
-  --element-hover: #1c212b;
-  --element-active: #262c38;
-  --element-selected: #14202c;
+  --background: #131210; /* 仪器暗壳，微暖 */
+  --foreground: #ece9e2;
+  --card: #1a1915;
+  --card-foreground: #ece9e2;
+  --popover: #24221c;
+  --popover-foreground: #ece9e2;
+  --primary: #d99a3c; /* 安全灯琥珀 */
+  --primary-foreground: #1a1205;
+  --secondary: #201e19;
+  --secondary-foreground: #ece9e2;
+  --muted: #201e19;
+  --muted-foreground: #98917f;
+  --accent: #26241c; /* element_hover */
+  --accent-foreground: #ece9e2;
+  --destructive: #ef5f52;
+  --border: #2c2921; /* 近不可见发丝 */
+  --input: #3a362c;
+  --ring: #d99a3c;
+  --chart-1: #d99a3c;
+  --chart-2: #4fb06a;
+  --chart-3: #5a8fd6;
+  --chart-4: #e07b32;
+  --chart-5: #9a7bd6;
+  --sidebar: #1a1915;
+  --sidebar-foreground: #ece9e2;
+  --sidebar-primary: #d99a3c;
+  --sidebar-primary-foreground: #1a1205;
+  --sidebar-accent: #26241c;
+  --sidebar-accent-foreground: #ece9e2;
+  --sidebar-border: #2c2921;
+  --sidebar-ring: #d99a3c;
+  --element-background: #201e19;
+  --element-hover: #26241c;
+  --element-active: #2f2c23;
+  --element-selected: #2e2517;
+  --success: #4fb06a;
+  --warning: #e07b32; /* 待复核：更暖橙 */
+  --focus: #e0a83f;
+  --window-border: #3a362f;
+  /* M3 容器/表面/轮廓层 */
+  --primary-container: #40331d;
+  --on-primary-container: #f2d9a8;
+  --secondary-container: #2c2a23;
+  --on-secondary-container: #e8e3d6;
+  --tertiary-container: #35303d;
+  --on-tertiary-container: #e2d8ec;
+  --error-container: #442522;
+  --on-error-container: #f6b4ae;
+  --surface-dim: #0b0a09;
+  --surface-bright: #24221c;
+  --surface-container-lowest: #141311;
+  --surface-container-low: #1c1a16;
+  --surface-container: #201e19;
+  --surface-container-high: #26241c;
+  --surface-container-highest: #2d2a22;
+  --on-surface: #ece9e2;
+  --on-surface-variant: #b5ae9d;
+  --outline: #524c40;
+  --outline-variant: #3a362e;
+  --inverse-surface: #e6e2d9;
+  --inverse-on-surface: #2b2922;
+  --inverse-primary: #3d635f;
+  --scrim: rgba(0, 0, 0, 0.55);
   --accent-dim: color-mix(in srgb, var(--primary-container) 45%, transparent);
-  --success: #34d399;
-  --warning: #fbbf24;
-  /* 对焦框叠加色（F 键）：amber-400，暗底更亮，与检测框 cyan 区分 */
-  --focus: #fbbf24;
-  /* 暗色阴影：深黑加重，暗底上才有可见层次 */
+  /* 暗色阴影：更软更暗，暗底上才有可见层次 */
   --shadow-2xs: 0 1px 2px 0 rgb(0 0 0 / 0.4);
   --shadow-xs: 0 1px 3px 0 rgb(0 0 0 / 0.45), 0 1px 2px -1px rgb(0 0 0 / 0.45);
   --shadow-sm: 0 2px 6px -1px rgb(0 0 0 / 0.5), 0 1px 3px -1px rgb(0 0 0 / 0.45);
@@ -116,16 +172,16 @@
   --shadow-xl: 0 24px 48px -10px rgb(0 0 0 / 0.65), 0 8px 16px -6px rgb(0 0 0 / 0.55);
 }
 
-/* ── 领域色（评分/色标/旗标，取 GPUI theme.rs colors 模块原值，双主题通用） ── */
+/* ── 领域色（评分/色标/旗标，亮暗同表，去饱和可辨） ── */
 @theme {
-  --color-label-red: #ef4444;
-  --color-label-yellow: #e8ab07;
-  --color-label-green: #22c55e;
-  --color-label-blue: #3b82f6;
-  --color-label-purple: #8b5cf6;
-  --color-pick: #22c55e;
-  --color-reject: #ef4444;
-  --color-rating: #e8ab07;
+  --color-label-red: #d9534f;
+  --color-label-yellow: #c98a1c;
+  --color-label-green: #4a9f63;
+  --color-label-blue: #4f7fd0;
+  --color-label-purple: #8b6fd0;
+  --color-pick: #3a9a5f;
+  --color-reject: #d64c44;
+  --color-rating: #c98a1c;
 }
 
 @theme inline {
@@ -148,7 +204,8 @@
   --color-input: var(--input);
   --color-ring: var(--ring);
   --color-focus: var(--focus);
-  /* M3 容器层级色（JS 运行时写入，@theme inline 让 utility 直接可用） */
+  --color-window-border: var(--window-border);
+  /* M3 容器层级色（静态定义于 :root/.dark，m3Theme 仅重染 accent 族） */
   --color-primary-container: var(--primary-container);
   --color-on-primary-container: var(--on-primary-container);
   --color-secondary-container: var(--secondary-container);
@@ -184,7 +241,7 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
-  /* GPUI 元素层与状态色 → bg-element / bg-element-hover / text-success 等 */
+  /* 元素层与状态色 → bg-element / text-success 等 */
   --color-element: var(--element-background);
   --color-element-hover: var(--element-hover);
   --color-element-active: var(--element-active);
@@ -192,10 +249,16 @@
   --color-accent-dim: var(--accent-dim);
   --color-success: var(--success);
   --color-warning: var(--warning);
-  --radius-sm: 0.25rem;   /* 4px：小控件/徽标/日期输入/筛选 chips */
+  --radius-sm: 0.25rem;   /* 4px：小控件/徽标 */
   --radius-md: 0.375rem;  /* 6px：输入框/卡片/网格 cell/面板卡片 */
   --radius-lg: 0.5rem;    /* 8px：toast/分段容器/按钮 */
   --radius-xl: 0.75rem;   /* 12px：顶层预留 */
+}
+
+/* 动效曲线 token（按钮按压/toast/弹窗进出场统一用） */
+@theme {
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
 }
 
 /* ── M3 type scale 工具类（Tailwind v4 @utility，可 @apply 或 class 直接用） ── */
@@ -253,31 +316,30 @@
   letter-spacing: 0.1px;
 }
 
-/* ── 共享组件类（GPUI 设计系统移植，组件内直接用，避免各文件重复定义） ── */
+/* ── 共享组件类（观片灯箱设计系统移植，组件内直接用） ── */
 @layer components {
-  /* 分区标题（GPUI controls.rs section_header）：M3 label-small 尺度 muted */
+  /* 分区标题（M3 label-small 尺度 muted） */
   .section-header {
     @apply pb-1 text-muted-foreground m3-label-small;
   }
-  /* 设置弹窗统一下拉控件（SettingsModal 各 select 共用） */
+  /* 设置弹窗统一下拉控件 */
   .settings-select {
     @apply h-8 rounded-md border border-input bg-background px-2 m3-body-medium outline-none focus-visible:ring-2 focus-visible:ring-ring;
   }
-  /* 设置项行式布局：label 左 / 控件右，说明在 label 下方 */
+  /* 设置项行式布局：label 左 / 控件右 */
   .settings-row {
     @apply flex items-center justify-between gap-4;
   }
   .settings-row-label {
     @apply min-w-0 flex-1;
   }
-  /* 面板卡片（GPUI info_panel.rs panel_card / theme.rs card()）：
-     element 底 + 1px 弱边框 + 圆角，用于右栏分区卡片、侧栏文件夹卡片 */
+  /* 面板卡片：element 底 + 1px 发丝 + 圆角（右栏分区卡片/侧栏文件夹卡片） */
   .panel-card {
     background: var(--element-background);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
   }
-  /* 当前目录行（GPUI sidebar.rs 目录卡片）：accent_dim 底 + 左缘 2px accent 竖条 */
+  /* 当前目录行：accent_dim 底 + 左缘 2px accent 竖条 */
   .dir-card-active {
     position: relative;
     background: var(--accent-dim);
@@ -302,19 +364,15 @@
   html {
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
-    /* 全局界面缩放基准：Tailwind 工具类全 rem，调这里等比缩放整体 UI。
-       15px = 14px 基础上适当放大（原 14px 对齐 GPUI 紧凑密度，2026-08 用户反馈偏小） */
     font-size: 15px;
   }
   body {
     @apply bg-background text-foreground;
     font-family: var(--font-family-app), 'Segoe UI', system-ui, -apple-system, sans-serif;
-    /* 原生应用手感：UI 文本不可选中、箭头光标、无点按高亮 */
     user-select: none;
     cursor: default;
     -webkit-tap-highlight-color: transparent;
   }
-  /* 可编辑区域恢复文本行为 */
   input,
   textarea,
   [contenteditable='true'] {
@@ -324,7 +382,6 @@
   textarea {
     cursor: text;
   }
-  /* 控件用原生箭头光标（非 web 手型） */
   button,
   [role='button'],
   [role='tab'],
@@ -334,22 +391,19 @@
   label {
     cursor: default;
   }
-  /* 原生表单控件染主题色（checkbox/radio/range/progress） */
   input,
   select {
     accent-color: var(--primary);
   }
-  /* 图片不拖出重影（原生看图应用行为） */
   img {
     -webkit-user-drag: none;
   }
-  /* 选中文本染色（仅输入框等可选区域可见） */
   ::selection {
     background: color-mix(in srgb, var(--primary) 25%, transparent);
   }
 }
 
-/* 常驻细滚动条（WebView2/Chromium + Firefox）；滑块平时隐匿、悬停滚动区才显现（Win11 覆盖式滚动条语义） */
+/* 常驻细滚动条（悬停显现） */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--outline-variant) transparent;

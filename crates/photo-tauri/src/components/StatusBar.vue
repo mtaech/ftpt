@@ -85,6 +85,19 @@ watch(
     }, UNDO_MS)
   },
 )
+
+/**
+ * 右段消息区显示优先级：扫描/识别中（v-if 链头部处理）之后，仅剩
+ * 摘要 > 提示 > 撤销 > 就绪 互斥选择。用单个 computed 收敛，保证任一时刻
+ * 只渲染一条；摘要与撤销两条瞬态各自包 <Transition name="notice"> 动画。
+ */
+const lowerMode = computed<'summary' | 'notice' | 'undo' | 'ready' | 'hidden'>(() => {
+  if (captures.scanning || recognition.running) return 'hidden'
+  if (showSummary.value && recognition.summary) return 'summary'
+  if (recognition.notice) return 'notice'
+  if (showUndo.value && batch.undoNotice) return 'undo'
+  return 'ready'
+})
 </script>
 
 <template>
@@ -135,19 +148,59 @@ watch(
           <XIcon class="size-3" />
         </button>
       </span>
-      <!-- 识别完成摘要（数秒后消失） -->
-      <span v-else-if="showSummary && recognition.summary" class="tabular-nums text-label-green">
-        {{ summaryText }}
-      </span>
+      <!-- 识别完成摘要（数秒后消失；瞬态淡入淡出 + 上移进场） -->
+      <Transition name="notice">
+        <span
+          v-if="lowerMode === 'summary'"
+          class="tabular-nums text-label-green"
+          :style="{ transitionTimingFunction: 'var(--ease-out)' }"
+        >
+          {{ summaryText }}
+        </span>
+      </Transition>
       <!-- 空提示（无未识别照片等） -->
-      <span v-else-if="recognition.notice" class="text-muted-foreground">
+      <span v-if="lowerMode === 'notice'" class="text-muted-foreground">
         {{ recognition.notice }}
       </span>
-      <!-- 撤销批量操作提示（Ctrl+Z 结果；数秒后消失） -->
-      <span v-else-if="showUndo && batch.undoNotice" class="tabular-nums text-label-blue">
-        {{ batch.undoNotice }}
-      </span>
-      <span v-else>就绪</span>
+      <!-- 撤销批量操作提示（Ctrl+Z 结果；数秒后消失；瞬态淡入淡出 + 上移进场） -->
+      <Transition name="notice">
+        <span
+          v-if="lowerMode === 'undo'"
+          class="tabular-nums text-label-blue"
+          :style="{ transitionTimingFunction: 'var(--ease-out)' }"
+        >
+          {{ batch.undoNotice }}
+        </span>
+      </Transition>
+      <span v-if="lowerMode === 'ready'">就绪</span>
     </div>
   </footer>
 </template>
+
+<style scoped>
+/* 瞬态通知（识别摘要 / 撤销提示）进场/退场：淡入淡出 + 4px 上移。
+   对称设计（离开同样下沉 4px），350ms 强 ease-out，仅动 transform + opacity。 */
+.notice-enter-active,
+.notice-leave-active {
+  transition:
+    opacity 350ms var(--ease-out),
+    transform 350ms var(--ease-out);
+}
+.notice-enter-from,
+.notice-leave-to {
+  opacity: 0;
+  transform: translateY(4px);
+}
+
+/* 减少动效偏好：坍缩为纯淡入淡出，不做位移 */
+@media (prefers-reduced-motion: reduce) {
+  .notice-enter-active,
+  .notice-leave-active {
+    transition: opacity 200ms linear;
+  }
+  .notice-enter-from,
+  .notice-leave-to {
+    transform: none;
+  }
+}
+</style>

@@ -70,64 +70,98 @@ function run(item: ContextMenuItem) {
       @pointerdown="menu.closeMenu()"
       @contextmenu.prevent="menu.closeMenu()"
     />
-    <!-- 菜单本体（z 高于遮罩；pointerdown.stop 防遮罩误关） -->
-    <div
-      v-if="menu.open"
-      ref="rootEl"
-      class="fixed z-[101] min-w-40 rounded-md border border-border bg-popover p-1 text-sm text-popover-foreground shadow-lg select-none"
-      :style="{ left: pos.x + 'px', top: pos.y + 'px' }"
-      @pointerdown.stop
-    >
-      <template v-for="(item, i) in menu.items" :key="i">
-        <!-- 分隔线 -->
-        <div v-if="item.kind === 'sep'" class="my-1 h-0.5 bg-border" />
-        <!-- 子菜单：hover 展开右侧面板（此处用法只有一层嵌套） -->
-        <div
-          v-else-if="item.kind === 'submenu'"
-          class="relative"
-          @mouseenter="openSub = i"
-          @mouseleave="openSub = -1"
-        >
+    <!-- 菜单本体（z 高于遮罩；pointerdown.stop 防遮罩误关）。
+         <Transition name="menu" appear>：弹出时 scale+fade 进场，关闭时反向退场。 -->
+    <Transition name="menu" appear>
+      <div
+        v-if="menu.open"
+        ref="rootEl"
+        class="fixed z-[101] min-w-40 rounded-md border border-border bg-popover p-1 text-sm text-popover-foreground shadow-lg select-none"
+        :style="{ left: pos.x + 'px', top: pos.y + 'px', transformOrigin: 'top left' }"
+        @pointerdown.stop
+      >
+        <template v-for="(item, i) in menu.items" :key="i">
+          <!-- 分隔线 -->
+          <div v-if="item.kind === 'sep'" class="my-1 h-0.5 bg-border" />
+          <!-- 子菜单：hover 展开右侧面板（此处用法只有一层嵌套） -->
           <div
-            class="flex items-center justify-between gap-4 rounded-sm px-2 py-1.5 hover:bg-accent"
+            v-else-if="item.kind === 'submenu'"
+            class="relative"
+            @mouseenter="openSub = i"
+            @mouseleave="openSub = -1"
           >
-            <span>{{ item.label }}</span>
-            <ChevronRightIcon class="size-3.5 shrink-0 text-muted-foreground" />
+            <div
+              class="flex items-center justify-between gap-4 rounded-sm px-2 py-1.5 hover:bg-accent"
+            >
+              <span>{{ item.label }}</span>
+              <ChevronRightIcon class="size-3.5 shrink-0 text-muted-foreground" />
+            </div>
+            <div
+              v-if="openSub === i"
+              class="absolute top-0 z-10 min-w-36 rounded-md border border-border bg-popover p-1 shadow-md"
+              :class="subSide"
+            >
+              <template v-for="(sub, j) in item.items" :key="j">
+                <div v-if="sub.kind === 'sep'" class="my-1 h-0.5 bg-border" />
+                <div
+                  v-else
+                  class="flex items-center justify-between gap-3 rounded-sm px-2 py-1.5 hover:bg-accent"
+                  @click="run(sub)"
+                >
+                  <span :class="sub.kind === 'item' && sub.danger ? 'text-destructive' : ''">{{ sub.label }}</span>
+                  <CheckIcon
+                    v-if="sub.kind === 'check' && sub.checked"
+                    class="size-3.5 shrink-0 text-primary"
+                  />
+                </div>
+              </template>
+            </div>
           </div>
+          <!-- 普通项 / 勾选项 -->
           <div
-            v-if="openSub === i"
-            class="absolute top-0 z-10 min-w-36 rounded-md border border-border bg-popover p-1 shadow-md"
-            :class="subSide"
+            v-else
+            class="flex items-center justify-between gap-3 rounded-sm px-2 py-1.5 hover:bg-accent"
+            @click="run(item)"
           >
-            <template v-for="(sub, j) in item.items" :key="j">
-              <div v-if="sub.kind === 'sep'" class="my-1 h-0.5 bg-border" />
-              <div
-                v-else
-                class="flex items-center justify-between gap-3 rounded-sm px-2 py-1.5 hover:bg-accent"
-                @click="run(sub)"
-              >
-                <span :class="sub.kind === 'item' && sub.danger ? 'text-destructive' : ''">{{ sub.label }}</span>
-                <CheckIcon
-                  v-if="sub.kind === 'check' && sub.checked"
-                  class="size-3.5 shrink-0 text-primary"
-                />
-              </div>
-            </template>
+            <span :class="item.kind === 'item' && item.danger ? 'text-destructive' : ''">{{ item.label }}</span>
+            <CheckIcon
+              v-if="item.kind === 'check' && item.checked"
+              class="size-3.5 shrink-0 text-primary"
+            />
           </div>
-        </div>
-        <!-- 普通项 / 勾选项 -->
-        <div
-          v-else
-          class="flex items-center justify-between gap-3 rounded-sm px-2 py-1.5 hover:bg-accent"
-          @click="run(item)"
-        >
-          <span :class="item.kind === 'item' && item.danger ? 'text-destructive' : ''">{{ item.label }}</span>
-          <CheckIcon
-            v-if="item.kind === 'check' && item.checked"
-            class="size-3.5 shrink-0 text-primary"
-          />
-        </div>
-      </template>
-    </div>
+        </template>
+      </div>
+    </Transition>
   </Teleport>
 </template>
+
+<style scoped>
+/* 右键菜单进场/退场：scale+fade + 轻微上移，200ms 强 ease-out。
+   transform-origin 定为左上（对齐菜单触发点/定位锚），仅动 transform + opacity。 */
+.menu-enter-active,
+.menu-leave-active {
+  transition:
+    opacity 200ms var(--ease-out),
+    transform 200ms var(--ease-out);
+}
+.menu-enter-from,
+.menu-leave-to {
+  opacity: 0;
+  transform: scale(0.97) translateY(-2px);
+}
+.menu-leave-active {
+  transition-duration: 150ms;
+}
+
+/* 减少动效偏好：坍缩为纯淡入淡出，不做缩放/位移 */
+@media (prefers-reduced-motion: reduce) {
+  .menu-enter-active,
+  .menu-leave-active {
+    transition: opacity 120ms linear;
+  }
+  .menu-enter-from,
+  .menu-leave-to {
+    transform: none;
+  }
+}
+</style>

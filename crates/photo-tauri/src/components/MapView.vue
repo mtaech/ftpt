@@ -150,4 +150,11 @@ watch(gpsItems, () => syncMarkers())
 .leaflet-container {
   font: inherit;
 }
+/* 暗色主题下瓦片压暗：地图是唯一的高饱和全彩面，暗室里要把亮度压到底、对比收住，
+   让照片（预览/网格）仍是屏幕唯一高亮。本 style 块为全局（unscoped），因 popup 动态
+   DOM 需要全局类；故不用 :global()（unscoped 块中它不会被剥离，会输出非法选择器），
+   直接写 .dark .leaflet-tile 祖先限定。亮色主题（主形象）保持原样。 */
+.dark .leaflet-tile {
+  filter: brightness(0.72) saturate(0.82);
+}
 </style>

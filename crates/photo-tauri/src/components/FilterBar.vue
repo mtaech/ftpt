@@ -369,7 +369,7 @@ watch(
 
       <!-- 排序下拉 + 方向（折叠态常驻） -->
       <select
-        class="h-7 shrink-0 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
+        class="h-7 shrink-0 rounded-md border border-border bg-card px-1.5 text-xs text-foreground outline-none"
         :value="filter.sortBy"
         aria-label="排序方式"
         @change="onSortByChange"
@@ -379,7 +379,7 @@ watch(
         </option>
       </select>
       <select
-        class="h-7 shrink-0 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
+        class="h-7 shrink-0 rounded-md border border-border bg-card px-1.5 text-xs text-foreground outline-none"
         :value="filter.sortDirection"
         aria-label="排序方向"
         @change="onSortDirChange"
@@ -403,7 +403,7 @@ watch(
       <label class="flex shrink-0 items-center gap-1 text-xs text-muted-foreground" title="每行图片数">
         <select
           :value="config.gridColumns"
-          class="h-7 shrink-0 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
+          class="h-7 shrink-0 rounded-md border border-border bg-card px-1.5 text-xs text-foreground outline-none"
           aria-label="每行图片数"
           @change="config.update({ gridColumns: Number(($event.target as HTMLSelectElement).value) })"
         >
@@ -514,7 +514,7 @@ watch(
           日期 从
           <input
             type="date"
-            class="h-7 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
+            class="h-7 rounded-md border border-border bg-card px-1.5 text-xs text-foreground outline-none"
             :value="filter.criteria.dateFrom ?? ''"
             @change="onDateChange('from', $event)"
           />
@@ -523,7 +523,7 @@ watch(
           至
           <input
             type="date"
-            class="h-7 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
+            class="h-7 rounded-md border border-border bg-card px-1.5 text-xs text-foreground outline-none"
             :value="filter.criteria.dateTo ?? ''"
             @change="onDateChange('to', $event)"
           />
@@ -537,7 +537,7 @@ watch(
           type="number"
           min="0"
           placeholder="最小"
-          class="h-7 w-16 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+          class="h-7 w-16 rounded-md border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
           :value="filter.criteria.isoMin ?? ''"
           @change="onIsoChange('min', $event)"
         />
@@ -546,7 +546,7 @@ watch(
           type="number"
           min="0"
           placeholder="最大"
-          class="h-7 w-16 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+          class="h-7 w-16 rounded-md border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
           :value="filter.criteria.isoMax ?? ''"
           @change="onIsoChange('max', $event)"
         />
@@ -559,7 +559,7 @@ watch(
           type="number"
           min="0"
           placeholder="最小"
-          class="h-7 w-16 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+          class="h-7 w-16 rounded-md border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
           :value="filter.criteria.focalMin ?? ''"
           @change="onFocalChange('min', $event)"
         />
@@ -568,7 +568,7 @@ watch(
           type="number"
           min="0"
           placeholder="最大"
-          class="h-7 w-16 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+          class="h-7 w-16 rounded-md border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
           :value="filter.criteria.focalMax ?? ''"
           @change="onFocalChange('max', $event)"
         />
@@ -635,7 +635,7 @@ watch(
           v-model="keywordInput"
           type="text"
           placeholder="输入后回车添加..."
-          class="h-7 w-40 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+          class="h-7 w-40 rounded-md border border-border bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
           :class="
             filter.criteria.keywordFilter.length > 0
               ? 'border-primary bg-primary/10 text-primary'

@@ -51,14 +51,14 @@ const theme = computed<Theme>({
   set: (v: Theme) => void config.update({ theme: v }),
 })
 
-/** Material You 预设 seed 色板（8 个色块） */
-const ACCENT_PRESETS = ['#3b82f6', '#6750a4', '#00696e', '#386a20', '#b3261e', '#8d4f2f', '#a6374c', '#605b63']
-/** 主题 seed 色：预设/取色器改动即保存 + 整套配色即时重染；null = 默认蓝 */
+/** 观片灯箱 accent seed 色板（8 个色块；都在固定中性底上成立） */
+const ACCENT_PRESETS = ['#d99a3c', '#c2571f', '#a8661d', '#4f7fd0', '#3a9a5f', '#8b6fd0', '#b3261e', '#5f6b7a']
+/** 主题 accent seed 色：预设/取色器改动即保存 + 即时重染 accent 族；null = 默认琥珀 */
 const accentColor = computed<string | null>({
   get: () => config.accentColor,
   set: (v: string | null) => void config.update({ accentColor: v }),
 })
-/** 当前生效 seed（null 回退默认蓝），取色器 value 与选中态判定用 */
+/** 当前生效 seed（null 回退默认琥珀），取色器 value 与选中态判定用 */
 const effectiveAccent = computed(() => config.accentColor ?? DEFAULT_ACCENT)
 
 /** 系统字体列表（listSystemFonts 一次性拉取，真实后端为全系统字体） */
@@ -69,7 +69,7 @@ const fontFamily = computed({
   set: (v: string) => void config.update({ fontFamily: v }),
 })
 
-/** 识别线程数 1–4（min 1 / max 4） */
+/** 识别线程数 1–4（NumberFieldOptions min 1 / max 4） */
 const threadCount = computed({
   get: () => config.recognitionThreadCount,
   set: (v: number) => void config.update({ recognitionThreadCount: v }),
@@ -178,7 +178,7 @@ const ACTION_DESC: Record<KeymapAction, string> = {
   toggleRightPanel: '切换右侧面板',
 }
 
-/** 方向键/特殊键的展示名（← → Home End 写法） */
+/** 方向键/特殊键的展示名（快捷键页的 ← → Home End 写法） */
 const KEY_LABELS: Record<string, string> = {
   left: '←',
   right: '→',
@@ -190,7 +190,7 @@ const KEY_LABELS: Record<string, string> = {
   ' ': '空格',
 }
 
-/** 把绑定行渲染为可读键位串（修饰键顺序 Ctrl → Shift → 键名） */
+/** 把绑定行渲染为可读键位串（修饰键顺序 Ctrl → Shift → 键名，） */
 function formatKeys(b: KeyBinding): string {
   const mods: string[] = []
   if (b.ctrl) mods.push('Ctrl')
@@ -283,7 +283,7 @@ async function openConfigFile() {
 
 <template>
   <Dialog :open="open" @update:open="open = $event">
-    <!-- 自绘头栏（× 按钮放标题右侧），故关闭默认 × 按钮 -->
+    <!-- 自绘头栏（× 按钮放标题右侧，设置卡片头栏），故关闭默认 × 按钮 -->
     <DialogContent
       :show-close-button="false"
       class="flex h-[40rem] max-w-3xl flex-col gap-0 p-0 sm:max-w-[53.75rem]"
@@ -298,7 +298,7 @@ async function openConfigFile() {
         </DialogClose>
       </div>
 
-      <!-- 主体：左 tab 导航 + 右内容（标准 Tabs 组件） -->
+      <!-- 主体：左 tab 导航 + 右内容（Settings 页布局；标准 Tabs 组件） -->
       <Tabs v-model="activeTab" class="flex min-h-0 flex-1">
         <TabsList class="flex w-44 shrink-0 flex-col items-stretch justify-start gap-1 rounded-none border-r bg-transparent p-2">
           <TabsTrigger
@@ -348,7 +348,7 @@ async function openConfigFile() {
               <div class="settings-row">
                 <div class="settings-row-label">
                   <label class="text-sm font-medium">主题色</label>
-                  <p class="mt-0.5 text-xs text-muted-foreground">Material You seed 色，整套配色即时重染</p>
+                  <p class="mt-0.5 text-xs text-muted-foreground">选中/主按钮/焦点提亮色，即时重染（表面保持灯箱中性底）</p>
                 </div>
                 <div class="flex shrink-0 items-center gap-1.5">
                   <button

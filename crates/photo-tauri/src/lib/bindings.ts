@@ -312,7 +312,7 @@ export type AppConfig = {
 	lastDirectory?: string | null,
 	recentDirectories?: string[],
 	theme?: Theme,
-	/**  Material You 主题 seed 色（`#RRGGBB`）。None = 前端用默认蓝 seed `#3b82f6`。 */
+	/**  Material You 主题 seed 色（`#RRGGBB`）。None = 前端用默认琥珀 seed `#d99a3c`。 */
 	accentColor?: string | null,
 	leftPanelWidth?: number,
 	rightPanelVisible?: boolean,

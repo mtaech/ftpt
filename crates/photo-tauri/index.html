@@ -4,6 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ftpt</title>
+    <!-- 首帧兜底：JS 未接线（如暗色持久化/setAppConfig 前）时按亮色灯箱底渲染，防无色闪屏。
+         应用运行后由 config store 的 applyDom（html.dark + //--font-family-app）接管。 -->
+    <style>
+      html {
+        color-scheme: light;
+        background: #e9ebee;
+      }
+      body {
+        background: #e9ebee;
+      }
+    </style>
   </head>
   <body>
     <div id="app"></div>

@@ -140,7 +140,7 @@ function removeKeyword(kw: string) {
 // ── 识别：状态 chip + 完整结果（getRecognition）+ 修正鸟种下拉 ──
 const STATUS_META: Record<RecognitionStatus, { label: string; cls: string }> = {
   Confirmed: { label: '已识别', cls: 'text-label-green bg-label-green/10 border-label-green/30' },
-  NeedsReview: { label: '待复核', cls: 'text-label-yellow bg-label-yellow/10 border-label-yellow/30' },
+  NeedsReview: { label: '待复核', cls: 'text-warning bg-warning/10 border-warning/30' },
   Unrecognized: { label: '未检测到鸟类', cls: 'text-muted-foreground bg-muted border-border' },
 }
 
@@ -159,11 +159,11 @@ function confPercent(c: number | null): number {
   return c <= 1 ? c * 100 : c
 }
 
-/** 置信度条色：>=80 绿 / >=50 黄 / <50 蓝（对齐 GPUI confidence_color） */
+/** 置信度条色：>=80 绿 / >=50 橙 / <50 蓝（confidence_color；中档橙与选中金区分） */
 function confBarCls(conf: number): string {
   const pct = confPercent(conf)
   if (pct >= 80) return 'bg-label-green'
-  if (pct >= 50) return 'bg-label-yellow'
+  if (pct >= 50) return 'bg-warning'
   return 'bg-label-blue'
 }
 
@@ -227,11 +227,11 @@ const displayConfidence = computed<number | null>(() => {
   if (r?.confidence != null) return r.confidence
   return focused.value?.birdConfidence ?? null
 })
-/** 置信度文字色：>=80 绿 / >=50 黄 / <50 蓝（对齐 GPUI confidence_color；数字用文字色，条用 bg 色） */
+/** 置信度文字色：>=80 绿 / >=50 橙 / <50 蓝（confidence_color；数字用文字色，条用 bg 色） */
 function confTextClsOf(conf: number): string {
   const pct = confPercent(conf)
   if (pct >= 80) return 'text-label-green'
-  if (pct >= 50) return 'text-label-yellow'
+  if (pct >= 50) return 'text-warning'
   return 'text-label-blue'
 }
 const confTextCls = computed(() => confTextClsOf(displayConfidence.value ?? 0))
@@ -357,9 +357,9 @@ function drawHistogram() {
   const ctx = canvas.getContext('2d')
   if (!ctx) return
   const css = getComputedStyle(document.documentElement)
-  const fg = css.getPropertyValue('--foreground').trim() || '#cdd6f4'
-  const muted = css.getPropertyValue('--muted-foreground').trim() || '#a6adc8'
-  const border = css.getPropertyValue('--border').trim() || '#313244'
+  const fg = css.getPropertyValue('--foreground').trim() || '#1b1d21'
+  const muted = css.getPropertyValue('--muted-foreground').trim() || '#63676e'
+  const border = css.getPropertyValue('--border').trim() || '#d9dbdf'
   const W = canvas.width
   const H = canvas.height
   const plotH = H - 14
@@ -393,9 +393,9 @@ function drawHistogram() {
     ctx.globalAlpha = 1
   }
   // RGB 三色细线（半透明，先画避免盖住 luma 主线）
-  drawCurve(h.r, '#f87171', 0.5)
-  drawCurve(h.g, '#4ade80', 0.5)
-  drawCurve(h.b, '#60a5fa', 0.5)
+  drawCurve(h.r, '#d9534f', 0.5)
+  drawCurve(h.g, '#4a9f63', 0.5)
+  drawCurve(h.b, '#4f7fd0', 0.5)
   // luma 面积填充（低透明度）+ 主线
   ctx.fillStyle = fg
   ctx.globalAlpha = 0.18
@@ -496,7 +496,7 @@ function onOpenMap(e: Event) {
 /** 本地调整参数（跟随焦点图；拖动实时改内存，350ms 去抖后持久化） */
 const adj = reactive<AdjustParams>({ exposure: 0, contrast: 0, saturation: 0 })
 
-/** 调整字段表（驱动模板 v-for，消除三份重复行）：范围/步进对齐 adjust 语义 */
+/** 调整字段表（驱动模板 v-for，消除三份重复行）：范围/步进adjust 语义 */
 const ADJ_FIELDS = [
   { key: 'exposure', label: '曝光', min: -2, max: 2, step: 0.05 },
   { key: 'contrast', label: '对比度', min: -100, max: 100, step: 1 },
@@ -855,7 +855,7 @@ function fmtSigned(v: number): string {
             </template>
             <!-- 待复核：失败阶段中文提示 + 最接近候选（短条 + 百分比，与确认态视觉统一） -->
             <template v-if="focused.recognitionStatus === 'NeedsReview'">
-              <div v-if="failureText" class="text-xs text-label-yellow">{{ failureText }}</div>
+              <div v-if="failureText" class="text-xs text-warning">{{ failureText }}</div>
               <div v-if="bestCandidate" class="flex items-center gap-2 text-xs">
                 <span class="shrink-0 text-muted-foreground">最接近：{{ bestCandidate.name }}</span>
                 <div class="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">

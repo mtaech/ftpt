@@ -36,7 +36,7 @@ const config = useConfigStore()
 const quality = useQualityStore()
 
 /** 网格布局常量：行高跟随后端配置 thumbnailSize（cell = thumbnailSize + 56），
- * 行距 8px、容器内边距 4px（值与模板 gap-[8px]/px-[4px] 保持一致，保证滚动定位精确） */
+ * 行距 8px、容器内边距 4px（p_1；值与模板 gap-[8px]/px-[4px] 保持一致，保证滚动定位精确） */
 const ROW_HEIGHT = computed(() =>
   gridWidth.value > 0 ? Math.max(80, Math.round(cellW.value) + 56) : config.rowHeight,
 )
@@ -222,7 +222,7 @@ function scrollStrip(e: MouseEvent, dir: 1 | -1) {
 }
 
 /** 五星逐位彩虹色（RATING 数组原值）：第 i 颗已填星颜色，仅着色用 */
-const RATING_COLORS = ['#ef4444', '#f97316', '#e8ab07', '#22c55e', '#3b82f6']
+const RATING_COLORS = ['#d9534f', '#d97a3a', '#c98a1c', '#4a9f63', '#4f7fd0']
 
 /** 置信度归一化到 0–100（mock 层为 0–1 小数、真实后端 0–100），无置信度返回 null */
 function confPct(conf: number | null): number | null {
@@ -265,7 +265,7 @@ function onCellDblClick(i: number) {
 }
 
 /**
- * 右键菜单：先聚焦到被点项（不在多选中则独占选中、已在多选中保持多选，
+ * 右键菜单：先聚焦到被点项（不在多选中则独占选中、已在多选中保持多选），
  * 再弹出图片菜单（动作作用于选中集）。
  */
 function onCellContextMenu(i: number, e: MouseEvent) {
@@ -384,7 +384,7 @@ watch([rowCount, ROW_STEP], () => {
 
             <!-- 格式徽标（左上，半透明黑底，RAW 直读扩展名） -->
             <span
-              class="absolute top-1 left-1 rounded-sm bg-black/70 px-1 text-[10px] leading-4 text-white"
+              class="absolute top-1 left-1 rounded-sm bg-black/55 px-1 text-[10px] leading-4 text-white"
             >
               {{ formatName(cell.c) }}
             </span>
@@ -414,7 +414,7 @@ watch([rowCount, ROW_STEP], () => {
                  组内最优帧在徽标行前置皇冠（amber，仅 size≥2 组存在；样式对齐 OTHER 格式徽标黑底） -->
             <div
               v-if="cell.g.members.length === 1 && burstOf(cell.g.active)"
-              class="absolute bottom-1 left-1 flex items-center gap-0.5 rounded-sm bg-black/70 px-1 text-[0.625rem] leading-4 text-white"
+              class="absolute bottom-1 left-1 flex items-center gap-0.5 rounded-sm bg-black/55 px-1 text-[0.625rem] leading-4 text-white"
             >
               <span
                 v-if="bestFrameIndices.has(cell.g.active)"
@@ -480,14 +480,14 @@ watch([rowCount, ROW_STEP], () => {
                   </div>
                   <span
                     v-if="stackSemantic(cell.g).multiFormat"
-                    class="absolute bottom-0 left-0 rounded-sm bg-black/70 px-0.5 text-[8px] leading-3 text-white"
+                    class="absolute bottom-0 left-0 rounded-sm bg-black/55 px-0.5 text-[8px] leading-3 text-white"
                   >
                     {{ formatBadgeLabel(captures.items[m]) }}
                   </span>
                   <!-- 连拍组最优帧皇冠（右上角；仅 size≥2 组的选优帧，样式对齐语义徽标黑底） -->
                   <span
                     v-if="bestFrameIndices.has(m)"
-                    class="absolute top-0 right-0 rounded-sm bg-black/70 p-0.5 text-amber-300"
+                    class="absolute top-0 right-0 rounded-sm bg-black/55 p-0.5 text-amber-300"
                     title="连拍组最优帧（K 键保留）"
                   >
                     <CrownIcon class="size-2.5" />
