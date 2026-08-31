@@ -17,7 +17,7 @@ crates/
 ├── photo-domain/      ← 类型叶子（Capture, ExifMetadata, XmpMetadata…）
 ├── photo-engine/      ← 文件机械（scanner, exif 提取, xmp 读写, thumbnail…）
 ├── photo-config/      ← 配置（TOML 读写 + SQLite 持久化）
-└── photo-tool-app/    ← GPUI 前端（状态 + UI + worker）
+└── photo-tauri/       ← Tauri v2 前端（Vue 3 + Rust 后端）
 ```
 
 依赖方向：`app → engine → domain`，`app → config`。

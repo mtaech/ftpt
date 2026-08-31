@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 对比模式（T0 批次）：2–4 张多窗格并排，每格 ptimg master 图源。
 // 滚轮以光标为中心缩放（×1.25）、左键拖拽平移，作用于全部窗格（缩放系数相对各图
-// fit、平移按显示尺寸占比归一化，数学走 previewMath / compare store，与 GPUI 一致）。
+// fit、平移按显示尺寸占比归一化，数学走 previewMath / compare store，一致）。
 // 点击/←→ 方向键聚焦某格（高亮边框，方向键经 App.vue 键位层路由到 compare.setFocus），
 // 评分 1–5/0、色标、旗标、Delete 等标记键作用于聚焦格（App.vue markPaths 路由）。
 // 布局/主题对齐现有预览（Catppuccin CSS 变量 + 半透明黑底徽标 + 加载脉冲浮层）。

@@ -83,8 +83,8 @@ async function removeFav(dir: string) {
 }
 
 /**
- * 从最近列表移除（右键菜单）。后端无独立 remove_recent 命令（对齐 GPUI
- * RemoveContextDir 直接改配置），经 getAppConfig/setAppConfig 持久化；
+ * 从最近列表移除（右键菜单）。后端无独立 remove_recent 命令（
+ * 直接改配置），经 getAppConfig/setAppConfig 持久化；
  * 本地先乐观移除保证列表即时刷新（mock 层 listRecent 不读配置，仅本地生效）。
  */
 async function removeRecentDir(dir: string) {
@@ -102,7 +102,7 @@ async function removeRecentDir(dir: string) {
 }
 
 /**
- * 文件夹卡片右键菜单（对齐 GPUI folder_menu + 打开）：
+ * 文件夹卡片右键菜单（打开/收藏/移除）：
  * 打开 / 加入收藏|取消收藏（按当前收藏态切换）/ 从最近移除（该目录在最近列表时显示）。
  */
 function onFolderContextMenu(dir: string, e: MouseEvent) {
@@ -210,7 +210,7 @@ watch(
 
     <!-- 滚动列表区 -->
     <div class="min-h-0 flex-1 overflow-y-auto px-3 py-2">
-      <!-- 当前目录卡片：图标瓦片 + 目录名 + 照片计数（对齐 GPUI sidebar 目录行；右键收藏切换） -->
+      <!-- 当前目录卡片：图标瓦片 + 目录名 + 照片计数（sidebar 目录行；右键收藏切换） -->
       <div
         class="dir-card-active mb-2 flex items-center gap-2 px-2.5 py-2"
         @contextmenu.prevent="onCurrentDirContextMenu($event)"

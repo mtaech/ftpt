@@ -1,4 +1,4 @@
-// 应用配置 store：持有后端 AppConfig 快照，改动即保存（对齐 GPUI save_config「设置保存即时刷新」）。
+// 应用配置 store：持有后端 AppConfig 快照，改动即保存（save_config「设置保存即时刷新」）。
 // DOM 副作用（主题 html.dark class / 字体 --font-family-app 变量）集中在本 store，
 // App.vue 启动恢复与设置弹窗共用同一份逻辑，避免两处各写一遍。
 import { defineStore } from 'pinia'
@@ -53,7 +53,7 @@ export const useConfigStore = defineStore('config', {
     gridColumns: (s) => s.config.gridColumns ?? 4,
     /** 界面缩放比例（回退 100 = 基准字号 15px；80-130） */
     uiScale: (s) => s.config.uiScale ?? 100,
-    /** 网格 cell 高度 = thumbnailSize + 56（对齐 GPUI grid.rs cell_size 公式） */
+    /** 网格 cell 高度 = thumbnailSize + 56 */
     rowHeight: (s) => (s.config.thumbnailSize ?? 220) + 56,
   },
   actions: {
@@ -77,7 +77,7 @@ export const useConfigStore = defineStore('config', {
       }
       this.applyDom()
     },
-    /** 局部更新：合并 → 即时应用 DOM → 后端保存（对齐 GPUI save_config 即时刷新语义） */
+    /** 局部更新：合并 → 即时应用 DOM → 后端保存（save_config 即时刷新语义） */
     async update(patch: Partial<AppConfig>) {
       this.config = { ...this.config, ...patch }
       this.applyDom()

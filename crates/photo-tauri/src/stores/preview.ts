@@ -1,4 +1,4 @@
-// 预览态：视图切换 + 缩放/平移。缩放语义对齐 GPUI：
+// 预览态：视图切换 + 缩放/平移。缩放语义：
 // zoom = 1 → 适应窗口（fit）；zoom = 0 → 1:1（显示尺寸 = 原图像素，此时图源切 ptimg full）。
 // 视图三态：grid / preview / compare（对比模式多窗格，缩放平移状态在 compare store，
 // 这里只做视图路由，见 openCompare/closeCompare）。
@@ -9,7 +9,7 @@ import { clampPanAxis, fitScale, panAfterCursorZoom, previewCenterOffset } from 
 import { useFilterStore } from './filter'
 import { useSelectionStore } from './selection'
 
-/** 滚轮缩放步进（对齐 GPUI ×1.25/÷1.25） */
+/** 滚轮缩放步进（×1.25/÷1.25） */
 export const ZOOM_STEP = 1.25
 
 export const usePreviewStore = defineStore('preview', {
@@ -28,7 +28,7 @@ export const usePreviewStore = defineStore('preview', {
     zoom: 1,
     /** 平移量（相对居中位的像素偏移） */
     pan: [0, 0] as Vec2,
-    /** 检测框是否可见（默认关，对齐 GPUI；V 键 / 工具条「检测框」切换） */
+    /** 检测框是否可见（默认关，；V 键 / 工具条「检测框」切换） */
     bboxVisible: false,
     /** 对焦点叠加是否可见（默认关；F 键切换，独立于检测框） */
     focusVisible: false,

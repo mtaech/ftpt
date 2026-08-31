@@ -21,7 +21,7 @@ export const commands = {
 	 *  失败返回 Err，前端重拉回滚（乐观更新回滚语义由前端承担）。
 	 */
 	setRating: (paths: string[], rating: number) => typedError<null, string>(__TAURI_INVOKE("set_rating", { paths, rating })),
-	/**  设置 Pick/Reject 旗标（None = 清除，对应 GPUI 的 U 键） */
+	/**  设置 Pick/Reject 旗标（None = 清除，对应 U 键） */
 	setFlag: (paths: string[], flag: "Pick" | "Reject" | null) => typedError<null, string>(__TAURI_INVOKE("set_flag", { paths, flag })),
 	/**  设置颜色标签（None = 清除） */
 	setColorLabel: (paths: string[], label: "None" | "Red" | "Yellow" | "Green" | "Blue" | "Purple" | null) => typedError<null, string>(__TAURI_INVOKE("set_color_label", { paths, label })),
@@ -65,7 +65,7 @@ export const commands = {
 	getClippingMask: (path: string) => typedError<number[], string>(__TAURI_INVOKE("get_clipping_mask", { path })),
 	/**
 	 *  批量识别：spawn_blocking 后台逐张识别（多线程分块，每线程独占 Recognizer——
-	 *  Session 需 &mut，不可跨线程共享，照 GPUI spawn_batch_recognize）。
+	 *  Session 需 &mut，不可跨线程共享）。
 	 *  逐张 emit recognize:progress；每张完成后写 folder_db recognition 表（rel 键与代际
 	 *  无关，工作线程直接 upsert）+ 锁 AppState 更新内存 CaptureMeta（带代际校验）；
 	 *  全部完成 emit recognize:done 并复位进行中标记。单张失败不中止整体（failed 计数）。
@@ -83,7 +83,7 @@ export const commands = {
 	batchOpPreview: (op: BatchOpType, options: BatchOpOptions) => typedError<BatchOpPreview, string>(__TAURI_INVOKE("batch_op_preview", { op, options })),
 	/**
 	 *  批量操作执行：spawn_blocking 后台执行（engine::batch_ops::execute），逐文件 emit
-	 *  batch:progress，完成 emit batch:done。语义照 GPUI run_batch_op：
+	 *  batch:progress，完成 emit batch:done。语义：
 	 *  1. 重扫源目录取完整 Capture（ops 层需要 source_files 全列表操作兄弟文件）
 	 *  2. 操作集 = 全量；formats 非空按主文件格式过滤；sync_siblings 时 expand_with_siblings
 	 *  3. Delete 走 ops::delete_capture（回收站）；Move/Delete 后的重扫由前端负责
@@ -105,7 +105,7 @@ export const commands = {
 	 *  设置调整参数：持久化到 folder_db adjustments 表 + emit thumb:ready 触发预览刷新
 	 *  （前端按事件失效缓存并以新 ?v= 重载 master 预览；ptimg handler 侧带调整参数时
 	 *  经引擎渲染输出）。防御 DB 坏值：Q15 定点饱和要求 saturation∈[-100,100]，
-	 *  钳制后再入内存（同 GPUI refresh_adjustments_sync）。
+	 *  钳制后再入内存（adjustments 同步）。
 	 */
 	setAdjustments: (path: string, params: AdjustParams) => typedError<null, string>(__TAURI_INVOKE("set_adjustments", { path, params })),
 	/**  读取完整配置（前端启动时据此应用主题/字体等；AppConfig 已 derive specta） */
@@ -155,7 +155,7 @@ export const commands = {
 	 */
 	correctRecognition: (paths: string[], spId: number, cnName: string, sciName: string) => typedError<null, string>(__TAURI_INVOKE("correct_recognition", { paths, spId, cnName, sciName })),
 	/**
-	 *  单张/多张删除（回收站，无确认——对齐 GPUI Delete 键语义）。
+	 *  单张/多张删除（回收站，无确认）。
 	 *  与 batch_op_execute 的 Delete 分支同编排：重扫源目录取完整 Capture（ops 层
 	 *  delete_capture 需要 source_files 才能操作同名兄弟文件）→ 逐个删除 → 仅删除
 	 *  成功者同步 sidecar 三表（识别/调整/评分色标旗标行，防孤儿行）→ 从内存
@@ -167,7 +167,7 @@ export const commands = {
 	/**
 	 *  导出调整结果（全尺寸烘焙，ADR 0007）：engine adjustments 渲染 + convert 保存
 	 *  JPEG。命名 `{stem}_adjusted.jpg`，已存在自动追加 `_1/_2` 序号（不覆盖原文件，
-	 *  照 GPUI export_adjusted）。output_dir = None 时导出到源文件所在目录。RAW
+	 *  export_adjusted）。output_dir = None 时导出到源文件所在目录。RAW
 	 *  全尺寸 16-bit 解码约 3-5s，spawn_blocking 异步执行。返回最终输出路径（前端
 	 *  状态栏展示）。导出是一次性烘焙，不改动内存 CaptureMeta（无对应字段）。
 	 */
@@ -182,7 +182,7 @@ export const commands = {
 	 *  更新并保存配置（设置面板）：钳制校验后替换 st.config + save_config。
 	 *  钳制范围：leftPanelWidth 200–480、rightPanelWidth 200–480、
 	 *  recognitionThreadCount 1–4、thumbnailSize 64–1024（网格 cell = 尺寸 + 56，
-	 *  越界值钳到合理区间，与 GPUI 设置语义一致，非法输入不报错）。
+	 *  越界值钳到合理区间，设置语义一致，非法输入不报错）。
 	 */
 	setAppConfig: (config: AppConfig) => typedError<null, string>(__TAURI_INVOKE("set_app_config", { config })),
 	/**

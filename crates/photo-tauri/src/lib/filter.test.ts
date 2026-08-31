@@ -1,5 +1,5 @@
 // filter.ts 纯逻辑测试：覆盖无筛选、各条件单独生效、组合、排序、边界。
-// 判定边界对齐 GPUI 版 state/filter.rs（含「dateTaken 解析失败保留」的 Rust 行为）。
+// 判定边界对齐后端 state/filter.rs（含「dateTaken 解析失败保留」的 Rust 行为）。
 import { describe, expect, it } from 'vitest'
 import type { CaptureMeta, FilterCriteria, SortBy, SortDirection } from './bindings'
 import {

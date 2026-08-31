@@ -1,11 +1,10 @@
-// 正式 keybinding 层：键位全集对齐 GPUI crates/photo-tool-app/src/ui/layout.rs 的
-// on_key_down 匹配（(key, ctrl) 元组 + b 键的 Shift 分支），并补浏览器端需要的
+// 正式 keybinding 层：键位全集自 Rust 端 on_key_down 匹配（(key, ctrl) 元组 + b 键的 Shift 分支），并补浏览器端需要的
 // 焦点上下文隔离（表单控件聚焦时不触发）与修饰键精确匹配（Ctrl 组合不被吞）。
 //
 // 职责边界：本模块只做「按键 → action 名」的解析与分发，不碰任何 store；
 // action 的真实实现由调用方（App.vue）通过 handlers 表注入。
 
-/** 全部可分发动作名（对齐 GPUI Action 枚举；含 Phase 3 占位项） */
+/** 全部可分发动作名（Action 枚举；含 Phase 3 占位项） */
 export type KeymapAction =
   // 评分（1–5 评分，0 清除）
   | 'rate1'
@@ -41,7 +40,7 @@ export type KeymapAction =
   // 幻灯片（s 进入；空格暂停/继续）
   | 'slideshow'
   | 'slideshowTogglePlay'
-  // 对比（前端新增，GPUI 版无此键）：C 进入/聚焦对比模式
+  // 对比（前端新增，无此键）：C 进入/聚焦对比模式
   | 'compare'
   // 统计视图（T1 批次，SpeciesIndex）：t 进入/退出
   | 'stats'
@@ -65,7 +64,7 @@ export type KeymapAction =
   | 'refresh'
   | 'toggleLeftPanel'
   | 'toggleRightPanel'
-  // 地图视图（M 键切换全屏 GPS 地图 overlay，前端新增键，GPUI 版无对应分支）
+  // 地图视图（M 键切换全屏 GPS 地图 overlay，前端新增键，无对应分支）
   | 'toggleMap'
 
 /** 动作分发表：调用方把 action 名接到真实 store 调用上（Phase 3 项可先 no-op） */
@@ -74,7 +73,7 @@ export type KeymapHandlers = Partial<Record<KeymapAction, () => void>>
 export interface KeyBinding {
   /** e.key 规范化后的键名（见 normalizeKey） */
   key: string
-  /** true=必须按 Ctrl；false=必须不按 Ctrl；缺省=不要求（对齐 GPUI 的 _ 通配） */
+  /** true=必须按 Ctrl；false=必须不按 Ctrl；缺省=不要求（对齐 _ 通配） */
   ctrl?: boolean
   /** true=必须按 Shift；false=必须不按 Shift；缺省=不要求 */
   shift?: boolean
@@ -82,8 +81,8 @@ export interface KeyBinding {
 }
 
 /**
- * 键位表：逐键移植 GPUI layout.rs 的 match (key, ctrl) 分支。
- * 注意 GPUI 的方向键为扁平 ±1 移动（display_order 下标），4 列网格下
+ * 键位表：逐键按 (key, ctrl) 元组分支移植。
+ * 注意方向键为扁平 ±1 移动（display_order 下标），4 列网格下
  * 跨行是自然发生的，不做行内钳制——见 prev/next 的 App.vue 实现。
  */
 export const BINDINGS: readonly KeyBinding[] = [
@@ -94,7 +93,7 @@ export const BINDINGS: readonly KeyBinding[] = [
   { key: '4', ctrl: false, action: 'rate4' },
   { key: '5', ctrl: false, action: 'rate5' },
   { key: '0', ctrl: false, action: 'rate0' },
-  // 色标：6红 7黄 8绿 9蓝，Ctrl+6 紫（Ctrl 修饰区分 6=红，对齐 GPUI label 键区）
+  // 色标：6红 7黄 8绿 9蓝，Ctrl+6 紫（Ctrl 修饰区分 6=红，label 键区）
   { key: '6', ctrl: false, action: 'labelRed' },
   { key: '7', ctrl: false, action: 'labelYellow' },
   { key: '8', ctrl: false, action: 'labelGreen' },
@@ -104,7 +103,7 @@ export const BINDINGS: readonly KeyBinding[] = [
   { key: 'p', ctrl: false, action: 'flagPick' },
   { key: 'x', ctrl: false, action: 'flagReject' },
   { key: 'u', ctrl: false, action: 'flagNone' },
-  // 连拍选优：K 保留组内最优帧（其余标 Reject；前端新增键，GPUI layout.rs 无对应分支）
+  // 连拍选优：K 保留组内最优帧（其余标 Reject；前端新增键）
   { key: 'k', ctrl: false, action: 'keepBestFrame' },
   // 识别：B 单张 / Ctrl+B 批量未识别 / Ctrl+Shift+B 重新识别全部
   // （b 键的 ctrl/shift 精确匹配，保证 Ctrl 按下时不落到单张识别，不双重触发）
@@ -120,7 +119,7 @@ export const BINDINGS: readonly KeyBinding[] = [
   // 视图：G 网格/预览切换
   { key: 'g', ctrl: false, action: 'toggleGridPreview' },
   // 对比：C 进入对比模式（多选 2–4 张，或当前项属连拍组取组内前 4 张；
-  // 前端新增键，GPUI 版 layout.rs 无对应分支）
+  // 前端新增键）
   { key: 'c', ctrl: false, action: 'compare' },
   // 统计视图：t 进入/退出（T1 批次 SpeciesIndex 分配键）
   { key: 't', ctrl: false, action: 'stats' },
@@ -138,7 +137,7 @@ export const BINDINGS: readonly KeyBinding[] = [
   // 堆叠：Q/E 在组内循环切换激活成员（网格态；E=下一个 Q=上一个，对齐 ×N 点击循环语义）
   { key: 'q', ctrl: false, action: 'stackPrev' },
   { key: 'e', ctrl: false, action: 'stackNext' },
-  // 删除：Delete（GPUI 不区分修饰键，(key, _) 通配）
+  // 删除：Delete（不区分修饰键，(key, _) 通配）
   { key: 'delete', action: 'delete' },
   // 撤销批量操作：Ctrl+Z（shift: false 精确匹配，Ctrl+Shift+Z 不触发；对齐 b 键三态模式）
   { key: 'z', ctrl: true, shift: false, action: 'undoBatch' },
@@ -146,7 +145,7 @@ export const BINDINGS: readonly KeyBinding[] = [
   { key: 'a', ctrl: true, action: 'selectAll' },
   { key: 'd', ctrl: true, action: 'deselectAll' },
   // 其他：Esc 退出预览（pendingBox 优先，见 App.vue）/ F5 重扫 / Ctrl+[ Ctrl+] 面板开关
-  // （对齐 GPUI Action::ToggleLeftPanel / ToggleRightPanel，不再是目录后退前进）
+  // （切换左/右栏可见，不再是目录后退前进）
   { key: 'escape', ctrl: false, action: 'closePreview' },
   { key: 'f5', ctrl: false, action: 'refresh' },
   { key: '[', ctrl: true, action: 'toggleLeftPanel' },
@@ -155,7 +154,7 @@ export const BINDINGS: readonly KeyBinding[] = [
   { key: 'm', ctrl: false, action: 'toggleMap' },
 ]
 
-/** 把浏览器 e.key 规范化为绑定表键名（对齐 GPUI keystroke 命名：left/right/home/end/escape/f5） */
+/** 把浏览器 e.key 规范化为绑定表键名（keystroke 命名：left/right/home/end/escape/f5） */
 function normalizeKey(key: string): string {
   switch (key) {
     case 'ArrowLeft':
@@ -172,7 +171,7 @@ function normalizeKey(key: string): string {
   }
 }
 
-/** 修饰键判定：binding 未声明的修饰键不检查（对齐 GPUI 只读 control/shift；Alt/Meta 忽略） */
+/** 修饰键判定：binding 未声明的修饰键不检查（只读 control/shift；Alt/Meta 忽略） */
 function modsOk(e: KeyboardEvent, b: KeyBinding): boolean {
   if (b.ctrl !== undefined && e.ctrlKey !== b.ctrl) return false
   if (b.shift !== undefined && e.shiftKey !== b.shift) return false

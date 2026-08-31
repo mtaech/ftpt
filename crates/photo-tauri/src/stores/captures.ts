@@ -91,7 +91,7 @@ export const useCapturesStore = defineStore('captures', {
         await scanDirectory(path)
         await this.reload()
       } catch (e) {
-        // 扫描失败复位哨兵，等效 GPUI worker panic 兜底
+        // 扫描失败复位哨兵，等效 worker panic 兜底
         this.scanning = false
         this.progress = null
         console.error('scan_directory 失败', e)
@@ -112,7 +112,7 @@ export const useCapturesStore = defineStore('captures', {
         await scanDirectory(this.directory)
         await this.reload()
       } catch (e) {
-        // 扫描失败复位哨兵，等效 GPUI worker panic 兜底
+        // 扫描失败复位哨兵，等效 worker panic 兜底
         this.scanning = false
         this.progress = null
         console.error('重扫失败', e)

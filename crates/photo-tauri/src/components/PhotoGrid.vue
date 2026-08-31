@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 网格：动态列数 + 行级虚拟化（绝对定位行，渲染可见行 ± 2 行缓冲，cell 高约 240px）。
 // 列数 = 容器宽 ÷ cell 宽（thumbnailSize + gap），实时跟随缩略图尺寸滑块与窗口宽度；
-// 行高跟随后端配置 thumbnailSize（cell = thumbnailSize + 56，对齐 GPUI grid.rs cell_size）。
+// 行高跟随后端配置 thumbnailSize（cell = thumbnailSize + 56）。
 // cell = 缩略图 + 格式徽标(左上) + 旗标角标(右上) + 堆叠成员带(底部，多成员组：成员缩略图+语义徽标) + 文件名/大小/星级 + 鸟种状态 chip + 色标条(底缘)。
 // 选择交互：单击 select、Ctrl+单击 toggle、Shift+单击 selectRange、双击进预览。
 // thumb:ready → store 版本号递增 → img src ?v= 刷新。
@@ -35,8 +35,8 @@ const contextMenu = useContextMenuStore()
 const config = useConfigStore()
 const quality = useQualityStore()
 
-/** 网格布局常量：行高跟随后端配置 thumbnailSize（cell = thumbnailSize + 56，对齐 GPUI grid.rs cell_size），
- * 行距 8px、容器内边距 4px（对齐 GPUI p_1；值与模板 gap-[8px]/px-[4px] 保持一致，保证滚动定位精确） */
+/** 网格布局常量：行高跟随后端配置 thumbnailSize（cell = thumbnailSize + 56），
+ * 行距 8px、容器内边距 4px（值与模板 gap-[8px]/px-[4px] 保持一致，保证滚动定位精确） */
 const ROW_HEIGHT = computed(() =>
   gridWidth.value > 0 ? Math.max(80, Math.round(cellW.value) + 56) : config.rowHeight,
 )
@@ -49,7 +49,7 @@ const BUFFER_ROWS = 2
 const gridWidth = ref(0)
 /**
  * 固定列数 = 配置的每行图片数（2-5，下拉栏选择）。cell 宽由容器宽 ÷ 列数
- * 自适应，行高 = cell 宽 + 56（缩略图正方形，对齐 GPUI cell_size 公式）。
+ * 自适应，行高 = cell 宽 + 56（缩略图正方形）。
  * 容器未测量（宽 0）时按默认 4 列 + thumbnailSize 估算行高。
  */
 const COLS = computed(() => config.gridColumns)
@@ -221,7 +221,7 @@ function scrollStrip(e: MouseEvent, dir: 1 | -1) {
   strip.scrollBy({ left: dir * 96, behavior: 'smooth' })
 }
 
-/** 五星逐位彩虹色（GPUI RATING 数组原值）：第 i 颗已填星颜色，仅着色用 */
+/** 五星逐位彩虹色（RATING 数组原值）：第 i 颗已填星颜色，仅着色用 */
 const RATING_COLORS = ['#ef4444', '#f97316', '#e8ab07', '#22c55e', '#3b82f6']
 
 /** 置信度归一化到 0–100（mock 层为 0–1 小数、真实后端 0–100），无置信度返回 null */
@@ -247,7 +247,7 @@ function qualityDot(path: string): { cls: string; title: string } | null {
   return null
 }
 
-/** Confirmed 鸟名着色（GPUI 置信度三档）：≥80 success / ≥50 warning / 否则 primary（无置信度回退 primary） */
+/** Confirmed 鸟名着色（置信度三档）：≥80 success / ≥50 warning / 否则 primary（无置信度回退 primary） */
 function confColor(pct: number | null): string {
   if (pct === null) return 'text-primary'
   return pct >= 80 ? 'text-success' : pct >= 50 ? 'text-warning' : 'text-primary'
@@ -266,7 +266,7 @@ function onCellDblClick(i: number) {
 
 /**
  * 右键菜单：先聚焦到被点项（不在多选中则独占选中、已在多选中保持多选，
- * 对齐 GPUI focus_for_context_menu），再弹出图片菜单（动作作用于选中集）。
+ * 再弹出图片菜单（动作作用于选中集）。
  */
 function onCellContextMenu(i: number, e: MouseEvent) {
   if (!selection.isSelected(i)) selection.select(i)
@@ -382,14 +382,14 @@ watch([rowCount, ROW_STEP], () => {
               class="size-full object-cover"
             />
 
-            <!-- 格式徽标（左上，半透明黑底，RAW 直读扩展名，对齐 GPUI BADGE_BG） -->
+            <!-- 格式徽标（左上，半透明黑底，RAW 直读扩展名） -->
             <span
               class="absolute top-1 left-1 rounded-sm bg-black/70 px-1 text-[10px] leading-4 text-white"
             >
               {{ formatName(cell.c) }}
             </span>
 
-            <!-- 旗标角标（右上 18px 圆，Pick 绿底白勾 / Reject 红底白叉，对齐 GPUI flag 覆层） -->
+            <!-- 旗标角标（右上 18px 圆，Pick 绿底白勾 / Reject 红底白叉） -->
             <div
               v-if="cell.c.flag"
               class="absolute top-1 right-1 flex size-[18px] items-center justify-center rounded-full"
@@ -529,7 +529,7 @@ watch([rowCount, ROW_STEP], () => {
               <span class="text-xs text-muted-foreground tabular-nums">
                 {{ formatBytes(cell.c.fileSize) }}
               </span>
-              <!-- 五星（GPUI 逐位彩虹色）：第 i 颗已填星 = RATING_COLORS[i]，未填星 muted -->
+              <!-- 五星（逐位彩虹色）：第 i 颗已填星 = RATING_COLORS[i]，未填星 muted -->
               <span class="flex shrink-0 items-center gap-px">
                 <span
                   v-for="s in 5"

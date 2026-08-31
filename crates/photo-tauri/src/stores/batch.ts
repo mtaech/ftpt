@@ -1,6 +1,6 @@
 // 批量文件操作状态（ADR 0006：筛选驱动 + 画面粒度）
 //
-// 交互模型（移植 GPUI state/batch_ops.rs）：
+// 交互模型（与引擎 batch_ops 一致）：
 // - 操作对象 = 当前筛选结果（filter.filteredIndices），纯筛选驱动；无筛选时禁用
 // - 两阶段：干跑预览（batch_op_preview，只算不动文件）→ 确认执行（batch_op_execute）
 // - 移动/复制需目标目录（Delete 忽略）；「同步同名文件」开关 + 格式多选按 stem 并入兄弟文件
@@ -28,7 +28,7 @@ import { useFilterStore } from './filter'
 
 // ── 操作类型文案（对齐 domain.rs BatchOpType：action_label / 语义描述）──
 
-/** 动作标签（对齐 GPUI action_label） */
+/** 动作标签（action_label） */
 export function opLabel(op: BatchOpType): string {
   switch (op) {
     case 'Move':

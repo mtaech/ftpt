@@ -1,8 +1,8 @@
 <script setup lang="ts">
-// 设置弹窗：对齐 GPUI toolbar.rs SettingsOverlay（遮罩/Esc/× 关闭、卡片式三页 tab：
+// 设置弹窗：Settings 弹窗（遮罩/Esc/× 关闭、卡片式三页 tab：
 // 通用 / 快捷键 / 关于）。所有改动即保存（setAppConfig → 后端 save_config），
 // 主题/字体即时应用 DOM（html.dark class / --font-family-app 变量）。
-// 打开时重新 getAppConfig 初始化当前值（对齐 GPUI「设置保存即时刷新」语义）。
+// 打开时重新 getAppConfig 初始化当前值（「设置保存即时刷新」语义）。
 import { computed, onMounted, ref, watch } from 'vue'
 import { getVersion, getTauriVersion } from '@tauri-apps/api/app'
 import { version as vueVersion } from 'vue'
@@ -22,7 +22,7 @@ const open = defineModel<boolean>('open', { default: false })
 
 const config = useConfigStore()
 
-// ── tab 结构（对齐 GPUI Settings 三页：通用 / 快捷键 / 关于） ─────────────
+// ── tab 结构（Settings 三页：通用 / 快捷键 / 关于） ─────────────
 const TABS = [
   { id: 'general', label: '通用', icon: SettingsIcon },
   { id: 'shortcuts', label: '快捷键', icon: BookOpenIcon },
@@ -45,7 +45,7 @@ const THEMES: { value: Theme; label: string; icon: typeof SunIcon }[] = [
   { value: 'Light', label: '亮色', icon: SunIcon },
   { value: 'Dark', label: '暗色', icon: MoonIcon },
 ]
-/** 主题：即时切换 html.dark（GPUI 语义同 activity_rail 主题按钮） */
+/** 主题：即时切换 html.dark（语义同 activity_rail 主题按钮） */
 const theme = computed<Theme>({
   get: () => config.theme,
   set: (v: Theme) => void config.update({ theme: v }),
@@ -63,13 +63,13 @@ const effectiveAccent = computed(() => config.accentColor ?? DEFAULT_ACCENT)
 
 /** 系统字体列表（listSystemFonts 一次性拉取，真实后端为全系统字体） */
 const fonts = ref<string[]>([])
-/** 界面字体：改动即保存 + 即时应用 --font-family-app（对齐 GPUI 字体下拉） */
+/** 界面字体：改动即保存 + 即时应用 --font-family-app（字体下拉） */
 const fontFamily = computed({
   get: () => config.fontFamily,
   set: (v: string) => void config.update({ fontFamily: v }),
 })
 
-/** 识别线程数 1–4（对齐 GPUI NumberFieldOptions min 1 / max 4） */
+/** 识别线程数 1–4（min 1 / max 4） */
 const threadCount = computed({
   get: () => config.recognitionThreadCount,
   set: (v: number) => void config.update({ recognitionThreadCount: v }),
@@ -129,9 +129,9 @@ onMounted(async () => {
   }
 })
 
-// ── 快捷键页：列出 keymap.ts BINDINGS 全部键位（中文明细，分组对齐 GPUI shortcuts_page） ──
+// ── 快捷键页：列出 keymap.ts BINDINGS 全部键位（中文明细，分组展示） ──
 
-/** action → 中文说明（对齐 GPUI shortcuts_page 文案） */
+/** action → 中文说明 */
 const ACTION_DESC: Record<KeymapAction, string> = {
   rate1: '评分 1 星',
   rate2: '评分 2 星',
@@ -178,7 +178,7 @@ const ACTION_DESC: Record<KeymapAction, string> = {
   toggleRightPanel: '切换右侧面板',
 }
 
-/** 方向键/特殊键的展示名（对齐 GPUI 快捷键页的 ← → Home End 写法） */
+/** 方向键/特殊键的展示名（← → Home End 写法） */
 const KEY_LABELS: Record<string, string> = {
   left: '←',
   right: '→',
@@ -190,7 +190,7 @@ const KEY_LABELS: Record<string, string> = {
   ' ': '空格',
 }
 
-/** 把绑定行渲染为可读键位串（修饰键顺序 Ctrl → Shift → 键名，对齐 GPUI） */
+/** 把绑定行渲染为可读键位串（修饰键顺序 Ctrl → Shift → 键名） */
 function formatKeys(b: KeyBinding): string {
   const mods: string[] = []
   if (b.ctrl) mods.push('Ctrl')
@@ -199,7 +199,7 @@ function formatKeys(b: KeyBinding): string {
   return [...mods, key].join('+')
 }
 
-/** 分组表（对齐 GPUI shortcuts_page 的五组：常用操作/标记/识别/选择/面板） */
+/** 分组表（五组：常用操作/标记/识别/选择/面板） */
 const SHORTCUT_SECTIONS: { title: string; actions: KeymapAction[] }[] = [
   {
     title: '常用操作',
@@ -236,7 +236,7 @@ function shortcutRows(action: KeymapAction): string[] {
   return BINDINGS.filter((b) => b.action === action).map(formatKeys)
 }
 
-// ── 关于页：应用名 / 版本 / 技术栈 / 便携布局说明（对齐 GPUI about_page + 便携说明） ──
+// ── 关于页：应用名 / 版本 / 技术栈 / 便携布局说明 ──
 
 const appVersion = ref('0.1.0')
 const tauriVersion = ref('2')
@@ -283,7 +283,7 @@ async function openConfigFile() {
 
 <template>
   <Dialog :open="open" @update:open="open = $event">
-    <!-- 自绘头栏（× 按钮放标题右侧，对齐 GPUI settings-card 头栏），故关闭默认 × 按钮 -->
+    <!-- 自绘头栏（× 按钮放标题右侧），故关闭默认 × 按钮 -->
     <DialogContent
       :show-close-button="false"
       class="flex h-[40rem] max-w-3xl flex-col gap-0 p-0 sm:max-w-[53.75rem]"
@@ -298,7 +298,7 @@ async function openConfigFile() {
         </DialogClose>
       </div>
 
-      <!-- 主体：左 tab 导航 + 右内容（对齐 GPUI Settings 页布局；标准 Tabs 组件） -->
+      <!-- 主体：左 tab 导航 + 右内容（标准 Tabs 组件） -->
       <Tabs v-model="activeTab" class="flex min-h-0 flex-1">
         <TabsList class="flex w-44 shrink-0 flex-col items-stretch justify-start gap-1 rounded-none border-r bg-transparent p-2">
           <TabsTrigger

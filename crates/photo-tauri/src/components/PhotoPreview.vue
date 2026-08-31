@@ -18,7 +18,7 @@ import { pickBestFrame } from '@/lib/bestFrame'
 import type { BBox } from '@/lib/bindings'
 import type { Vec2 } from '@/lib/previewMath'
 
-/** 图片区内边距（对齐 GPUI window_pos_to_image_norm 的 p_4 = 16px） */
+/** 图片区内边距：16px */
 const PAD = 16
 
 const captures = useCapturesStore()
@@ -95,7 +95,7 @@ function onStackWheel(e: WheelEvent) {
   el.scrollLeft += e.deltaY !== 0 ? e.deltaY : e.deltaX
 }
 
-/** 显示尺寸与定位（渲染公式 = previewMath，与 GPUI 一致） */
+/** 显示尺寸与定位（渲染公式 = previewMath，一致） */
 const disp = computed<Vec2>(() => preview.displaySize(containerSize.value, natural.value))
 const origin = computed<Vec2>(() => preview.imageOrigin(disp.value, containerSize.value))
 
@@ -184,7 +184,7 @@ const focusOverlay = computed(() => {
 /** 对焦点十字臂长（px，固定值，不随缩放） */
 const FOCUS_CROSS_ARM = 14
 
-// ── 鸟眼角标（对齐 GPUI eye_corner_marks）───────────────────────────
+// ── 鸟眼角标 ───────────────────────────────────────
 // eyeBbox 仅完整识别结果（getRecognition）有，CaptureMeta 摘要不带，须单独拉取；
 // 加载时机对齐 InfoPanel：切图 / 识别状态回填 / recognize:done 摘要后重拉。
 /** 当前图鸟眼框（归一化 0–1 相对全图；无识别/无眼为 null） */
@@ -244,7 +244,7 @@ const eyeMarks = computed(() => {
   if (!b || !preview.bboxVisible) return null
   const r = normRectToPx(b)
   const thick = 2
-  // 臂长随框大小缩放，夹紧 [4, 14] px（对齐 GPUI eye_corner_marks）
+  // 臂长随框大小缩放，夹紧 [4, 14] px
   const arm = Math.max(4, Math.min(14, Math.min(r.width, r.height) * 0.35))
   const bar = (x: number, y: number, w: number, h: number) => ({
     left: r.left + x,
@@ -472,7 +472,7 @@ function zoomStep(direction: 1 | -1) {
 }
 
 /**
- * 图片区右键菜单（预览变体，对齐 GPUI capture_menu(in_preview=true)）：
+ * 图片区右键菜单（预览变体）：
  * 首项返回网格 + 缩放组（以容器中心为锚点，同工具条 zoomStep）。
  */
 function onImageContextMenu(e: MouseEvent) {
@@ -565,7 +565,7 @@ function onImageContextMenu(e: MouseEvent) {
         }"
       />
 
-      <!-- 鸟眼角标（对齐 GPUI eye_corner_marks）：眼框四角 L 形标记，不遮挡眼睛本体；随 V 键 bboxVisible 开关 -->
+      <!-- 鸟眼角标：眼框四角 L 形标记，不遮挡眼睛本体；随 V 键 bboxVisible 开关 -->
       <div v-if="eyeMarks" class="pointer-events-none absolute inset-0">
         <div
           v-for="(m, i) in eyeMarks"

@@ -117,12 +117,12 @@ export const useFilterStore = defineStore('filter', {
     setColorLabel(colorLabel: ColorLabel | null) {
       this.criteria.colorLabel = colorLabel
     },
-    /** 旗标精确匹配；设置具体旗标时取消「未标记」互斥态（对齐 GPUI 芯片语义） */
+    /** 旗标精确匹配；设置具体旗标时取消「未标记」互斥态（芯片语义） */
     setFlagFilter(flagFilter: Flag | null) {
       this.criteria.flagFilter = flagFilter
       this.criteria.unflaggedFilter = false
     },
-    /** 未标记筛选；开启时清空具体旗标（互斥，对齐 GPUI 芯片语义） */
+    /** 未标记筛选；开启时清空具体旗标（互斥，芯片语义） */
     setUnflagged(unflagged: boolean) {
       this.criteria.unflaggedFilter = unflagged
       if (unflagged) this.criteria.flagFilter = null
@@ -149,12 +149,12 @@ export const useFilterStore = defineStore('filter', {
     setKeywordFilter(keywordFilter: string[]) {
       this.criteria.keywordFilter = [...keywordFilter]
     },
-    /** 排序方式/方向（对齐 GPUI：改排序不清筛选） */
+    /** 排序方式/方向（改排序不清筛选） */
     setSort(sortBy: SortBy, sortDirection: SortDirection) {
       this.sortBy = sortBy
       this.sortDirection = sortDirection
     },
-    /** 清除全部筛选条件（保留排序，对齐 GPUI clear_filters） */
+    /** 清除全部筛选条件（保留排序） */
     clearAll() {
       this.criteria = defaultFilterCriteria()
     },

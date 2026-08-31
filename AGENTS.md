@@ -8,7 +8,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 - `photo-engine` — 文件操作引擎（scanner, ops, exif, thumbnail, convert, folder_db, batch_ops, global_db 跨文件夹鸟种索引, histogram 直方图/剪切, import SD 卡导入, template 命名模板, undo 批量撤销日志），**全同步**
 - `photo-recognize` — 鸟类识别管线（YOLO 检测 → 鸟种分类 → 名录映射 → 鸟眼锐度，ONNX Runtime），**全同步**
 - `photo-config` — 配置读写（TOML + SQLite 持久化）
-- `photo-tauri` — **Tauri v2 前端**（Vue 3 + Pinia + Tailwind v4 + shadcn-vue），2026-08 自 GPUI 版迁移完成（Q2 决策：并行新 app，parity 验收后删除旧 GPUI `photo-tool-app`；GPUI 版源码已删除，git 历史 `545921a` 前可查）
+- `photo-tauri` — **Tauri v2 前端**（Vue 3 + Pinia + Tailwind v4 + shadcn-vue），2026-08 迁移完成
 
 核心工作流：**目录扫描（单层/递归可配）→ 浏览/标记/筛选 → 鸟类识别（单张/批量）→ 文件操作（删除/移动/复制/重命名，可撤销）→ 格式转换/导出预设**；另含 **SD 卡导入、全局鸟种统计、连拍对比、幻灯片**。迁移决策与功能清单记录于 git 历史 `docs/tauri-migration-plan.md`（Phase 1–3 完成，Phase 4 打包/验收收尾中）。
 
@@ -179,7 +179,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 - **IPC 契约**：`src/lib/ipc.ts` 是唯一 IPC 入口（typed invoke + 事件订阅 + `ptimgUrl`）；`src/lib/bindings.ts` 由 specta 生成（勿手改，追加段除外）
 - **事件驱动刷新**：scan:progress/scan:done/capture:enriched/thumb:ready/recognize:progress/recognize:done/batch:progress/batch:done；前端 store `init()` 统一接线
 - **图片 URL**：`ptimgUrl(kind, path, v?)`，kind ∈ `'thumb' | 'master' | 'full'`；`thumb:ready` 后 `thumbVersions[path]` 递增强制 `?v=` 刷新
-- **主题**：GPUI theme.rs 移植双主题（亮 = gray-100 画布/白面板/blue-500 accent；暗 = 交易终端近黑 #0b0d11/cyan accent）CSS 变量（style.css），另有 element 层语义色与 .section-header/.panel-card/.dir-card-active 共享类；默认 Light（对齐 GPUI AppConfig::default）；`html.dark` class 由 config store 按 `getAppConfig().theme` 应用；html 基准字号 14px（紧凑密度）
+- **主题**：双主题（亮 = gray-100 画布/白面板/blue-500 accent；暗 = 交易终端近黑 #0b0d11/cyan accent）CSS 变量（style.css），另有 element 层语义色与 .section-header/.panel-card/.dir-card-active 共享类；默认 Light；`html.dark` class 由 config store 按 `getAppConfig().theme` 应用；html 基准字号 14px（紧凑密度）
 
 ### 关键模式
 
@@ -210,7 +210,7 @@ async mutateOptimistic(paths, apply, remote) {
 ### Keybinding 层
 
 - `src/keymap.ts`：`installKeymap(handlers)` 全局安装；按键 → action 名解析（焦点上下文隔离 + 修饰键精确匹配），App.vue 提供 `KeymapHandlers` 表接真实 store 调用；`BINDINGS` 导出供快捷键参考页
-- 键位全集对齐 GPUI layout.rs：1-5/0 评分、6-9 色标、P/X/U 旗标、B/Ctrl+B/Ctrl+Shift+B 识别、V 检测框、G 视图切换、方向键/Home/End、Delete 删除、Ctrl+A/D 选择、Esc（设置 > 批量识别取消 > 对比退出 > 框选清除 > 预览退出）、F5 重扫、Ctrl+[ / Ctrl+] 面板开关；**前端新增**：C 对比模式（多选 2–4 张 / 连拍组前 4 张，对比内 ←/→ 移聚焦格、1-5 评分聚焦格、Esc/G 退出）、T 鸟种统计、S 幻灯片（空格暂停）、O 剪切警告叠加（预览）、Ctrl+Z 撤销批量操作（移动/复制/重命名）、Ctrl+6 紫色标签、Q/E 堆叠内切换成员（网格）、=/- 缩放（预览/对比）
+- 键位全集：1-5/0 评分、6-9 色标、P/X/U 旗标、B/Ctrl+B/Ctrl+Shift+B 识别、V 检测框、G 视图切换、方向键/Home/End、Delete 删除、Ctrl+A/D 选择、Esc（设置 > 批量识别取消 > 对比退出 > 框选清除 > 预览退出）、F5 重扫、Ctrl+[ / Ctrl+] 面板开关；**前端新增**：C 对比模式（多选 2–4 张 / 连拍组前 4 张，对比内 ←/→ 移聚焦格、1-5 评分聚焦格、Esc/G 退出）、T 鸟种统计、S 幻灯片（空格暂停）、O 剪切警告叠加（预览）、Ctrl+Z 撤销批量操作（移动/复制/重命名）、Ctrl+6 紫色标签、Q/E 堆叠内切换成员（网格）、=/- 缩放（预览/对比）
 - 排序含 EyeSharpness（眼锐度，T0 批次）：CaptureMeta.eye_sharpness 经 enrich_with_recognition 填充，比较器在 filter.ts（None 排最前）；连拍分组纯前端（lib/burst.ts，相邻 dateTaken ≤2s 成组，仅登记 size≥2）
 
 ### 调试：真机 WebView2 DOM 验证
@@ -225,5 +225,5 @@ kimi_cu 的 UIA 树看不到 WebView2 DOM；无 vision 模型时用 CDP：
 ## 近期修复记录
 
 - **2026-08-12 堆叠显示改造（A+E）**：网格堆叠从「×N 徽标循环点击」改为 cell 底部成员缩略图带（点击直达激活+选中，长连拍横向滚动），新增语义徽标区分同画面多格式（Copy 蓝）/连拍多帧（Layers 橙），连拍徽标仅在单成员组显示避免重复；新增 Q/E 组内切换激活成员（网格态）；修复 `openPath` 同目录早退导致目录为空（mock 无后端自动扫描/启动自愈后扫描失败）时无法重扫的死路
-- **2026-08-10 迁移 wave 1-3**：Tauri v2 迁移（计划见 git 历史 `docs/tauri-migration-plan.md`）；GPUI 版删除；specta 真实绑定导出（bin 绕开 harness 0xc0000139）；启动自愈（自动恢复目录事件早于挂载）；主题默认 Light；mock 层 batchOpExecute detached `this` 修复
-- 历史（GPUI 版时代，引擎层均保留）：copy_recognitions_to 索引错位修复、批量操作 ADR 0006 重构（筛选驱动）、全分辨率 DCT 降采样、RAW 母版缓存、Worker panic 兜底（前端 store 状态机继承）、OTHER 格式徽标、调整功能 ADR 0007（无 crop）
+- **2026-08-10 迁移 wave 1-3**：Tauri v2 迁移（计划见 git 历史 `docs/tauri-migration-plan.md`）；specta 真实绑定导出（bin 绕开 harness 0xc0000139）；启动自愈（自动恢复目录事件早于挂载）；主题默认 Light；mock 层 batchOpExecute detached `this` 修复
+- 历史（旧版时代，引擎层均保留）：copy_recognitions_to 索引错位修复、批量操作 ADR 0006 重构（筛选驱动）、全分辨率 DCT 降采样、RAW 母版缓存、Worker panic 兜底（前端 store 状态机继承）、OTHER 格式徽标、调整功能 ADR 0007（无 crop）

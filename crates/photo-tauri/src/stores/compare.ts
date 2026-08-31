@@ -2,7 +2,7 @@
 // 同步语义：缩放系数相对各图自身 fit（zoom=1 → 适应，×1.25 步进，沿用 preview store
 // 语义）；平移以「占显示尺寸比例」归一化存储——不同图片按各自 fit × 自然尺寸 × 同一
 // zoom 得到各自显示尺寸，再乘同一归一化 pan 得各自像素平移，比例天然同步。
-// 数学（fitScale/panAfterCursorZoom/clampPanAxis）复用 previewMath，与 GPUI 一致。
+// 数学（fitScale/panAfterCursorZoom/clampPanAxis）复用 previewMath，一致。
 import { defineStore } from 'pinia'
 import type { CaptureMeta } from '@/lib/bindings'
 import type { Vec2 } from '@/lib/previewMath'

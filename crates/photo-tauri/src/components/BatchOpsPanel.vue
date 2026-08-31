@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 批量操作面板（移植 GPUI ui/batch_ops.rs render_batch_ops_section）：
+// 批量操作面板（与引擎 batch_ops 交互）：
 //   操作对象 = 当前筛选结果（无筛选时三按钮禁用 + 黄色警告，防全文件误操作）；
 //   操作类型三选（移动/复制/删除）；「同步同名文件」开关 + 格式多选 chips；
 //   移动/复制一步式选目标目录（ui/dialog，拒绝「目标 = 源目录」toast）；
@@ -48,7 +48,7 @@ const showDeleteConfirm = ref(false)
 
 // ── 派生状态 ─────────────────────────────────────────
 
-/** 操作类型三选（label 对齐 GPUI action_label） */
+/** 操作类型三选（label action_label） */
 const OP_OPTIONS: { op: BatchOpType; label: string }[] = [
   { op: 'Move', label: '移动' },
   { op: 'Copy', label: '复制' },
@@ -60,7 +60,7 @@ const count = computed(() => filter.filteredIndices.length)
 const empty = computed(() => count.value === 0)
 /** 无筛选条件时拒绝执行：操作集 = 全部文件，防误操作 */
 const noFilter = computed(() => !filter.hasActiveFilters)
-/** 三按钮禁用：空筛选结果 / 无筛选条件 / 执行中（对齐 GPUI disabled = empty || no_filter） */
+/** 三按钮禁用：空筛选结果 / 无筛选条件 / 执行中（disabled = empty || no_filter） */
 const opsDisabled = computed(() => empty.value || noFilter.value || batch.running)
 
 /** 移动/复制需要目标目录 */
@@ -179,7 +179,7 @@ watch(
       </template>
     </div>
 
-    <!-- 操作类型三选（对齐 GPUI 移动/复制/删除三按钮，无筛选禁用） -->
+    <!-- 操作类型三选（移动/复制/删除三按钮，无筛选禁用） -->
     <div class="flex gap-1">
       <Button
         v-for="o in OP_OPTIONS"

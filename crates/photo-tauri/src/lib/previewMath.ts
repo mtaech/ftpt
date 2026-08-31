@@ -1,5 +1,5 @@
-// 预览缩放/平移纯函数：自 crates/photo-tool-app/src/state/preview_math.rs 逐行移植，
-// 与 GPUI 渲染公式严格一致，改动需双向同步。
+// 预览缩放/平移纯函数：
+// 渲染公式严格一致，改动需双向同步。
 
 export type Vec2 = [number, number]
 
@@ -40,7 +40,7 @@ export function panAfterCursorZoom(
 
 /**
  * 适应缩放系数（fit）：图片完整放入容器，小图不放大（上限 1.0）。
- * 与 Rust window_pos_to_image_norm 的 scale 计算一致。
+ * 与 Rust 侧 scale 计算一致。
  */
 export function fitScale(
   containerW: number,

@@ -1,4 +1,4 @@
-// 筛选/排序纯逻辑移植（GPUI 版 crates/photo-tool-app/src/state/filter.rs 的
+// 筛选/排序纯逻辑移植（自 Rust 端 filter.rs 的
 // apply_filter_and_sort 过滤段 + domain.rs FilterCriteria::has_active_filter）。
 // 前端持有全量 CaptureMeta，筛选/排序零 IPC（迁移计划 Q5）。
 // 判定边界与 Rust 版逐一对应，测试见 filter.test.ts。
@@ -262,8 +262,7 @@ export function defaultFilterCriteria(): FilterCriteria {
 
 /**
  * 是否有任一筛选条件生效（无筛选时操作集 = 全部文件，批量文件操作应拒绝执行）。
- * 采用 domain.rs FilterCriteria::has_active_filter（含 colorLabel）——
- * GPUI 的 RootView::has_active_filters 漏了 color_label 字段，这里按权威实现。
+ * 采用 domain.rs FilterCriteria::has_active_filter（含 colorLabel 字段，按权威实现）。
  */
 export function hasActiveFilters(criteria: FilterCriteria): boolean {
   return (

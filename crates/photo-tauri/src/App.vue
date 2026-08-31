@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 根布局（对齐 GPUI layout.rs 三栏结构）：
+// 根布局（三栏结构）：
 //   顶栏（全宽）→ 主区 h_flex：左 rail | 左栏(LeftPanel：目录/批量双 tab) | 内容区 | 右栏(InfoPanel) | 右 rail
 //   → 底部 StatusBar。
 // 左/右栏可独立隐藏（Ctrl+[ / Ctrl+] 切换，右栏初始值跟随后端配置），
@@ -77,11 +77,11 @@ const mapView = useMapViewStore()
 const quality = useQualityStore()
 const duplicates = useDuplicatesStore()
 
-/** 左栏可见（对齐 GPUI sidebar_visible，运行时状态，默认可见） */
+/** 左栏可见（运行时状态，默认可见） */
 const sidebarVisible = ref(true)
 /** 左栏当前 tab（'dir' 目录 / 'batch' 批量；顶栏「批量操作」按钮切换） */
 const leftTab = ref('dir')
-/** 右栏可见（对齐 GPUI config.right_panel_visible，初始值跟随后端配置，默认可见） */
+/** 右栏可见（初始值跟随后端配置，默认可见） */
 const rightPanelVisible = ref(true)
 /** 设置弹窗开关（顶栏齿轮按钮打开、Esc 分支关闭，v-model 传给 SettingsModal） */
 const settingsOpen = ref(false)
@@ -286,7 +286,7 @@ const keymapHandlers: KeymapHandlers = {
     if (preview.isSlideshow) preview.toggleSlideshowPlay()
   },
   // 导航：方向键在堆叠组间 ±1 移动（堆叠后网格显示项 = 堆叠组，方向键移动到目标组
-  // 激活成员；对齐 GPUI 扁平移动的「网格可见项逐个走」语义）；Home/End 跳首尾组。
+  // 激活成员；扁平移动的「网格可见项逐个走」语义）；Home/End 跳首尾组。
   // 对比模式下 ←/→ 改为移动聚焦格（网格选择不可见，移动无意义）；
   // 幻灯片模式下 ←/→ 改为切张（切换即重置计时，见 SlideshowView watch）。
   prev: () => {
@@ -317,7 +317,7 @@ const keymapHandlers: KeymapHandlers = {
     if (preview.isPreview || preview.isCompare || preview.isSlideshow || preview.isStats) return
     if (selection.selectedIndex !== null) selection.cycleStackFrom(selection.selectedIndex, 1)
   },
-  // 删除：Delete 单张/所选进回收站，无确认（对齐 GPUI layout.rs Delete 键）。
+  // 删除：Delete 单张/所选进回收站，无确认。
   // 后端 delete_captures 删除后 emit scan:done，captures store 自动 reload，这里不重复拉取；
   // 对比模式下删聚焦格后对比集失效，直接退出对比。
   delete: () => {
@@ -332,14 +332,14 @@ const keymapHandlers: KeymapHandlers = {
   // 选择：Ctrl+A 全选 / Ctrl+D 取消选择
   selectAll: () => selection.selectAll(),
   deselectAll: () => selection.clear(),
-  // Esc：优先级对齐 GPUI layout.rs escape 分支（settings > 批量识别取消 > 对比退出 > 框选清除 > 预览退出）
+  // Esc：优先级 escape 分支（settings > 批量识别取消 > 对比退出 > 框选清除 > 预览退出）
   closePreview: () => {
     // 地图 overlay 分支：全屏浮层置顶，Esc 优先关地图（再次按 M 同效果）
     if (mapView.isOpen) {
       mapView.close()
       return
     }
-    // settings 分支：设置弹窗打开时 Esc 优先关闭（对齐 GPUI：settings > 批量识别取消 > 框选清除 > 预览退出）
+    // settings 分支：设置弹窗打开时 Esc 优先关闭（settings > 批量识别取消 > 框选清除 > 预览退出）
     if (settingsOpen.value) {
       settingsOpen.value = false
       return
@@ -370,7 +370,7 @@ const keymapHandlers: KeymapHandlers = {
   },
   // F5 重扫当前目录（无目录时 no-op）
   refresh: () => void captures.rescan(),
-  // 面板开关：Ctrl+[ / Ctrl+]（对齐 GPUI Action::ToggleLeftPanel / ToggleRightPanel）
+  // 面板开关：Ctrl+[ / Ctrl+]（切换左/右栏可见）
   toggleLeftPanel,
   toggleRightPanel,
   // 地图：M 进入/退出全屏 GPS 地图 overlay（无事件订阅，纯本地开关）
@@ -402,7 +402,7 @@ onMounted(async () => {
   recognition.init()
   quality.init()
   disposeKeymap = installKeymap(keymapHandlers)
-  // 主题/字体/右栏可见性跟随后端配置（config store 集中处理 DOM 应用；GPUI 版默认 Light）
+  // 主题/字体/右栏可见性跟随后端配置（config store 集中处理 DOM 应用；默认 Light）
   await configStore.load()
   rightPanelVisible.value = configStore.config.rightPanelVisible ?? true
 })
@@ -494,7 +494,7 @@ async function locateFromMap(item: CaptureMeta) {
     <!-- 自绘标题栏（decorations:false 后接管原生标题栏；居顶，全宽，拖拽 + 三窗口按钮） -->
     <TitleBar />
 
-    <!-- 顶栏（全宽，对齐 GPUI toolbar 置顶，高 44px）：左 = 操作按钮 + 目录名/计数；中央 = 网格/预览下划线 tab；右 = 扫描进度/刷新/设置 -->
+    <!-- 顶栏（全宽，置顶，高 44px）：左 = 操作按钮 + 目录名/计数；中央 = 网格/预览下划线 tab；右 = 扫描进度/刷新/设置 -->
     <header class="flex h-11 shrink-0 items-center gap-2 border-b bg-card px-2">
       <!-- 左组：目录名（粗体截断，max-w 11rem）+ 计数（muted）。
            打开/导入/批量操作已收归左栏文件树/批量 tab 操作区 -->
@@ -508,7 +508,7 @@ async function locateFromMap(item: CaptureMeta) {
         </span>
       </div>
 
-      <!-- 中央：网格/预览 下划线 tab（GPUI toolbar 签名元素；点击走 G 键同款视图切换路径） -->
+      <!-- 中央：网格/预览 下划线 tab（签名元素；点击走 G 键同款视图切换路径） -->
       <div class="flex h-full shrink-0 items-stretch" role="tablist" aria-label="视图切换">
         <button
           type="button"
@@ -569,7 +569,7 @@ async function locateFromMap(item: CaptureMeta) {
           />
         </div>
       </div>
-        <!-- 刷新目录（对齐 GPUI toolbar refresh-btn；无目录/扫描中禁用，F5 同义） -->
+        <!-- 刷新目录（无目录/扫描中禁用，F5 同义） -->
         <Button
           size="sm"
           variant="outline"
@@ -581,7 +581,7 @@ async function locateFromMap(item: CaptureMeta) {
           <RefreshCwIcon data-icon="inline-start" :class="{ 'animate-spin': captures.scanning }" />
           刷新目录
         </Button>
-        <!-- 设置入口（齿轮按钮，吸最右；对齐 GPUI rail 设置按钮） -->
+        <!-- 设置入口（齿轮按钮，吸最右） -->
         <Button
           size="icon-sm"
           variant="ghost"
@@ -594,9 +594,9 @@ async function locateFromMap(item: CaptureMeta) {
       </div>
     </header>
 
-    <!-- 主区三栏：左 rail | 左栏 | 内容区 | 右栏 | 右 rail（对齐 GPUI layout.rs h_resizable） -->
+    <!-- 主区三栏：左 rail | 左栏 | 内容区 | 右栏 | 右 rail（可拖拽调宽） -->
     <div class="flex min-h-0 flex-1">
-      <!-- 左 Activity Rail：48px 竖排图标（对齐 GPUI RAIL_WIDTH；打开目录在左栏文件树 tab 操作区，不重复）。
+      <!-- 左 Activity Rail：48px 竖排图标（打开目录在左栏文件树 tab 操作区，不重复）。
            首按钮 = 左栏显隐（与右 rail 面板切换同款交互/样式） -->
       <nav class="flex w-12 shrink-0 flex-col items-center gap-1 border-r bg-card pt-2" aria-label="左侧活动栏">
         <Button
@@ -638,7 +638,7 @@ async function locateFromMap(item: CaptureMeta) {
 
       <!-- 内容区：筛选栏（仅 grid + 有目录）+ 空态/网格/预览 -->
       <main class="flex min-w-0 flex-1 flex-col">
-        <!-- 筛选栏：仅网格视图 + 已有目录时显示（对齐 GPUI layout.rs 条件） -->
+        <!-- 筛选栏：仅网格视图 + 已有目录时显示 -->
         <FilterBar v-if="captures.directory && preview.isGrid" />
 
         <div class="min-h-0 flex-1">
@@ -646,7 +646,7 @@ async function locateFromMap(item: CaptureMeta) {
                统计/空态优先于其余视图；无目录时非统计视图一律落到空态。
                注意 v-if 链必须连续，否则 v-else 的 PhotoGrid 会在统计态下误渲染 -->
           <StatsView v-if="preview.isStats" />
-          <!-- 空态：无目录时（对齐 GPUI layout.rs empty state；统计态优先于空态） -->
+          <!-- 空态：无目录时（统计态优先于空态） -->
           <div
             v-else-if="!captures.directory"
             class="flex h-full flex-col items-center justify-center gap-3"
@@ -670,7 +670,7 @@ async function locateFromMap(item: CaptureMeta) {
         v-show="rightPanelVisible"
       />
 
-      <!-- 右 Activity Rail：48px（对齐 GPUI right_rail.rs） -->
+      <!-- 右 Activity Rail：48px -->
       <RightRail :visible="rightPanelVisible" @toggle="toggleRightPanel" />
     </div>
 

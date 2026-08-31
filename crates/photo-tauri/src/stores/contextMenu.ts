@@ -1,6 +1,6 @@
 // 全局右键菜单状态：显隐 + 定位 + 菜单项。菜单项为自绘数据（含动作闭包），
-// 由触发组件（网格/预览/侧栏）构建，ContextMenu.vue 渲染（对齐 GPUI
-// gpui_component PopupMenu 的 menu/menu_with_check/submenu/separator 形态）。
+// 由触发组件（网格/预览/侧栏）构建，ContextMenu.vue 渲染（
+// PopupMenu 的 menu/menu_with_check/submenu/separator 形态）。
 import { defineStore } from 'pinia'
 import type { CaptureMeta, ColorLabel, Flag } from '@/lib/bindings'
 import { deleteCaptures } from '@/lib/ipc'
@@ -11,7 +11,7 @@ import { usePreviewStore } from './preview'
 import { useRecognitionStore } from './recognition'
 import { useExportStore } from './export'
 
-/** 菜单项（GPUI menu 变体映射） */
+/** 菜单项（menu 变体映射） */
 export type ContextMenuItem =
   | { kind: 'item'; label: string; action: () => void; danger?: boolean }
   | { kind: 'check'; label: string; checked: boolean; action: () => void }
@@ -43,9 +43,9 @@ export const useContextMenuStore = defineStore('contextMenu', {
   },
 })
 
-// ── 图片右键菜单构建（对齐 GPUI ui/context_menu.rs capture_menu） ───────────
+// ── 图片右键菜单构建 ───────────────────────────────
 
-/** 评分子菜单：无评分 + 1–5 星（勾选当前值，对齐 GPUI Rate0..Rate5） */
+/** 评分子菜单：无评分 + 1–5 星（勾选当前值，Rate0..Rate5） */
 function ratingSubmenu(meta: CaptureMeta, paths: string[]): ContextMenuItem[] {
   const captures = useCapturesStore()
   const ratings: [string, number][] = [
@@ -64,7 +64,7 @@ function ratingSubmenu(meta: CaptureMeta, paths: string[]): ContextMenuItem[] {
   }))
 }
 
-/** 颜色标签子菜单：无标签 + 红黄绿蓝紫（勾选当前值，对齐 GPUI LabelNone..LabelPurple） */
+/** 颜色标签子菜单：无标签 + 红黄绿蓝紫（勾选当前值，LabelNone..LabelPurple） */
 function colorLabelSubmenu(meta: CaptureMeta, paths: string[]): ContextMenuItem[] {
   const captures = useCapturesStore()
   const colors: [string, ColorLabel][] = [
@@ -83,7 +83,7 @@ function colorLabelSubmenu(meta: CaptureMeta, paths: string[]): ContextMenuItem[
   }))
 }
 
-/** 标记子菜单：无标记 / 留用 / 排除（勾选当前值，对齐 GPUI FlagNone/FlagPick/FlagReject） */
+/** 标记子菜单：无标记 / 留用 / 排除（勾选当前值，FlagNone/FlagPick/FlagReject） */
 function flagSubmenu(meta: CaptureMeta, paths: string[]): ContextMenuItem[] {
   const captures = useCapturesStore()
   const flags: [string, Flag | null][] = [
@@ -99,7 +99,7 @@ function flagSubmenu(meta: CaptureMeta, paths: string[]): ContextMenuItem[] {
   }))
 }
 
-/** 删除所选（回收站，无确认，对齐 GPUI Delete 键语义）：删除后全量重拉 + 清空选中 */
+/** 删除所选（回收站，无确认）：删除后全量重拉 + 清空选中 */
 async function deleteSelected(paths: string[]) {
   if (paths.length === 0) return
   const captures = useCapturesStore()
@@ -113,7 +113,7 @@ async function deleteSelected(paths: string[]) {
 }
 
 /**
- * 图片右键菜单（网格 cell 与预览图片共用，差异对齐 GPUI）：
+ * 图片右键菜单（网格 cell 与预览图片共用，差异）：
  * - 网格变体：首项「在预览中打开」，无缩放组；
  * - 预览变体：首项「返回网格」，含放大/缩小/适应窗口/实际像素缩放组；
  * - 多选时识别项文案变为「识别所选照片 (N张)」。

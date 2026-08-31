@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// 筛选栏：折叠态摘要行（横向滚动）+ 展开态条件 chips/控件（移植 GPUI
-// filter_bar.rs）。仅 grid 视图显示（预览态自行隐藏，对齐 GPUI 行为）。
+// 筛选栏：折叠态摘要行（横向滚动）+ 展开态条件 chips/控件。
+// 仅 grid 视图显示（预览态自行隐藏）。
 // 有激活筛选时对应 chips 高亮，清除全部按钮显隐由 hasActiveFilters 驱动。
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { CheckIcon, ChevronDownIcon, ChevronRightIcon, XIcon } from '@lucide/vue'
@@ -36,13 +36,13 @@ function onQualityTrigger() {
   void quality.trigger(paths)
 }
 
-/** 折叠态（对齐 GPUI filter_bar_expanded；默认折叠） */
+/** 折叠态：默认折叠 */
 const expanded = ref(false)
 
 // ── 网格密度「每行图片数」：由 config.gridColumns 驱动（2-5 下拉，即时重排），
 // 原缩略图尺寸滑块已移除（thumbnailSize 保留为缩略图生成尺寸，不再驱动列数）──
 
-// ── 格式 chips（固定集合，对齐 GPUI render_format_filter；RAW 用 { Raw: 'RAW' }）──
+// ── 格式 chips（固定集合；RAW 用 { Raw: 'RAW' }）──
 const FORMAT_CHIPS: { label: string; value: ImageFormat }[] = [
   { label: 'JPEG', value: 'Jpeg' },
   { label: 'PNG', value: 'Png' },
@@ -72,7 +72,7 @@ const FLAG_CHIPS: { label: string; flag: Flag | null; unflagged: boolean }[] = [
   { label: '未标记', flag: null, unflagged: true },
 ]
 
-// ── 识别状态 chips（label 对齐 GPUI recognition_filter_label）──
+// ── 识别状态 chips（label 与后端一致）──
 const RECOGNITION_CHIPS: { label: string; value: RecognitionFilter }[] = [
   { label: '全部', value: 'All' },
   { label: '已识别', value: 'Confirmed' },
@@ -81,7 +81,7 @@ const RECOGNITION_CHIPS: { label: string; value: RecognitionFilter }[] = [
   { label: '未识别', value: 'NotRecognized' },
 ]
 
-// ── 色标 chips（Q9 补齐的筛选入口，GPUI 无此控件）──
+// ── 色标 chips（Q9 补齐的筛选入口，无此控件）──
 const COLOR_CHIPS: { label: string; value: ColorLabel }[] = [
   { label: '红', value: 'Red' },
   { label: '黄', value: 'Yellow' },
@@ -90,7 +90,7 @@ const COLOR_CHIPS: { label: string; value: ColorLabel }[] = [
   { label: '紫', value: 'Purple' },
 ]
 
-// ── 排序（label 对齐 GPUI sort_by_label）──
+// ── 排序（label 与后端一致）──
 const SORT_OPTIONS: { value: SortBy; label: string }[] = [
   { value: 'FileName', label: '文件名' },
   { value: 'DateTaken', label: '拍摄日期' },
@@ -101,7 +101,7 @@ const SORT_OPTIONS: { value: SortBy; label: string }[] = [
   { value: 'Quality', label: '技术分' },
 ]
 
-/** 格式相等（null = 未激活；Raw 需比较载荷，对齐 GPUI format_chip 的 active 判断） */
+/** 格式相等（null = 未激活；Raw 需比较载荷作 active 判断） */
 function sameFormat(a: ImageFormat | null, b: ImageFormat): boolean {
   if (a === null) return false
   if (typeof a === 'object' && typeof b === 'object') return a.Raw === b.Raw
@@ -115,7 +115,7 @@ function chipCls(active: boolean): string {
     : 'border-border text-muted-foreground hover:border-muted-foreground/40 hover:text-foreground'
 }
 
-// ── 折叠态摘要 chips（× 可单独清除，对齐 GPUI summary_chip）──
+// ── 折叠态摘要 chips（× 可单独清除）──
 const summaryChips = computed(() => {
   const chips: { key: string; label: string; clear: () => void }[] = []
   const c = filter.criteria
@@ -367,7 +367,7 @@ watch(
 
       <div class="min-w-3 flex-1" />
 
-      <!-- 排序下拉 + 方向（折叠态常驻，对齐 GPUI 折叠行） -->
+      <!-- 排序下拉 + 方向（折叠态常驻） -->
       <select
         class="h-7 shrink-0 rounded-sm border border-border bg-card px-1.5 text-xs text-foreground outline-none"
         :value="filter.sortBy"
@@ -412,7 +412,7 @@ watch(
       </label>
     </div>
 
-    <!-- 展开态：条件组（对齐 GPUI expanded_form） -->
+    <!-- 展开态：条件组 -->
     <div
       v-if="expanded"
       class="flex flex-wrap items-start gap-x-4 gap-y-2 border-t border-border px-2 py-1.5"

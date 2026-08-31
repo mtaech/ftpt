@@ -1,6 +1,6 @@
-//! ftpt 的 Tauri v2 后端（GPUI → Tauri 迁移 Phase 1 底座）。
+//! ftpt 的 Tauri v2 后端（Tauri 迁移 Phase 1 底座）。
 //!
-//! 编排语义照抄 GPUI 版 `state/scan.rs` / `state/metadata.rs`：
+//! 编排语义照抄  `state/scan.rs` / `state/metadata.rs`：
 //! - 扫描闭包只查缓存（快返）；EXIF 增量提取 + 缩略图预生成放后台任务
 //! - 评分/旗标/色标先写 folder_db xmp_meta 真相表，再更新内存，失败由前端重拉回滚
 //! - 图像经 `ptimg://` 自定义协议流式 serve，不走 IPC base64
@@ -403,7 +403,7 @@ impl AppState {
     }
 }
 
-/// 保存配置（失败仅记日志，与 GPUI 版 save_config 语义一致）
+/// 保存配置（失败仅记日志）
 fn save_config(state: &AppState) {
     if let Err(e) = photo_config::save_config(&state.config_path, &state.config) {
         tracing::error!("保存配置失败: {e}");
@@ -420,7 +420,7 @@ fn save_config(state: &AppState) {
 #[specta::specta]
 async fn pick_directory(app: AppHandle) -> Option<String> {
     // blocking_pick_folder 在 async command 的工作线程上调用（Windows 安全；
-    // GPUI 版的 rfd RefCell 重入问题在 Tauri 下不存在）
+    // rfd RefCell 重入问题在 Tauri 下不存在）
     app.dialog()
         .file()
         .blocking_pick_folder()
@@ -506,7 +506,7 @@ async fn scan_impl(app: AppHandle, dir: PathBuf) -> u32 {
             if state.lock().expect("AppState 锁中毒").scan_generation != generation {
                 return 0;
             }
-            // 哨兵复位：前端按 scan:done 结束加载态（GPUI 的 worker panic 兜底由前端状态机承担）
+            // 哨兵复位：前端按 scan:done 结束加载态（worker panic 兜底由前端状态机承担）
             let _ = app.emit(
                 "scan:done",
                 ScanDone {
@@ -549,7 +549,7 @@ fn set_rating(
     })
 }
 
-/// 设置 Pick/Reject 旗标（None = 清除，对应 GPUI 的 U 键）
+/// 设置 Pick/Reject 旗标（None = 清除，对应 U 键）
 #[tauri::command]
 #[specta::specta]
 fn set_flag(
@@ -681,7 +681,7 @@ fn build_capture_from_meta(meta: &CaptureMeta) -> photo_domain::Capture {
     }
 }
 
-/// 构建识别器（模型目录 = exe 同级 models/ + data/pica_ref.db，照 GPUI build_recognizer）
+/// 构建识别器（模型目录 = exe 同级 models/ + data/pica_ref.db，build_recognizer）
 fn build_recognizer() -> Result<photo_recognize::Recognizer, String> {
     let exe_dir = std::env::current_exe()
         .map_err(|e| format!("获取 exe 路径失败: {e}"))?
@@ -849,13 +849,13 @@ fn list_bird_species() -> Result<Vec<String>, String> {
     let catalog_db = exe_dir.join("data").join("pica_ref.db");
     let list = photo_recognize::list_all_species(&catalog_db).map_err(|e| format!("加载名录失败: {e}"))?;
     let mut names: Vec<String> = list.into_iter().map(|b| b.cn_name).collect();
-    // 与 GPUI ensure_correction_species 一致：双保险再按 Rust 字节序排一次
+    // 名录排序一致：双保险再按 Rust 字节序排一次
     names.sort();
     Ok(names)
 }
 
 /// 批量识别：spawn_blocking 后台逐张识别（多线程分块，每线程独占 Recognizer——
-/// Session 需 &mut，不可跨线程共享，照 GPUI spawn_batch_recognize）。
+/// Session 需 &mut，不可跨线程共享）。
 /// 逐张 emit recognize:progress；每张完成后写 folder_db recognition 表（rel 键与代际
 /// 无关，工作线程直接 upsert）+ 锁 AppState 更新内存 CaptureMeta（带代际校验）；
 /// 全部完成 emit recognize:done 并复位进行中标记。单张失败不中止整体（failed 计数）。
@@ -863,7 +863,7 @@ fn list_bird_species() -> Result<Vec<String>, String> {
 #[tauri::command]
 #[specta::specta]
 async fn recognize_captures(app: AppHandle, paths: Vec<String>) -> Result<(), String> {
-    // 守卫：已有识别任务进行中时拒绝并发（与 GPUI recognize_selected 一致）
+    // 守卫：已有识别任务进行中时拒绝并发（与批量识别一致）
     let (cancel, folder_db, thumb_cache, thread_count, dir, generation, global_db, dir_str, use_focus, task_token) = {
         let st = app.state::<Mutex<AppState>>();
         let mut st = st.lock().expect("AppState 锁中毒");
@@ -925,7 +925,7 @@ async fn recognize_captures(app: AppHandle, paths: Vec<String>) -> Result<(), St
     let app_work = app.clone();
     let generation_work = generation;
     tauri::async_runtime::spawn_blocking(move || {
-        // 共享进度：工作线程逐张写原子计数 + 互斥当前文件（照 GPUI BatchProgress）
+        // 共享进度：工作线程逐张写原子计数 + 互斥当前文件（BatchProgress）
         #[derive(Default)]
         struct Shared {
             done: std::sync::atomic::AtomicUsize,
@@ -1153,7 +1153,7 @@ fn batch_op_preview(
 }
 
 /// 批量操作执行：spawn_blocking 后台执行（engine::batch_ops::execute），逐文件 emit
-/// batch:progress，完成 emit batch:done。语义照 GPUI run_batch_op：
+/// batch:progress，完成 emit batch:done。语义：
 /// 1. 重扫源目录取完整 Capture（ops 层需要 source_files 全列表操作兄弟文件）
 /// 2. 操作集 = 全量；formats 非空按主文件格式过滤；sync_siblings 时 expand_with_siblings
 /// 3. Delete 走 ops::delete_capture（回收站）；Move/Delete 后的重扫由前端负责
@@ -1598,7 +1598,7 @@ fn get_adjustments(state: State<'_, Mutex<AppState>>, path: String) -> AdjustPar
 /// 设置调整参数：持久化到 folder_db adjustments 表 + emit thumb:ready 触发预览刷新
 /// （前端按事件失效缓存并以新 ?v= 重载 master 预览；ptimg handler 侧带调整参数时
 /// 经引擎渲染输出）。防御 DB 坏值：Q15 定点饱和要求 saturation∈[-100,100]，
-/// 钳制后再入内存（同 GPUI refresh_adjustments_sync）。
+/// 钳制后再入内存（adjustments 同步）。
 #[tauri::command]
 #[specta::specta]
 fn set_adjustments(
@@ -1894,7 +1894,7 @@ fn correct_recognition(
     Ok(())
 }
 
-/// 单张/多张删除（回收站，无确认——对齐 GPUI Delete 键语义）。
+/// 单张/多张删除（回收站，无确认）。
 /// 与 batch_op_execute 的 Delete 分支同编排：重扫源目录取完整 Capture（ops 层
 /// delete_capture 需要 source_files 才能操作同名兄弟文件）→ 逐个删除 → 仅删除
 /// 成功者同步 sidecar 三表（识别/调整/评分色标旗标行，防孤儿行）→ 从内存
@@ -1989,7 +1989,7 @@ async fn delete_captures(
                 tracing::error!("全局鸟种索引删除行失败: {e}");
             }
         }
-        // 4. 从内存 captures 移除 + 重索引（照 GPUI delete_selected）
+        // 4. 从内存 captures 移除 + 重索引（删除所选）
         {
             let st = app_work.state::<Mutex<AppState>>();
             let mut st = st.lock().expect("AppState 锁中毒");
@@ -2022,7 +2022,7 @@ async fn delete_captures(
 
 /// 导出调整结果（全尺寸烘焙，ADR 0007）：engine adjustments 渲染 + convert 保存
 /// JPEG。命名 `{stem}_adjusted.jpg`，已存在自动追加 `_1/_2` 序号（不覆盖原文件，
-/// 照 GPUI export_adjusted）。output_dir = None 时导出到源文件所在目录。RAW
+/// export_adjusted）。output_dir = None 时导出到源文件所在目录。RAW
 /// 全尺寸 16-bit 解码约 3-5s，spawn_blocking 异步执行。返回最终输出路径（前端
 /// 状态栏展示）。导出是一次性烘焙，不改动内存 CaptureMeta（无对应字段）。
 #[tauri::command]
@@ -2074,7 +2074,7 @@ async fn export_adjusted(
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "photo".to_string());
-        // 防覆盖：已存在则追加 _1/_2 序号（照 GPUI export_adjusted）
+        // 防覆盖：已存在则追加 _1/_2 序号（export_adjusted）
         let mut out = out_dir.join(format!("{stem}_adjusted.jpg"));
         let mut n = 1;
         while out.exists() {
@@ -2106,7 +2106,7 @@ fn list_system_fonts() -> Result<Vec<String>, String> {
 /// 更新并保存配置（设置面板）：钳制校验后替换 st.config + save_config。
 /// 钳制范围：leftPanelWidth 200–480、rightPanelWidth 200–480、
 /// recognitionThreadCount 1–4、thumbnailSize 64–1024（网格 cell = 尺寸 + 56，
-/// 越界值钳到合理区间，与 GPUI 设置语义一致，非法输入不报错）。
+/// 越界值钳到合理区间，设置语义一致，非法输入不报错）。
 #[tauri::command]
 #[specta::specta]
 fn set_app_config(state: State<'_, Mutex<AppState>>, config: AppConfig) -> Result<(), String> {
@@ -3266,7 +3266,7 @@ async fn do_scan(
 }
 
 /// 后台 EXIF 增量提取 + 缩略图预生成（一次任务两产物，照 spawn_enrich_tasks 移植）。
-/// 窗口化并发（4 张一组）替代 GPUI 的逐张 worker spawn；逐张 emit thumb:ready，
+/// 窗口化并发（4 张一组）替代 的逐张 worker spawn；逐张 emit thumb:ready，
 /// 完成后 emit capture:enriched（携带需重排的索引，前端据此重排）。
 async fn enrich_and_pregen_thumbs(app: AppHandle, generation: u64) {
     // 快照：需要提取 EXIF 的 capture（扫描闭包只查缓存，未命中的字段为空）
@@ -3499,7 +3499,7 @@ fn ptimg_handler(
             }
         }
 
-        // 常规图 webview 可直接解码的格式：master/full 直通原文件字节（零重编码，与 GPUI 一致）；
+        // 常规图 webview 可直接解码的格式：master/full 直通原文件字节（零重编码，一致）；
         // tiff/heif webview 解不了，走缓存重编码为 JPEG
         let passthrough_mime = match format {
             ImageFormat::Jpeg => Some("image/jpeg"),

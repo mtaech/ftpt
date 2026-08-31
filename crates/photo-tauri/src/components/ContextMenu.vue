@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 自绘全局右键菜单（对齐 GPUI gpui_component PopupMenu）：
+// 自绘全局右键菜单（PopupMenu）：
 // store 驱动显隐与定位，Teleport 到 body 保证 z 覆盖预览工具栏等浮层；
 // 点击外部 / Esc 关闭，hover 展开子菜单，菜单弹出时按自身尺寸钳制到视口内。
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
@@ -53,7 +53,7 @@ function onKeydown(e: KeyboardEvent) {
 onMounted(() => window.addEventListener('keydown', onKeydown))
 onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
-/** 点击菜单项：执行动作后关闭（对齐 GPUI 菜单项点击即分发；子菜单/分隔线不可点） */
+/** 点击菜单项：执行动作后关闭（菜单项点击即分发；子菜单/分隔线不可点） */
 function run(item: ContextMenuItem) {
   if (item.kind === 'sep' || item.kind === 'submenu') return
   item.action()

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 左栏容器：文件树 / 文件操作 双 tab（GPUI sidebar 药丸式 tab，激活 = element-hover 底）。
+// 左栏容器：文件树 / 文件操作 双 tab（sidebar 药丸式 tab，激活 = element-hover 底）。
 // 拖宽把手与宽度持久化（localStorage，200–480）自 Sidebar 上移至此，两个 tab 共享宽度。
 import { computed } from 'vue'
 import { useStorage } from '@vueuse/core'
@@ -9,7 +9,7 @@ import BatchOpsPanel from '@/components/BatchOpsPanel.vue'
 /** 当前 tab：'dir' 目录 | 'batch' 批量（App 顶栏「批量操作」按钮可切到 batch） */
 const tab = defineModel<string>({ default: 'dir' })
 
-// ── 宽度：可拖拽，localStorage 持久化，范围 200–480（对齐 GPUI 左栏 size_range）──
+// ── 宽度：可拖拽，localStorage 持久化，范围 200–480（左栏 size_range）──
 const width = useStorage('ftpt.leftPanelWidth', 220)
 const clampedWidth = computed(() => Math.min(480, Math.max(200, width.value)))
 /** 拖拽起始状态（指针捕获在把手上，move/up 仍持续收到） */
@@ -35,7 +35,7 @@ function onHandleUp() {}
     class="relative flex h-full shrink-0 flex-col border-r bg-card"
     :style="{ width: `${clampedWidth}px` }"
   >
-    <!-- tab 头：文件树 / 文件操作（GPUI sidebar 药丸式 tab：激活 = bg-element-hover） -->
+    <!-- tab 头：文件树 / 文件操作（sidebar 药丸式 tab：激活 = bg-element-hover） -->
     <div class="flex shrink-0 gap-1 border-b border-border p-1.5">
       <button
         type="button"

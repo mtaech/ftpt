@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 右侧信息面板（对齐 GPUI info_panel.rs）：顶部双 tab「信息/调整」+ 卡片化滚动内容。
+// 右侧信息面板：顶部双 tab「信息/调整」+ 卡片化滚动内容。
 // 信息 tab：Hero/EXIF/评分/色标/旗标/识别六卡片，数据来自选中拍摄（selection.selected，
 // 主选中项优先锚点）；调整 tab：曝光/对比度/饱和度 slider，拖动 350ms 去抖持久化。
 // 宽度自持：左缘把手可拖拽，localStorage('ftpt.rightPanelWidth') 持久化，钳制 200–480。
@@ -53,7 +53,7 @@ const config = useConfigStore()
 const focused = computed<CaptureMeta | null>(() => selection.selected)
 const focusedPath = computed<string | null>(() => focused.value?.primaryPath ?? null)
 
-// ── 宽度：可拖拽，localStorage 持久化，范围 200–480（对齐 GPUI 右栏 size_range）──
+// ── 宽度：可拖拽，localStorage 持久化，范围 200–480（右栏 size_range）──
 const width = useStorage('ftpt.rightPanelWidth', 200)
 const clampedWidth = computed(() => Math.min(480, Math.max(200, width.value)))
 let dragStartX = 0
@@ -80,7 +80,7 @@ function cameraText(c: CaptureMeta): string {
   return c.cameraMake ?? c.cameraModel ?? '—'
 }
 
-/** EXIF 缺失值占位（对齐 GPUI 的 em dash） */
+/** EXIF 缺失值占位（对齐 em dash） */
 const DASH = '—'
 
 /** 拍摄信息卡：默认只展示曝光四格，器材/日期/位置等行折叠（展开状态不持久化） */
@@ -237,7 +237,7 @@ function confTextClsOf(conf: number): string {
 const confTextCls = computed(() => confTextClsOf(displayConfidence.value ?? 0))
 /** 待复核失败阶段中文提示（None 为空串，不显示） */
 const failureText = computed(() => FAILURE_STAGE_TEXT[fullRecognition.value?.failureStage ?? 'None'] ?? '')
-/** 待复核最接近候选（candidates 中第一个 bird 非空项，对齐 GPUI render_recognition_content） */
+/** 待复核最接近候选（candidates 中第一个 bird 非空项） */
 const bestCandidate = computed<{ name: string; confidence: number } | null>(() => {
   const r = fullRecognition.value
   if (!r) return null
@@ -247,7 +247,7 @@ const bestCandidate = computed<{ name: string; confidence: number } | null>(() =
   return null
 })
 
-/** 眼锐度 tooltip：评分公式（对齐 GPUI eye_sharpness_row 悬浮说明） */
+/** 眼锐度 tooltip：评分公式悬浮说明 */
 const EYE_SHARPNESS_TIP =
   '眼区域清晰度评分：0.5·ln(1+拉普拉斯方差) + 0.3·ln(1+梯度幅值均值) + 0.2·ln(1+边缘密度)；仅保证单调性，越高越锐利，权重待样片标定'
 
@@ -496,7 +496,7 @@ function onOpenMap(e: Event) {
 /** 本地调整参数（跟随焦点图；拖动实时改内存，350ms 去抖后持久化） */
 const adj = reactive<AdjustParams>({ exposure: 0, contrast: 0, saturation: 0 })
 
-/** 调整字段表（驱动模板 v-for，消除三份重复行）：范围/步进对齐 GPUI adjust 语义 */
+/** 调整字段表（驱动模板 v-for，消除三份重复行）：范围/步进对齐 adjust 语义 */
 const ADJ_FIELDS = [
   { key: 'exposure', label: '曝光', min: -2, max: 2, step: 0.05 },
   { key: 'contrast', label: '对比度', min: -100, max: 100, step: 1 },
@@ -547,7 +547,7 @@ function persistNow() {
   void setAdjustments(path, { exposure: adj.exposure, contrast: adj.contrast, saturation: adj.saturation })
 }
 
-/** 拖动/键盘调整：立即更新本地值，350ms 去抖后持久化（对齐 GPUI 去抖语义） */
+/** 拖动/键盘调整：立即更新本地值，350ms 去抖后持久化（去抖语义） */
 function onSliderInput(key: keyof AdjustParams, e: Event) {
   adj[key] = Number((e.target as HTMLInputElement).value)
   if (persistTimer) clearTimeout(persistTimer)
@@ -580,7 +580,7 @@ onUnmounted(() => {
   if (persistTimer) clearTimeout(persistTimer)
 })
 
-/** 数值文案（对齐 GPUI adjust_slider_row）：曝光 ±0.00 EV，对比度/饱和度 ±N */
+/** 数值文案：曝光 ±0.00 EV，对比度/饱和度 ±N */
 function fmtExposure(v: number): string {
   return `${v >= 0 ? '+' : ''}${v.toFixed(2)} EV`
 }
@@ -668,7 +668,7 @@ function fmtSigned(v: number): string {
                 {{ formatName(focused) }}
               </div>
             </div>
-            <!-- 鸟种中文名（存在时显示，对齐 GPUI hero） -->
+            <!-- 鸟种中文名（存在时显示，hero） -->
             <div v-if="focused.birdName" class="truncate text-[0.8125rem] font-medium text-primary">
               {{ focused.birdName }}
             </div>
@@ -805,7 +805,7 @@ function fmtSigned(v: number): string {
               识别此照片
             </Button>
           </div>
-          <!-- 识别进行中（对齐 GPUI busy 分支：隐藏结果内容） -->
+          <!-- 识别进行中（busy 分支：隐藏结果内容） -->
           <div v-else-if="recognition.running" class="flex flex-col gap-2">
             <div class="flex items-center gap-1.5 text-xs text-primary">
               <ScanSearchIcon class="size-3.5 animate-pulse" />

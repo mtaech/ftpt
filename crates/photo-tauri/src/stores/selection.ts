@@ -1,4 +1,4 @@
-// 选中态：多选 + 锚点语义（Phase 2 自 GPUI metadata.rs select 移植）。
+// 选中态：多选 + 锚点语义（Phase 2 自后端 metadata 语义移植）。
 // 兼容旧单选形态：selectedIndex / selected / selectedPaths / select / move / clear。
 import { defineStore } from 'pinia'
 import type { CaptureMeta } from '@/lib/bindings'

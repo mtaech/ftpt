@@ -26,7 +26,7 @@ const paths = computed(() => recognition.correctionPaths)
 const fullRecognition = ref<Recognition | null>(null)
 /** 名录搜索结果（防抖后 search_catalog 返回） */
 const results = ref<CatalogEntry[]>([])
-/** 高频鸟种「常用」快捷项（本机使用频次降序，空搜索词时显示；移植自旧修正下拉） */
+/** 高频鸟种「常用」快捷项（本机使用频次降序，空搜索词时显示；沿用原修正下拉） */
 const frequent = ref<string[]>([])
 /** 常用项反查进行中（chip 点击后按中文名精确反查名录，防连点） */
 const frequentLoading = ref<string | null>(null)
@@ -237,7 +237,7 @@ onUnmounted(() => {
           <p v-else class="text-xs text-muted-foreground">无模型候选（可从下方名录搜索选择）</p>
         </div>
 
-        <!-- 常用：高频鸟种快捷项（空搜索词时显示；本机使用频次降序，移植自旧修正下拉） -->
+        <!-- 常用：高频鸟种快捷项（空搜索词时显示；本机使用频次降序，沿用原修正下拉） -->
         <div v-if="frequent.length > 0 && !query.trim()" class="space-y-1.5">
           <label class="text-sm font-medium">常用</label>
           <div class="flex flex-wrap gap-1.5">

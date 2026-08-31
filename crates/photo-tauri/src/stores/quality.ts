@@ -63,7 +63,7 @@ export const useQualityStore = defineStore('quality', {
       try {
         await computeQualityScores(paths)
       } catch (e) {
-        // 命令调用失败（非事件流）：复位哨兵，等效 GPUI worker 异常兜底
+        // 命令调用失败（非事件流）：复位哨兵，等效 worker 异常兜底
         this.running = false
         this.progress = null
         console.error('技术质量评分启动失败', e)

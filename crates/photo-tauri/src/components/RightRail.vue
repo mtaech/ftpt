@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 右侧 Activity Rail：48px 宽，与左侧 rail 对称（对齐 GPUI right_rail.rs）。
+// 右侧 Activity Rail：48px 宽，与左侧 rail 对称。
 // 按钮：右侧信息面板切换（统计视图已上移到顶栏 网格/预览/统计 tab）。
 import { PanelRightIcon, PanelRightOpenIcon } from '@lucide/vue'
 import { Button } from '@/components/ui/button'

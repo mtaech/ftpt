@@ -31,7 +31,7 @@ const currentFileName = computed(() => {
   return p.split(/[\\/]/).filter(Boolean).pop() ?? p
 })
 
-/** 完成摘要文案：确认必显，待复核/无鸟/失败非零才追加（对齐 GPUI 批量完成 toast） */
+/** 完成摘要文案：确认必显，待复核/无鸟/失败非零才追加（批量完成 toast） */
 const summaryText = computed(() => {
   const s = recognition.summary
   if (!s) return ''
@@ -42,7 +42,7 @@ const summaryText = computed(() => {
   return `识别完成：${parts.join(' · ')}`
 })
 
-/** 摘要展示开关：summary 到来显示，SUMMARY_MS 后隐藏并清空 store（GPUI toast 语义） */
+/** 摘要展示开关：summary 到来显示，SUMMARY_MS 后隐藏并清空 store（toast 语义） */
 const SUMMARY_MS = 4000
 const showSummary = ref(false)
 let summaryTimer: number | undefined
@@ -99,7 +99,7 @@ watch(
       </span>
     </div>
 
-    <!-- 中段：项数 + 选中数（等宽字体，对齐 GPUI status_bar 计数区） -->
+    <!-- 中段：项数 + 选中数（等宽字体，status_bar 计数区） -->
     <div class="flex shrink-0 items-center gap-1 tabular-nums">
       <span>{{ captures.count }}</span>
       <span class="text-muted-foreground/70">项</span>

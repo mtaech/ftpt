@@ -12,7 +12,7 @@ const NOTICE_MS = 3500
 
 export const useRecognitionStore = defineStore('recognition', {
   state: () => ({
-    /** 识别任务进行中（单张/批量共用，对齐 GPUI recognizing_single + batch_recognizing 守卫） */
+    /** 识别任务进行中（单张/批量共用，recognizing_single + batch_recognizing 守卫） */
     running: false,
     /** 最近一次识别进度（done/total/当前文件名） */
     progress: null as RecognizeProgressPayload | null,
@@ -62,7 +62,7 @@ export const useRecognitionStore = defineStore('recognition', {
 
     /**
      * 批量识别指定路径（单张/多选/全部共用入口）。
-     * 进行中拒绝并发（对齐 GPUI recognize_single 守卫 + 后端并发守卫）。
+     * 进行中拒绝并发（recognize_single 守卫 + 后端并发守卫）。
      */
     async recognize(paths: string[]) {
       if (this.running || paths.length === 0) return
@@ -72,7 +72,7 @@ export const useRecognitionStore = defineStore('recognition', {
       try {
         await recognizeCaptures(paths)
       } catch (e) {
-        // 命令调用失败（非事件流）：复位哨兵，等效 GPUI worker 异常兜底
+        // 命令调用失败（非事件流）：复位哨兵，等效 worker 异常兜底
         this.running = false
         this.progress = null
         console.error('识别启动失败', e)
