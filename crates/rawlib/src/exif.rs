@@ -8,6 +8,21 @@ use std::path::Path;
 
 use crate::ffi;
 
+/// LibRaw GPS DMS + Ref → 带符号的 (度, 分, 秒)。
+///
+/// LibRaw 的 latitude/longitude 是**无符号**度分秒，南北/东西半球由
+/// latref/longref（'N'/'S'/'E'/'W'）表达。符号只施加在度分量上，
+/// 并保留 -0.0（0°xx′S/W 必须判负，故直接对度取负而不是比较符号）。
+fn signed_dms(v: [f32; 3], ref_char: u8) -> (f64, f64, f64) {
+    let negative = matches!(ref_char, b'S' | b's' | b'W' | b'w');
+    let deg = if negative {
+        -(v[0] as f64)
+    } else {
+        v[0] as f64
+    };
+    (deg, v[1] as f64, v[2] as f64)
+}
+
 /// EXIF data container
 #[derive(Debug, Clone, Default)]
 pub struct ExifData {
@@ -235,20 +250,12 @@ pub fn extract_exif<P: AsRef<Path>>(path: P) -> Result<ExifData, ExifError> {
         // GPS
         let gps = &img.parsed_gps;
         let gps_latitude = if gps.gpsparsed != 0 {
-            Some((
-                gps.latitude[0] as f64,
-                gps.latitude[1] as f64,
-                gps.latitude[2] as f64,
-            ))
+            Some(signed_dms(gps.latitude, gps.latref))
         } else {
             None
         };
         let gps_longitude = if gps.gpsparsed != 0 {
-            Some((
-                gps.longitude[0] as f64,
-                gps.longitude[1] as f64,
-                gps.longitude[2] as f64,
-            ))
+            Some(signed_dms(gps.longitude, gps.longref))
         } else {
             None
         };
@@ -422,6 +429,19 @@ mod tests {
         assert!(exif.make.is_none());
         assert!(exif.model.is_none());
         assert!(!exif.has_gps());
+    }
+
+    #[test]
+    fn test_signed_dms_applies_ref_and_keeps_negative_zero() {
+        // 北纬/东经：正号
+        assert_eq!(signed_dms([39.0, 54.0, 0.0], b'N'), (39.0, 54.0, 0.0));
+        assert_eq!(signed_dms([116.0, 23.0, 0.0], b'E'), (116.0, 23.0, 0.0));
+        // 南纬/西经：度分量取负
+        assert_eq!(signed_dms([33.0, 52.0, 0.0], b'S'), (-33.0, 52.0, 0.0));
+        assert_eq!(signed_dms([116.0, 23.0, 0.0], b'W'), (-116.0, 23.0, 0.0));
+        // 0°xx′S/W：必须保留 -0.0（后续 dms_to_decimal 用 is_sign_negative 判号）
+        let (deg, _, _) = signed_dms([0.0, 30.0, 0.0], b'S');
+        assert!(deg.is_sign_negative(), "0°30′S 的度分量应为 -0.0");
     }
 
     #[test]

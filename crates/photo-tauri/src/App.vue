@@ -4,7 +4,7 @@
 //   → 底部 StatusBar。
 // 左/右栏可独立隐藏（Ctrl+[ / Ctrl+] 切换，右栏初始值跟随后端配置），
 // 拖宽把手在各面板内部（宽度 localStorage 持久化，范围 200–480）。全局快捷键见 keymap.ts。
-import { nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { nextTick, onErrorCaptured, onMounted, onUnmounted, ref } from 'vue'
 import {
   FolderOpenIcon,
   GalleryVerticalEndIcon,
@@ -58,6 +58,7 @@ import { useImportDialogStore } from '@/stores/importDialog'
 import { useMapViewStore } from '@/stores/mapView'
 import { useQualityStore } from '@/stores/quality'
 import { installKeymap, type KeymapHandlers } from '@/keymap'
+import { installFrontendLogging, logToFile } from '@/lib/log'
 import { zoomHost } from '@/lib/zoomHost'
 import { nonBestPaths } from '@/lib/bestFrame'
 import type { CaptureMeta } from '@/lib/bindings'
@@ -415,6 +416,8 @@ async function refreshMaximized() {
 }
 
 onMounted(async () => {
+  // 前端日志：console/未捕获异常转发到后端统一日志文件（幂等；mock 模式 no-op）
+  installFrontendLogging()
   captures.init()
   recognition.init()
   quality.init()
@@ -431,6 +434,13 @@ onMounted(async () => {
     // 权限缺失静默
   }
 })
+// Vue 组件内错误（render/lifecycle/event handler）→ 后端日志。
+// 返回 false = 阻止错误继续向上传播（已记录，无需 Vue 默认再抛一次）
+onErrorCaptured((err, _instance, info) => {
+  logToFile('error', String(err) + ' (' + info + ')', 'vue:errorCaptured')
+  return false
+})
+
 onUnmounted(() => {
   disposeKeymap?.()
   disposeKeymap = null

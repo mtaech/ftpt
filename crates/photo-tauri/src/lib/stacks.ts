@@ -84,30 +84,47 @@ export function groupSingles(indices: number[]): StackGroup[] {
   return indices.map((i) => ({ key: `i-${i}`, members: [i], active: i }))
 }
 
+/** 主路径的父目录（正/反斜杠都识别；无分隔符返回空串） */
+function dirOf(path: string): string {
+  const m = /^(.*)[\\/][^\\/]*$/.exec(path)
+  return m ? m[1] : ''
+}
+
 /**
- * 同文件名堆叠：显示序下标按 baseName 分组（组位置 = 组内首个成员位置，
+ * 同文件名堆叠：显示序下标按 (父目录, baseName) 分组（组位置 = 组内首个成员位置，
  * 同 stem 因筛选/排序被打散时聚合到最先出现的位置）。
  * 单成员组也返回；无 baseName 的项跳过（防御，正常扫描不产生）。
+ * 跨目录同 stem（递归扫描下 2024-01-01/IMG_1 与 2024-02-01/IMG_1）不是「同画面」，
+ * 必须分成两组：此时组 key 用 `stem@dir` 区分，单目录场景保持原 key = stem。
  */
 export function groupStacks(indices: number[], items: CaptureMeta[]): StackGroup[] {
-  const byStem = new Map<string, number[]>()
-  const stems: string[] = []
+  const buckets = new Map<string, { dir: string; stem: string; members: number[] }>()
+  const order: string[] = []
+  const dirsPerStem = new Map<string, Set<string>>()
   for (const i of indices) {
-    const stem = items[i]?.baseName ?? ''
+    const item = items[i]
+    const stem = item?.baseName ?? ''
     if (stem === '') continue
-    const list = byStem.get(stem)
-    if (list) {
-      list.push(i)
+    const dir = dirOf(item.primaryPath)
+    const bucketKey = `${dir}\u0000${stem}`
+    const bucket = buckets.get(bucketKey)
+    if (bucket) {
+      bucket.members.push(i)
     } else {
-      byStem.set(stem, [i])
-      stems.push(stem)
+      buckets.set(bucketKey, { dir, stem, members: [i] })
+      order.push(bucketKey)
     }
+    const dirs = dirsPerStem.get(stem)
+    if (dirs) dirs.add(dir)
+    else dirsPerStem.set(stem, new Set([dir]))
   }
   const posOf = new Map<number, number>()
   indices.forEach((i, p) => posOf.set(i, p))
   const groups: { g: StackGroup; pos: number }[] = []
-  for (const stem of stems) {
-    groups.push(buildGroup(stem, byStem.get(stem)!, items, posOf))
+  for (const bucketKey of order) {
+    const b = buckets.get(bucketKey)!
+    const key = (dirsPerStem.get(b.stem)?.size ?? 0) > 1 ? `${b.stem}@${b.dir}` : b.stem
+    groups.push(buildGroup(key, b.members, items, posOf))
   }
   groups.sort((a, b) => a.pos - b.pos)
   return groups.map((x) => x.g)

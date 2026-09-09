@@ -75,9 +75,19 @@ export const useSelectionStore = defineStore('selection', {
         this.select(i)
         return
       }
-      const lo = Math.min(anchor, i)
-      const hi = Math.max(anchor, i)
-      this.selectedIndices = Array.from({ length: hi - lo + 1 }, (_, k) => lo + k)
+      // 以显示序（筛选结果）的区间为准：直接填 captures 下标区间会把中间被筛掉的
+      // 隐藏项一起选中，之后 Delete/标记会误伤它们
+      const order = useFilterStore().filteredIndices
+      const pa = order.indexOf(anchor)
+      const pi = order.indexOf(i)
+      if (pa < 0 || pi < 0) {
+        // 锚点或目标不在当前筛选结果中（筛选变化后的残留锚点）→ 退化为单选
+        this.select(i)
+        return
+      }
+      const lo = Math.min(pa, pi)
+      const hi = Math.max(pa, pi)
+      this.selectedIndices = order.slice(lo, hi + 1)
       // anchor 不变（契约：范围基准保持）
     },
     isSelected(i: number): boolean {
@@ -98,12 +108,14 @@ export const useSelectionStore = defineStore('selection', {
       this.selectedIndices = [clamped]
       this.anchorIndex = clamped
     },
-    /** Ctrl+A：全选（有序）；anchor 置首项（后续 Shift+单击范围语义明确） */
+    /** Ctrl+A：全选**当前筛选结果**（有序）；anchor 置首项（Shift 范围语义明确） */
     selectAll() {
-      const n = useCapturesStore().items.length
-      if (n === 0) return
-      this.selectedIndices = Array.from({ length: n }, (_, k) => k)
-      this.anchorIndex = 0
+      // 必须用 filteredIndices：筛选后 captures 下标不连续，用 items.length 会把
+      // 被筛掉（网格不可见）的照片也选进来，Delete/标记会误伤它们
+      const order = useFilterStore().filteredIndices
+      if (order.length === 0) return
+      this.selectedIndices = [...order]
+      this.anchorIndex = order[0]
     },
     clear() {
       this.selectedIndices = []

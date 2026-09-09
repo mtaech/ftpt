@@ -146,14 +146,9 @@ export const useRecognitionStore = defineStore('recognition', {
       this.correcting = true
       try {
         await correctRecognition(paths, spId, cnName, sciName)
-        const captures = useCapturesStore()
-        for (const c of captures.items) {
-          if (paths.includes(c.primaryPath)) {
-            c.birdName = cnName
-            c.birdConfidence = 100
-            c.recognitionStatus = 'Confirmed'
-          }
-        }
+        // 后端对多路径是逐文件 best-effort（部分失败仍返回 Ok），乐观全量置
+        // Confirmed 会与 folder_db 真相不一致；重拉一次以库为准
+        await useCapturesStore().reload()
         this.correctionVersion++
       } finally {
         this.correcting = false

@@ -152,7 +152,9 @@ fn detect_eye_impl(
     // 眼框边长 = 鸟框短边 × 比例（像素域构造再归一化，保证正方形）。
     let fw = full_w as f32;
     let fh = full_h as f32;
-    let bird_short = ((bird_bbox.x2 - bird_bbox.x1) * fw).min((bird_bbox.y2 - bird_bbox.y1) * fh);
+    // 反向框（x2 < x1 等）先取绝对值，否则短边为负 → half_px 保底 1.0 → 眼框退化成 2px
+    let bird_short = ((bird_bbox.x2 - bird_bbox.x1).abs() * fw)
+        .min((bird_bbox.y2 - bird_bbox.y1).abs() * fh);
     let half_px = (bird_short * EYE_BOX_SIDE_RATIO / 2.0).max(1.0);
 
     let kx = nx * fw;

@@ -25,6 +25,8 @@ use photo_engine::template::NameTemplateContext;
 use photo_engine::thumbnail::ThumbnailCache;
 use photo_engine::{exif, scanner};
 
+mod logging;
+
 // ============================================================================
 // 事件负载（经 app.emit 推送；类型经 specta 导出到 bindings.ts）
 // ============================================================================
@@ -144,10 +146,14 @@ pub struct DuplicatesDone {
 // ============================================================================
 
 /// `batch_op_preview`/`batch_op_execute` 的选项：
+/// paths = 操作对象白名单（前端筛选结果，ADR 0006 筛选驱动）；
 /// targetDir = Move/Copy 必填、Delete 忽略；syncSiblings + formats = 画面粒度同步同名兄弟
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct BatchOpOptions {
+    /// 操作对象白名单（主文件绝对路径 = 当前筛选结果）。
+    /// 空 = 空操作集（不落回全量，防「筛选后误操作整个目录」）
+    pub paths: Vec<String>,
     /// 目标目录（Move/Copy 必填；Delete 忽略）
     pub target_dir: Option<String>,
     /// 是否按同名扩展操作集（同步兄弟文件，画面粒度 ADR 0006）
@@ -370,11 +376,10 @@ pub struct AppState {
 
 impl AppState {
     fn new(config: AppConfig, config_path: PathBuf) -> Self {
-        // 全局鸟种索引库：exe 同级 data/global.db（便携约定，与 pica_ref.db 同路径）；
+        // 全局鸟种索引库：数据根目录下 data/global.db（便携约定，与 pica_ref.db 同路径）；
         // 打开失败降级 None 不阻塞启动（统计视图显示空数据），失败仅记日志
-        let global_db = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("data")))
+        let global_db = data_root()
+            .map(|root| root.join("data"))
             .and_then(|data_dir| match GlobalDb::open(&data_dir) {
                 Ok(db) => Some(db),
                 Err(e) => {
@@ -681,15 +686,57 @@ fn build_capture_from_meta(meta: &CaptureMeta) -> photo_domain::Capture {
     }
 }
 
-/// 构建识别器（模型目录 = exe 同级 models/ + data/pica_ref.db，build_recognizer）
+/// 模型/名录库/全局索引库的「数据根目录」解析（含 models/ 与 data/ 的目录）。
+///
+/// 查找顺序（对齐 exiftool 的 dev/打包双路径约定，见 AGENTS.md 已知陷阱）：
+/// 1. PHOTO_DATA_DIR 环境变量显式指定
+/// 2. exe 同级（便携打包约定：exe 旁 models/ + data/pica_ref.db）
+/// 3. 仓库根（开发回退：cargo run/tauri dev 的 exe 在 target/debug/，而模型在仓库根
+///    models/ 与 data/pica_ref.db；从 CARGO_MANIFEST_DIR / cwd 向上找同时含两者的目录）
+///
+/// 找不到返回 None（调用方各自降级：识别失败 / 名录空 / 统计不可用）。
+fn data_root() -> Option<PathBuf> {
+    // 1) 环境变量优先
+    if let Some(dir) = std::env::var_os("PHOTO_DATA_DIR").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    // 2) exe 同级（打包便携）
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        && exe_dir.join("models").exists()
+    {
+        return Some(exe_dir);
+    }
+    // 3) 开发回退：从候选起点向上找「同时含 models/ 与 data/pica_ref.db」的目录
+    let mut starts: Vec<PathBuf> = Vec::new();
+    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
+        starts.push(PathBuf::from(manifest));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        starts.push(cwd);
+    }
+    for start in starts {
+        let mut dir = Some(start);
+        for _ in 0..6 {
+            let Some(d) = dir else { break };
+            if d.join("models").exists() && d.join("data").join("pica_ref.db").exists() {
+                return Some(d);
+            }
+            dir = d.parent().map(|p| p.to_path_buf());
+        }
+    }
+    None
+}
+
+/// 构建识别器（模型目录 = 数据根目录下 models/ + data/pica_ref.db）
 fn build_recognizer() -> Result<photo_recognize::Recognizer, String> {
-    let exe_dir = std::env::current_exe()
-        .map_err(|e| format!("获取 exe 路径失败: {e}"))?
-        .parent()
-        .ok_or_else(|| "无法确定 exe 目录".to_string())?
-        .to_path_buf();
-    let models_dir = exe_dir.join("models");
-    let catalog_db = exe_dir.join("data").join("pica_ref.db");
+    let root = data_root().ok_or_else(|| {
+        "找不到识别模型/名录库（设置 PHOTO_DATA_DIR，或把 models/ data/ 放到 exe 同级）"
+            .to_string()
+    })?;
+    let models_dir = root.join("models");
+    let catalog_db = root.join("data").join("pica_ref.db");
     photo_recognize::Recognizer::new(&models_dir, &catalog_db)
         .map_err(|e| format!("加载识别模型失败: {e}"))
 }
@@ -835,22 +882,17 @@ async fn list_subdirs(path: String) -> Result<Vec<SubdirInfo>, String> {
 }
 
 /// 名录库全量鸟种（拼音排序，筛选下拉数据源）。
-/// 名录库在 exe 同级 data/pica_ref.db（与 Recognizer 同路径约定）；
+/// 名录库在数据根目录下 data/pica_ref.db（与 Recognizer 同路径约定）；
 /// photo-recognize 的 list_all_species 已按 cn_name_pinyin 排序（缺失回退中文名）。
 #[tauri::command]
 #[specta::specta]
 fn list_bird_species() -> Result<Vec<String>, String> {
-    let Some(exe_dir) = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-    else {
-        return Err("无法确定 exe 目录".to_string());
+    let Some(catalog_db) = data_root().map(|root| root.join("data").join("pica_ref.db")) else {
+        return Err("找不到名录库（设置 PHOTO_DATA_DIR，或把 data/pica_ref.db 放到 exe 同级）".to_string());
     };
-    let catalog_db = exe_dir.join("data").join("pica_ref.db");
     let list = photo_recognize::list_all_species(&catalog_db).map_err(|e| format!("加载名录失败: {e}"))?;
-    let mut names: Vec<String> = list.into_iter().map(|b| b.cn_name).collect();
-    // 名录排序一致：双保险再按 Rust 字节序排一次
-    names.sort();
+    // 保持 photo-recognize 的拼音排序：中文名按 Unicode 码点重排会破坏拼音序
+    let names: Vec<String> = list.into_iter().map(|b| b.cn_name).collect();
     Ok(names)
 }
 
@@ -922,9 +964,20 @@ async fn recognize_captures(app: AppHandle, paths: Vec<String>) -> Result<(), St
         return Err("没有可识别的照片".to_string());
     }
 
+    tracing::info!(
+        "批量识别开始: {} 张（配置线程数 {}，相机对焦点优先={}）目录={}",
+        total,
+        thread_count,
+        use_focus,
+        dir_str
+    );
+
     let app_work = app.clone();
     let generation_work = generation;
     tauri::async_runtime::spawn_blocking(move || {
+        // 批量耗时（识别完成后写日志）
+        let batch_start = std::time::Instant::now();
+
         // 共享进度：工作线程逐张写原子计数 + 互斥当前文件（BatchProgress）
         #[derive(Default)]
         struct Shared {
@@ -972,6 +1025,8 @@ async fn recognize_captures(app: AppHandle, paths: Vec<String>) -> Result<(), St
                             });
                             // 焦点优先设置：有对焦点 → 走 ROI 路径跳过 YOLO；无对焦点 → 回退全图 YOLO
                             let focus_override = if *use_focus { *focus_point } else { None };
+                            // 单张识别耗时（结果日志附带）
+                            let file_start = std::time::Instant::now();
                             let rec_result = match &mut recognizer {
                                 Ok(rec) => rec
                                     .recognize_with_thumbnail(cap, thumb_bytes.as_deref(), focus_override, None)
@@ -992,6 +1047,34 @@ async fn recognize_captures(app: AppHandle, paths: Vec<String>) -> Result<(), St
                                     }
                                 },
                                 Err(_) => shared.failed.fetch_add(1, Ordering::Relaxed),
+                            };
+                            // 逐张结果日志（状态 + 鸟种 + 置信度 0-100 + 眼锐度 + 单张耗时）
+                            match &rec_result {
+                                Ok(rec) => {
+                                    let bird = rec
+                                        .bird
+                                        .as_ref()
+                                        .map(|b| b.cn_name.as_str())
+                                        .unwrap_or("-");
+                                    let conf = rec
+                                        .confidence
+                                        .map(|c| format!("{c:.1}%"))
+                                        .unwrap_or_else(|| "-".into());
+                                    let sharp = rec
+                                        .eye_sharpness
+                                        .map(|s| format!("{s:.1}"))
+                                        .unwrap_or_else(|| "-".into());
+                                    tracing::info!(
+                                        "[识别] {}: {:?} 鸟种={} 置信度={} 眼锐度={} 用时={}ms",
+                                        path,
+                                        rec.status,
+                                        bird,
+                                        conf,
+                                        sharp,
+                                        file_start.elapsed().as_millis()
+                                    );
+                                }
+                                Err(e) => tracing::error!("[识别] {} 失败: {e}", path),
                             };
                             shared.done.fetch_add(1, Ordering::Relaxed);
                             // 逐张进度
@@ -1073,6 +1156,21 @@ async fn recognize_captures(app: AppHandle, paths: Vec<String>) -> Result<(), St
                 failed: shared.failed.load(Ordering::Relaxed) as u32,
             },
         );
+        // 批量汇总日志（含耗时；取消的批次标注非完整）
+        tracing::info!(
+            "批量识别完成: {} 张 确认={} 待复核={} 未检出={} 失败={} 用时={}ms{}",
+            total,
+            shared.confirmed.load(Ordering::Relaxed),
+            shared.needs_review.load(Ordering::Relaxed),
+            shared.unrecognized.load(Ordering::Relaxed),
+            shared.failed.load(Ordering::Relaxed),
+            batch_start.elapsed().as_millis(),
+            if cancel.load(Ordering::Relaxed) {
+                "（已取消，非完整批次）"
+            } else {
+                ""
+            }
+        );
         // 只有当前任务可以清理运行状态；旧任务不能清掉新任务的哨兵。
         let st = app_work.state::<Mutex<AppState>>();
         let mut st = st.lock().expect("AppState 锁中毒");
@@ -1101,8 +1199,8 @@ fn cancel_recognition(state: State<'_, Mutex<AppState>>) {
 }
 
 /// 批量操作干跑：只计算操作集与目标路径，不碰文件。
-/// 操作集 = 当前扫描结果全量（Tauri 端筛选在 TS 侧，后端无筛选状态，前端在无筛选
-/// 条件时自行禁用）；formats 非空时按主文件格式过滤；sync_siblings 时按引擎
+/// 操作集 = options.paths（前端筛选结果，ADR 0006 筛选驱动；空白名单 = 空操作集，
+/// 绝不落回全目录）；formats 非空时按主文件格式过滤；sync_siblings 时按引擎
 /// expand_with_siblings 把同名兄弟并入（formats 即兄弟格式白名单）。siblingCount = 扩展新增数。
 #[tauri::command]
 #[specta::specta]
@@ -1116,7 +1214,9 @@ fn batch_op_preview(
     let caps: Vec<photo_domain::Capture> =
         st.captures.iter().map(build_capture_from_meta).collect();
     let formats = formats_to_set(&options.formats);
-    let mut indices: Vec<usize> = (0..caps.len()).collect();
+    // 操作集 = 前端筛选结果（paths 白名单）；空白名单 = 空操作集
+    let allowed: HashSet<String> = options.paths.iter().cloned().collect();
+    let mut indices: Vec<usize> = photo_engine::batch_ops::select_by_paths(&caps, &allowed);
     if !formats.is_empty() {
         indices.retain(|&i| primary_format_matches(&caps[i], &formats));
     }
@@ -1155,7 +1255,8 @@ fn batch_op_preview(
 /// 批量操作执行：spawn_blocking 后台执行（engine::batch_ops::execute），逐文件 emit
 /// batch:progress，完成 emit batch:done。语义：
 /// 1. 重扫源目录取完整 Capture（ops 层需要 source_files 全列表操作兄弟文件）
-/// 2. 操作集 = 全量；formats 非空按主文件格式过滤；sync_siblings 时 expand_with_siblings
+/// 2. 操作集 = options.paths（前端筛选结果）；formats 非空按主文件格式过滤；
+///    sync_siblings 时 expand_with_siblings
 /// 3. Delete 走 ops::delete_capture（回收站）；Move/Delete 后的重扫由前端负责
 ///    （前端会重调 scan_directory，本命令不触发）
 #[tauri::command]
@@ -1188,6 +1289,7 @@ async fn batch_op_execute(
     let target_dir = options.target_dir.map(PathBuf::from);
     let formats = formats_to_set(&options.formats);
     let sync_siblings = options.sync_siblings;
+    let allowed_paths: HashSet<String> = options.paths.into_iter().collect();
     let app_work = app.clone();
 
     let (result, journal_ops) = tauri::async_runtime::spawn_blocking(
@@ -1200,8 +1302,8 @@ async fn batch_op_execute(
                 scanner::scan_directory(&dir, &FilterCriteria::default(), None)
             }
             .map_err(|e| format!("扫描失败: {e}"))?;
-            // 2. 操作集 = 全量；formats 过滤（主文件格式）；同步扩展
-            let mut indices: Vec<usize> = (0..caps.len()).collect();
+            // 2. 操作集 = 前端筛选结果（allowed_paths 白名单）；formats 过滤；同步扩展
+            let mut indices = photo_engine::batch_ops::select_by_paths(&caps, &allowed_paths);
             if !formats.is_empty() {
                 indices.retain(|&i| primary_format_matches(&caps[i], &formats));
             }
@@ -1257,13 +1359,14 @@ async fn batch_op_execute(
             let mut success = 0;
             let mut failures = Vec::new();
             for (result, path) in results.iter().zip(paths.iter()) {
-                if result.contains("失败") {
-                    failures.push(BatchOpFailure {
+                // 结构化结果分类：不再按「消息里是否含『失败』」判定（文件名本身
+                // 可能含该子串，会把成功项误判成失败）
+                match result {
+                    Ok(_) => success += 1,
+                    Err(e) => failures.push(BatchOpFailure {
                         path: path.clone(),
-                        error: result.clone(),
-                    });
-                } else {
-                    success += 1;
+                        error: e.clone(),
+                    }),
                 }
             }
             // 5. 构建撤销日志（仅 Move/Copy；Delete 走回收站不在撤销范围）：
@@ -1277,7 +1380,7 @@ async fn batch_op_execute(
                 indices
                     .iter()
                     .zip(results.iter())
-                    .filter(|(_, r)| !r.contains("失败"))
+                    .filter(|(_, r)| r.is_ok())
                     .filter_map(|(&i, _)| caps.get(i))
                     .flat_map(|c| c.source_files.iter())
                     .filter_map(move |sf| {
@@ -1310,7 +1413,7 @@ async fn batch_op_execute(
                 let rels: Vec<String> = results
                     .iter()
                     .zip(paths.iter())
-                    .filter(|(result, _)| !result.contains("失败"))
+                    .filter(|(result, _)| result.is_ok())
                     .filter_map(|(_, path)| rel_path_of(&dir, path))
                     .collect();
                 if let Err(e) = gdb.delete_rows(&dir_str, &rels) {
@@ -1330,7 +1433,7 @@ async fn batch_op_execute(
                 let entries: Vec<(String, String)> = indices
                     .iter()
                     .zip(results.iter())
-                    .filter(|(_, r)| !r.contains("失败"))
+                    .filter(|(_, r)| r.is_ok())
                     .filter_map(|(&i, _)| caps.get(i))
                     .flat_map(|c| c.source_files.iter())
                     .filter_map(|sf| {
@@ -1712,6 +1815,72 @@ async fn get_clipping_mask(state: State<'_, Mutex<AppState>>, path: String) -> R
     Ok(bytes)
 }
 
+/// 把指定照片解码为全尺寸 RGBA，写入系统剪贴板（图片形式）。
+/// - 常规可解码格式（JPEG/PNG/WebP/BMP/GIF）：直接读原文件字节，image crate 全尺寸解码——
+///   不缩放（微信/修图粘贴需原分辨率）。
+/// - RAW / TIFF / HEIF：复用缩略图缓存的全尺寸生成路径（RAW 走 full 母版，TIFF/HEIF 走
+///   u32::MAX 母版 JPEG），再解码为 RGBA。
+/// 失败（文件不存在/解码异常）返回文案。
+#[tauri::command]
+#[specta::specta]
+async fn copy_image_to_clipboard(
+    app: AppHandle,
+    state: State<'_, Mutex<AppState>>,
+    path: String,
+) -> Result<(), String> {
+    use tauri::image::Image as TauriImage;
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+
+    let (thumb_cache, file_size, format) = {
+        let st = state.lock().expect("AppState 锁中毒");
+        let format = ImageFormat::from_extension(
+            Path::new(&path).extension().and_then(|e| e.to_str()).unwrap_or(""),
+        )
+        .ok_or_else(|| "无法识别图片格式".to_string())?;
+        if format.is_other() {
+            return Err("不支持的图片格式".to_string());
+        }
+        let file_size = std::fs::metadata(&path).ok().map(|m| m.len());
+        (st.thumb_cache.clone(), file_size, format)
+    };
+
+    // 全尺寸复制：常规可解码格式直接读原文件（image crate 全解码，不缩放）；
+    // RAW/TIFF/HEIF 走缩略图缓存 full 母版（全分辨率 JPEG）再解码。
+    let bytes: Vec<u8> = match format {
+        ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::WebP
+        | ImageFormat::Bmp | ImageFormat::Gif => std::fs::read(&path)
+            .map_err(|e| format!("读取图片失败: {e}"))?,
+        _ => {
+            let cache = thumb_cache.ok_or_else(|| "缩略图缓存不可用".to_string())?;
+            let source = SourceFile { path: PathBuf::from(&path), format, file_size };
+            cache
+                .get_or_generate_full(&source, None)
+                .or_else(|_| cache.get_or_generate(&source, u32::MAX, None))
+                .map_err(|e| format!("生成复制图失败: {e}"))?
+        }
+    };
+
+    // 解码图像字节 → RGBA 像素（image crate）
+    let img = image::load_from_memory(&bytes)
+        .map_err(|e| format!("解码复制图失败: {e}"))?
+        .to_rgba8();
+    let (w, h) = (img.width(), img.height());
+    let image = TauriImage::new_owned(img.to_vec(), w, h);
+    app.clipboard()
+        .write_image(&image)
+        .map_err(|e| format!("写入剪贴板失败: {e}"))
+}
+
+/// 把指定文本写入系统剪贴板（如复制文件绝对路径；供「复制路径」菜单项使用）。
+#[tauri::command]
+#[specta::specta]
+async fn copy_text_to_clipboard(app: AppHandle, text: String) -> Result<(), String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    app.clipboard()
+        .write_text(&text)
+        .map_err(|e| format!("写入剪贴板失败: {e}"))
+}
+
 /// 读取完整配置（前端启动时据此应用主题/字体等；AppConfig 已 derive specta）
 #[tauri::command]
 #[specta::specta]
@@ -1751,17 +1920,13 @@ fn get_recognition(
 
 /// 名录搜索（SpeciesCorrectDialog 数据源）：按中文名/拼音/拉丁名子串匹配，
 /// 仅鸟纲，中文名命中优先、拼音次之、拉丁名最后（组内拼音排序）。
-/// 名录库在 exe 同级 data/pica_ref.db（与 list_bird_species 同路径约定）。
+/// 名录库在数据根目录下 data/pica_ref.db（与 list_bird_species 同路径约定）。
 #[tauri::command]
 #[specta::specta]
 fn search_catalog(query: String, limit: u32) -> Result<Vec<photo_recognize::CatalogEntry>, String> {
-    let Some(exe_dir) = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-    else {
-        return Err("无法确定 exe 目录".to_string());
+    let Some(catalog_db) = data_root().map(|root| root.join("data").join("pica_ref.db")) else {
+        return Err("找不到名录库（设置 PHOTO_DATA_DIR，或把 data/pica_ref.db 放到 exe 同级）".to_string());
     };
-    let catalog_db = exe_dir.join("data").join("pica_ref.db");
     photo_recognize::search_catalog(&catalog_db, &query, limit as usize)
         .map_err(|e| format!("名录搜索失败: {e}"))
 }
@@ -1786,14 +1951,10 @@ fn correct_recognition(
     cn_name: String,
     sci_name: String,
 ) -> Result<(), String> {
-    // 名录校验（exe 同级 data/pica_ref.db，与 search_catalog 同路径约定）
-    let Some(exe_dir) = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-    else {
-        return Err("无法确定 exe 目录".to_string());
+    // 名录校验（数据根目录下 data/pica_ref.db，与 search_catalog 同路径约定）
+    let Some(catalog_db) = data_root().map(|root| root.join("data").join("pica_ref.db")) else {
+        return Err("找不到名录库（设置 PHOTO_DATA_DIR，或把 data/pica_ref.db 放到 exe 同级）".to_string());
     };
-    let catalog_db = exe_dir.join("data").join("pica_ref.db");
     let entry = photo_recognize::get_catalog_entry(&catalog_db, sp_id)
         .map_err(|e| format!("加载名录失败: {e}"))?
         .ok_or_else(|| format!("名录中不存在鸟种 id={sp_id}"))?;
@@ -1915,6 +2076,14 @@ async fn delete_captures(
     let (dir, db, recursive, global_db) = {
         let mut st = state.lock().expect("AppState 锁中毒");
         st.scan_generation += 1;
+        // 与 scan_impl 同套失效：删除后目录内容变化，在途识别/重复检测/质量评分
+        // 的结果都不能再写回；识别还要置取消令牌让 worker 尽快退出
+        st.recognition_task.invalidate();
+        if let Some(cancel) = st.recognition_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        st.duplicates_task.invalidate();
+        st.quality_task.invalidate();
         (
             st.current_dir.clone().ok_or("尚未打开目录")?,
             st.folder_db.clone(),
@@ -2103,44 +2272,14 @@ fn list_system_fonts() -> Result<Vec<String>, String> {
     Ok(families)
 }
 
-/// 更新并保存配置（设置面板）：钳制校验后替换 st.config + save_config。
-/// 钳制范围：leftPanelWidth 200–480、rightPanelWidth 200–480、
-/// recognitionThreadCount 1–4、thumbnailSize 64–1024（网格 cell = 尺寸 + 56，
-/// 越界值钳到合理区间，设置语义一致，非法输入不报错）。
+/// 更新并保存配置（设置面板）：钳制后替换 st.config + save_config。
+/// 钳制范围集中在 photo-config 的 AppConfig::clamped（与 load_config 同一套，
+/// 手改配置文件也不会拖坏 UI）；非法输入钳到合理区间，不报错。
 #[tauri::command]
 #[specta::specta]
 fn set_app_config(state: State<'_, Mutex<AppState>>, config: AppConfig) -> Result<(), String> {
     let mut st = state.lock().expect("AppState 锁中毒");
-    st.config = AppConfig {
-        thumbnail_size: config.thumbnail_size.clamp(64, 1024),
-        favorite_dirs: config.favorite_dirs,
-        last_directory: config.last_directory,
-        recent_directories: config.recent_directories,
-        theme: config.theme,
-        // 主题 seed 色：`#RRGGBB` 字符串或 None（前端用默认蓝），无钳制直接透传
-        accent_color: config.accent_color,
-        left_panel_width: config.left_panel_width.clamp(200, 480),
-        right_panel_visible: config.right_panel_visible,
-        right_panel_width: config.right_panel_width.clamp(200, 480),
-        font_family: config.font_family,
-        recognition_thread_count: config.recognition_thread_count.clamp(1, 4),
-        // 识别鸟体定位来源：两态枚举（Yolo/Focus），无钳制直接透传（下次批量识别生效）
-        detection_source: config.detection_source,
-        // 布尔开关无钳制范围，直接透传（决定下次扫描单层/递归）
-        include_subdirectories: config.include_subdirectories,
-        // 导出预设：质量钳制 1-100、长边 0 → None（ExportPreset::clamped）
-        export_presets: config
-            .export_presets
-            .into_iter()
-            .map(photo_config::ExportPreset::clamped)
-            .collect(),
-        // 堆叠模式：三态枚举（None/ByFileName/ByTime），无钳制直接透传（网格按配置即时重排）
-        stack_mode: config.stack_mode,
-        // 网格每行图片数：钳制 2-5（下拉栏只出这 4 个选项，防手改配置越界）
-        grid_columns: config.grid_columns.clamp(2, 5),
-        // 界面缩放比例：钳制 70-200%（下拉栏 75/100/125/150/175/200 选项，25% 递增）
-        ui_scale: config.ui_scale.clamp(70, 200),
-    };
+    st.config = config.clamped();
     save_config(&st);
     Ok(())
 }
@@ -2212,6 +2351,89 @@ fn open_with_text_editor(path: &Path) -> Result<(), String> {
     }
 }
 
+/// 在系统文件管理器中打开目录/文件：
+/// Windows → explorer；macOS → open；Linux → xdg-open。
+fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        return std::process::Command::new("explorer")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("打开文件管理器失败: {e}"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return std::process::Command::new("open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("打开文件管理器失败: {e}"));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("打开文件管理器失败: {e}"));
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        Err("当前平台不支持打开文件管理器".to_string())
+    }
+}
+
+/// 当天日志文件名（与 tracing-appender 日切命名一致：ftpt.YYYY-MM-DD.log）
+fn current_log_path() -> PathBuf {
+    // 与 tracing-appender 的日切命名同源：该 crate 用 UTC（OffsetDateTime::now_utc）
+    // 生成日期段；这里若用 Local，UTC+8 的 00:00–08:00 会指向不存在的「明天」文件
+    logging::log_dir().join(format!(
+        "ftpt.{}.log",
+        chrono::Utc::now().format("%Y-%m-%d")
+    ))
+}
+
+/// 前端日志转发：console / 未捕获异常 → 同一日志管道（与 Rust tracing 同文件）。
+/// level 取值 debug|info|warn|error；context 标注来源（组件/调用点），日志 target 为
+/// frontend。命令本身不失败：日志链路故障静默，不影响前端主流程。
+#[tauri::command]
+#[specta::specta]
+fn log(level: String, message: String, context: Option<String>) {
+    let ctx = context
+        .as_deref()
+        .map(|c| format!("[{c}] "))
+        .unwrap_or_default();
+    let msg = format!("{ctx}{message}");
+    match level.as_str() {
+        "error" => tracing::error!(target: "frontend", "{msg}"),
+        "warn" => tracing::warn!(target: "frontend", "{msg}"),
+        "debug" => tracing::debug!(target: "frontend", "{msg}"),
+        _ => tracing::info!(target: "frontend", "{msg}"),
+    }
+}
+
+/// 当前日志文件路径（设置「关于」页展示；文件名含当天日期）
+#[tauri::command]
+#[specta::specta]
+fn get_log_file_path() -> String {
+    current_log_path().to_string_lossy().into_owned()
+}
+
+/// 用系统默认文本编辑器打开当前日志文件（复用 open_config_file 的打开语义）
+#[tauri::command]
+#[specta::specta]
+fn open_log_file() -> Result<(), String> {
+    open_with_text_editor(&current_log_path())
+}
+
+/// 在系统文件管理器中打开日志目录（<配置目录>/logs/）
+#[tauri::command]
+#[specta::specta]
+fn open_log_directory() -> Result<(), String> {
+    reveal_in_file_manager(logging::log_dir())
+}
+
 // ============================================================================
 // T1 批次 commands：批量重命名（模板）+ 批量导出（预设）
 // ============================================================================
@@ -2234,7 +2456,7 @@ async fn batch_rename(
     template: String,
     start_seq: u32,
 ) -> Result<BatchOpResult, String> {
-    let (dir, metas, db) = {
+    let (dir, metas, db, recursive) = {
         let st = state.lock().expect("AppState 锁中毒");
         (
             st.current_dir
@@ -2242,6 +2464,8 @@ async fn batch_rename(
                 .ok_or_else(|| "尚未打开目录".to_string())?,
             st.captures.clone(),
             st.folder_db.clone(),
+            // 重扫范围与原始扫描一致：递归模式下子目录照片也要能被找到重命名
+            st.config.include_subdirectories,
         )
     };
     let meta_by_path: HashMap<String, CaptureMeta> = metas
@@ -2252,9 +2476,13 @@ async fn batch_rename(
 
     let result = tauri::async_runtime::spawn_blocking(
         move || -> Result<(BatchOpResult, Vec<photo_engine::undo::UndoOp>), String> {
-        // 1. 重扫源目录取完整 Capture（与 batch_op_execute 一致）
-        let caps = scanner::scan_directory(&dir, &FilterCriteria::default(), None)
-            .map_err(|e| format!("扫描失败: {e}"))?;
+        // 1. 重扫源目录取完整 Capture（与 batch_op_execute 一致；深度跟随配置）
+        let caps = if recursive {
+            scanner::scan_directory_recursive(&dir, &FilterCriteria::default(), None)
+        } else {
+            scanner::scan_directory(&dir, &FilterCriteria::default(), None)
+        }
+        .map_err(|e| format!("扫描失败: {e}"))?;
         // 2. 按 paths 顺序组装 (Capture, 元数据) 对；重扫后找不到的路径跳过
         let mut ordered: Vec<photo_domain::Capture> = Vec::new();
         let mut ordered_metas: Vec<CaptureMeta> = Vec::new();
@@ -3045,9 +3273,7 @@ fn export_bird_records(
     // 学名补全：folder_db 只存中文名（bird_name），EbirdRow.species_sci 恒为空；
     // 经名录库 all_species 建 中文名→学名 映射回填（名录库缺失时降级留空，不报错）
     if rows.iter().any(|r| r.species_sci.is_empty())
-        && let Some(catalog_path) = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("data").join("pica_ref.db")))
+        && let Some(catalog_path) = data_root().map(|root| root.join("data").join("pica_ref.db"))
         && let Ok(catalog) = photo_recognize::CatalogDb::open(&catalog_path)
     {
         let latin_by_cn: std::collections::HashMap<String, String> = catalog
@@ -3584,6 +3810,8 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             list_bird_species,
             get_histogram,
             get_clipping_mask,
+            copy_image_to_clipboard,
+            copy_text_to_clipboard,
             recognize_captures,
             cancel_recognition,
             batch_op_preview,
@@ -3614,6 +3842,10 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             find_duplicates,
             compute_quality_scores,
             get_quality_scores,
+            log,
+            get_log_file_path,
+            open_log_file,
+            open_log_directory,
         ])
         // 事件走 app.emit 明文通道（契约事件名含冒号，非 specta Event 命名），
         // 负载类型在此登记以便导出到 bindings.ts 供前端 listen 使用
@@ -3638,6 +3870,10 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
 }
 
 pub fn run() {
+    // 先初始化日志：后续配置加载/启动/运行期错误全部进日志文件（WorkerGuard 持有到
+    // 应用退出，保证非阻塞 writer 缓冲在退出时落盘）
+    let _log_guard = logging::init();
+
     // 配置：固定存 ~/.config/pt/config.toml（全平台统一，Windows 为 %USERPROFILE%\.config\pt\config.toml）
     let config_path = photo_config::determine_config_path()
         .unwrap_or_else(|_| PathBuf::from("config.toml"));
@@ -3651,6 +3887,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(builder.invoke_handler())
         .register_asynchronous_uri_scheme_protocol("ptimg", ptimg_handler)
         .manage(Mutex::new(AppState::new(config, config_path)))
@@ -3658,16 +3895,11 @@ pub fn run() {
             let app_handle = app.handle().clone();
 
             // 后台线程预热识别模型（DirectML 初始化 ~2-5s，首次识别不再等待）；
-            // 失败仅记日志不阻塞启动。models/ 与 data/pica_ref.db 按便携约定在 exe 同级
+            // 失败仅记日志不阻塞启动。models/ 与 data/pica_ref.db 按数据根目录解析
             tauri::async_runtime::spawn_blocking(|| {
-                let Some(exe_dir) = std::env::current_exe()
-                    .ok()
-                    .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-                else {
-                    return;
-                };
-                let models_dir = exe_dir.join("models");
-                let catalog_db = exe_dir.join("data").join("pica_ref.db");
+                let Some(root) = data_root() else { return; };
+                let models_dir = root.join("models");
+                let catalog_db = root.join("data").join("pica_ref.db");
                 match photo_recognize::Recognizer::new(&models_dir, &catalog_db) {
                     Ok(_) => tracing::info!("识别模型预热完成"),
                     Err(e) => tracing::warn!("识别模型预热失败（不阻塞启动）: {e}"),
@@ -3790,13 +4022,19 @@ pub struct QualityDone {
 #[specta::specta]
 async fn compute_quality_scores(app: AppHandle, paths: Vec<String>) -> Result<(), String> {
     // 当前目录（recognition 表键的相对根）
-    let dir = {
+    let (dir, generation, task_token) = {
         let st = app.state::<Mutex<AppState>>();
-        st.lock()
-            .expect("AppState 锁中毒")
+        let mut st = st.lock().expect("AppState 锁中毒");
+        if st.quality_task.is_running() {
+            return Err("已有质量评分任务进行中".to_string());
+        }
+        let dir = st
             .current_dir
             .clone()
-            .ok_or_else(|| "尚未打开目录".to_string())?
+            .ok_or_else(|| "尚未打开目录".to_string())?;
+        let generation = st.scan_generation;
+        let token = st.quality_task.start(generation);
+        (dir, generation, token)
     };
     // 直方图缓存覆盖：命中 hist_cache 的路径注入剪切占比（(高光, 死黑)），免重复解码
     let clip_override = {
@@ -3840,11 +4078,21 @@ async fn compute_quality_scores(app: AppHandle, paths: Vec<String>) -> Result<()
                 );
             },
         );
+        // 旧目录/已换代的任务：丢弃结果，不写状态也不发完成事件
+        let is_current = {
+            let st = app_work.state::<Mutex<AppState>>();
+            let st = st.lock().expect("AppState 锁中毒");
+            st.quality_task.is_current(task_token, generation)
+        };
+        if !is_current {
+            return;
+        }
         // 分数存内存 Map（禁止入库；重新评分即整体覆盖，防旧目录残留）
         {
             let st = app_work.state::<Mutex<AppState>>();
             let mut st = st.lock().expect("AppState 锁中毒");
             st.quality_scores = scores.iter().cloned().collect();
+            st.quality_task.finish(task_token, generation);
         }
         let _ = app_work.emit("quality:done", QualityDone { total: total as u32, scores });
     })

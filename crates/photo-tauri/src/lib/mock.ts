@@ -346,6 +346,15 @@ export const mockCommands = {
     return { ...appConfig, favoriteDirs: [...favorites], recentDirectories: [...recent] }
   },
 
+  /** mock 复制图片到剪贴板：浏览器模式无系统剪贴板，模拟成功（真实后端见 copy_image_to_clipboard） */
+  async copyImageToClipboard(_path: string): Promise<MockResult<null>> {
+    return { status: 'ok', data: null }
+  },
+  /** mock 复制文本到剪贴板：浏览器模式模拟成功（真实后端见 copy_text_to_clipboard） */
+  async copyTextToClipboard(_text: string): Promise<MockResult<null>> {
+    return { status: 'ok', data: null }
+  },
+
   // ── Phase 3 mock ───────────────────────────────────
 
   async getRecognition(path: string): Promise<MockResult<Recognition | null>> {
@@ -388,6 +397,21 @@ export const mockCommands = {
   },
   // mock：浏览器模式无法真打开编辑器，模拟成功（真实行为见后端 open_config_file）
   async openConfigFile(): Promise<MockResult<null>> {
+    return { status: 'ok', data: null }
+  },
+
+  // ── 日志 mock：浏览器模式无日志文件，全部 no-op ──────────
+  async log(level: string, message: string, context: string | null): Promise<void> {
+    // 浏览器 mock 模式不落日志；保留转发避免 Console 刷屏
+    console.debug('[frontend-log:' + level + ']', context ?? '', message)
+  },
+  async getLogFilePath(): Promise<string> {
+    return '（浏览器 mock 模式：无日志文件）'
+  },
+  async openLogFile(): Promise<MockResult<null>> {
+    return { status: 'ok', data: null }
+  },
+  async openLogDirectory(): Promise<MockResult<null>> {
     return { status: 'ok', data: null }
   },
 
@@ -773,7 +797,7 @@ let appConfig: AppConfig = {
   recognitionThreadCount: 2,
   detectionSource: 'Yolo',
   includeSubdirectories: false,
-  stackMode: 'ByTime',
+  stackMode: 'None',
   gridColumns: 4,
   uiScale: 100,
   exportPresets: [{ name: '原图', longEdge: null, quality: 95, template: '{name}' }],
@@ -794,7 +818,9 @@ function mockBatchPreviewItems(op: BatchOpType, options: BatchOpOptions): BatchO
   const fmtOk = (c: CaptureMeta) =>
     options.formats.length === 0 ||
     options.formats.some((f) => formatToString(f).toLowerCase() === c.primaryFormat.toLowerCase())
-  const base = captures.filter((c) => fmtOk(c)).slice(0, 3)
+  // 操作对象 = 前端筛选结果（paths 白名单）；空白名单 = 空操作集（与后端一致）
+  const allowed = new Set(options.paths)
+  const base = captures.filter((c) => allowed.has(c.primaryPath) && fmtOk(c)).slice(0, 3)
   let items = base.map((c) => ({
     path: c.primaryPath,
     targetPath: op === 'Delete' ? null : options.targetDir ? `${options.targetDir}/${c.baseName}` : null,

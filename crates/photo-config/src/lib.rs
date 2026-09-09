@@ -21,7 +21,7 @@ pub enum Theme {
 
 /// 网格堆叠模式：None = 不堆叠（每文件一项）；ByFileName = 同文件名（stem）合并
 /// （JPG/NEF 同画面，前端 stacks.ts 按 baseName 分组）；ByTime = 同组照片堆叠
-/// （拍摄时间差 ≤2s 的连拍合并，前端按 dateTaken 聚类）。默认 ByTime。
+/// （拍摄时间差 ≤2s 的连拍合并，前端按 dateTaken 聚类）。默认 None = 不堆叠。
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum StackMode {
@@ -32,7 +32,7 @@ pub enum StackMode {
 
 impl Default for StackMode {
     fn default() -> Self {
-        Self::ByTime
+        Self::None
     }
 }
 
@@ -85,7 +85,7 @@ pub struct AppConfig {
     /// 布尔字段无需钳制；改动后需重新扫描生效（scan 编排处按此值选单层/递归）。
     #[serde(default)]
     pub include_subdirectories: bool,
-    /// 网格堆叠模式（默认 ByTime = 同组照片堆叠；旧配置无此字段时回退默认）。
+    /// 网格堆叠模式（默认 None = 不堆叠；旧配置无此字段时回退默认）。
     #[serde(default)]
     pub stack_mode: StackMode,
     /// 网格每行图片数（2-5，默认 4）。固定列数后 cell 宽由容器自适应，
@@ -164,7 +164,7 @@ impl Default for AppConfig {
             recent_directories: vec![],
             theme: Theme::Light,
             accent_color: None,
-            left_panel_width: 180,
+            left_panel_width: 200,
             right_panel_visible: true,
             right_panel_width: 200,
             font_family: default_font_family(),
@@ -176,6 +176,25 @@ impl Default for AppConfig {
             grid_columns: default_grid_columns(),
             ui_scale: default_ui_scale(),
         }
+    }
+}
+
+impl AppConfig {
+    /// 字段钳制（加载与保存共用）：手改配置文件越界时读入即归一，避免
+    /// 字号 0 / 列数 0 这类值把 UI 拖坏；与 set_app_config 保存路径同一套范围。
+    pub fn clamped(mut self) -> Self {
+        self.thumbnail_size = self.thumbnail_size.clamp(64, 1024);
+        self.left_panel_width = self.left_panel_width.clamp(200, 480);
+        self.right_panel_width = self.right_panel_width.clamp(200, 480);
+        self.recognition_thread_count = self.recognition_thread_count.clamp(1, 4);
+        self.grid_columns = self.grid_columns.clamp(2, 5);
+        self.ui_scale = self.ui_scale.clamp(70, 200);
+        self.export_presets = self
+            .export_presets
+            .into_iter()
+            .map(ExportPreset::clamped)
+            .collect();
+        self
     }
 }
 
@@ -197,7 +216,8 @@ pub fn load_config(path: &Path) -> Result<AppConfig, ConfigError> {
 
 fn load_from_toml(path: &Path) -> Result<AppConfig, ConfigError> {
     let content = std::fs::read_to_string(path)?;
-    Ok(toml::from_str(&content)?)
+    // 手改配置可能越界（应用自带「打开配置文件」入口）：读入即钳制
+    Ok(toml::from_str::<AppConfig>(&content)?.clamped())
 }
 
 pub fn save_config(path: &Path, config: &AppConfig) -> Result<(), ConfigError> {
@@ -205,7 +225,14 @@ pub fn save_config(path: &Path, config: &AppConfig) -> Result<(), ConfigError> {
         std::fs::create_dir_all(parent)?;
     }
     let content = toml::to_string_pretty(config)?;
-    std::fs::write(path, content)?;
+    // 原子写：先写同目录临时文件再 rename，避免写入中途崩溃/断电留下截断
+    // 的 TOML（下次启动解析失败会静默回退默认配置，用户设置全丢）
+    let tmp = path.with_file_name(format!(
+        "{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, path)?;
     Ok(())
 }
 
@@ -223,6 +250,59 @@ mod tests {
         assert!(!cfg.include_subdirectories);
         // 识别鸟体定位默认 YOLO 全图检测（焦点优先为新开关，默认不改变现状）
         assert_eq!(cfg.detection_source, DetectionSource::Yolo);
+    }
+
+    #[test]
+    fn test_app_config_clamped_normalizes_out_of_range() {
+        let cfg = AppConfig {
+            thumbnail_size: 99_999,
+            left_panel_width: 10,
+            right_panel_width: 9_999,
+            recognition_thread_count: 0,
+            grid_columns: 99,
+            ui_scale: 0,
+            export_presets: vec![ExportPreset {
+                quality: 0,
+                long_edge: Some(0),
+                ..ExportPreset::default()
+            }],
+            ..AppConfig::default()
+        };
+        let c = cfg.clamped();
+        assert_eq!(c.thumbnail_size, 1024);
+        assert_eq!(c.left_panel_width, 200);
+        assert_eq!(c.right_panel_width, 480);
+        assert_eq!(c.recognition_thread_count, 1);
+        assert_eq!(c.grid_columns, 5);
+        assert_eq!(c.ui_scale, 70);
+        assert_eq!(c.export_presets[0].quality, 1);
+        assert_eq!(c.export_presets[0].long_edge, None);
+    }
+
+    #[test]
+    fn test_load_clamps_out_of_range_toml() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        // 手改配置文件越界（应用自带「打开配置文件」入口）→ 读入即钳制
+        // TOML 键与 serde camelCase 一致（uiScale/gridColumns）
+        std::fs::write(&path, "uiScale = 0\ngridColumns = 0\n").unwrap();
+        let cfg = load_config(&path).unwrap();
+        assert_eq!(cfg.ui_scale, 70);
+        assert_eq!(cfg.grid_columns, 2);
+    }
+
+    #[test]
+    fn test_save_config_is_atomic_no_tmp_left() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        save_config(&path, &AppConfig::default()).unwrap();
+        assert!(path.exists());
+        // 原子写不残留临时文件
+        assert!(!dir.path().join("config.toml.tmp").exists());
+        assert_eq!(
+            load_config(&path).unwrap().thumbnail_size,
+            AppConfig::default().thumbnail_size
+        );
     }
 
     #[test]

@@ -49,7 +49,19 @@ export function formatToString(fmt: ImageFormat): string {
  * （"jpeg"）——小写比较保持「格式身份相等」这一判定边界，且不同格式的
  * 字符串不会因归一而互相碰撞。
  */
+/** 非 RAW 的格式显示名集合（其余一律按 RAW 扩展名处理：NEF/CR3/ARW…） */
+const NON_RAW_FORMAT_NAMES = new Set(['jpeg', 'png', 'tiff', 'heif', 'webp', 'bmp', 'gif', 'other'])
+
 function matchesFormat(primaryFormat: string, fmt: ImageFormat): boolean {
+  // RAW 芯片是通配语义：真实后端 primaryFormat 存的是扩展名（NEF/CR3/ARW），
+  // 不是字符串 'RAW'，精确比较会让 RAW 芯片永远筛不出东西
+  if (typeof fmt === 'object' && 'Raw' in fmt) {
+    const want = fmt.Raw.toUpperCase()
+    // 芯片值为通配 'RAW'：匹配任意 RAW 扩展名；带具体扩展名时按精确匹配
+    return want === 'RAW'
+      ? !NON_RAW_FORMAT_NAMES.has(primaryFormat.toLowerCase())
+      : primaryFormat.toLowerCase() === want.toLowerCase()
+  }
   return primaryFormat.toLowerCase() === formatToString(fmt).toLowerCase()
 }
 

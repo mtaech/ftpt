@@ -109,6 +109,20 @@ describe('groupStacks（同文件名）', () => {
     expect(groups).toEqual([{ key: 'A', members: [1], active: 1 }])
   })
 
+  it('同 stem 但不同子目录不合并（递归扫描下的跨目录重名）', () => {
+    const items = [
+      mk({ baseName: 'IMG_1', primaryPath: 'E:/P/2024-01-01/IMG_1.jpg' }),
+      mk({ baseName: 'IMG_1', primaryPath: 'E:/P/2024-02-01/IMG_1.jpg' }),
+    ]
+    const groups = groupStacks([0, 1], items)
+    expect(groups).toHaveLength(2)
+    expect(groups[0].members).toEqual([0])
+    expect(groups[1].members).toEqual([1])
+    // 跨目录重名用 stem@dir 区分，避免 stackActive 覆盖互相串台
+    expect(groups[0].key).not.toBe(groups[1].key)
+    expect(groups[0].key).toContain('IMG_1@')
+  })
+
   it('多组互不干扰：组序 = 各组首个成员出现序', () => {
     const items = [
       mk({ baseName: 'B', primaryPath: 'E:/P/B.jpg' }),

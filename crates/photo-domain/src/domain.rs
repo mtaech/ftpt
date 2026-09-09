@@ -465,7 +465,9 @@ pub struct GpsInfo {
 /// （直接 deg + min/60 + sec/3600 会把 -116°23' 算成 -115.6°，西半球严重偏移）。
 pub fn dms_to_decimal(deg: f64, min: f64, sec: f64) -> f64 {
     let magnitude = deg.abs() + min / 60.0 + sec / 3600.0;
-    if deg < 0.0 {
+    // 用 is_sign_negative 而非 deg < 0.0：0°xx′S/W 的度分量是 -0.0，
+    // 比较运算会把它当成非负而翻到另一个半球
+    if deg.is_sign_negative() {
         -magnitude
     } else {
         magnitude
@@ -570,7 +572,8 @@ pub struct BBox {
 impl BBox {
     /// 构造并夹紧到 0–1 范围
     pub fn new(x1: f32, y1: f32, x2: f32, y2: f32) -> Self {
-        let clamp01 = |v: f32| v.clamp(0.0, 1.0);
+        // NaN/Inf 归零：f32::clamp 对 NaN 返回 NaN，会一路流进推理与持久化
+        let clamp01 = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
         Self {
             x1: clamp01(x1),
             y1: clamp01(y1),
@@ -581,12 +584,21 @@ impl BBox {
 
     /// 解析数据库文本格式 "x1,y1,x2,y2"
     pub fn parse(s: &str) -> Option<Self> {
-        let parts: Vec<f32> = s.split(',').filter_map(|p| p.trim().parse().ok()).collect();
-        if parts.len() == 4 {
-            Some(Self::new(parts[0], parts[1], parts[2], parts[3]))
-        } else {
-            None
+        // 严格四段：filter_map 会把畸形串（多段/含垃圾段）悄悄拼成 4 个值；
+        // NaN/Inf 也必须拒绝（clamp 对 NaN 返回 NaN，会污染推理与持久化）
+        let parts: Vec<&str> = s.split(',').collect();
+        if parts.len() != 4 {
+            return None;
         }
+        let mut v = [0.0f32; 4];
+        for (i, p) in parts.iter().enumerate() {
+            let x: f32 = p.trim().parse().ok()?;
+            if !x.is_finite() {
+                return None;
+            }
+            v[i] = x;
+        }
+        Some(Self::new(v[0], v[1], v[2], v[3]))
     }
 
     /// 序列化为数据库文本格式 "x1,y1,x2,y2"
@@ -1064,6 +1076,8 @@ mod tests {
         // 整度/整分边界
         assert_eq!(dms_to_decimal(10.0, 0.0, 0.0), 10.0);
         assert!((dms_to_decimal(0.0, 30.0, 0.0) - 0.5).abs() < 1e-9);
+        // -0.0（0°xx′S/W）必须判负：deg < 0.0 会漏判
+        assert!(dms_to_decimal(-0.0, 30.0, 0.0) < 0.0);
     }
 
     #[test]
@@ -1107,6 +1121,11 @@ mod tests {
         assert!(BBox::parse("0.1,0.2,0.3").is_none());
         assert!(BBox::parse("not,a,box,here").is_none());
         assert!(BBox::parse("").is_none());
+        // 多段/垃圾段不能被 filter_map 悄悄拼成合法四值
+        assert!(BBox::parse("0.1,0.2,0.3,0.4,garbage").is_none());
+        // NaN 必须拒绝（clamp 对 NaN 返回 NaN，会污染推理与持久化）
+        assert!(BBox::parse("0.1,0.2,0.3,NaN").is_none());
+        assert!(BBox::new(f32::NAN, 0.2, 0.3, 0.4).x1 == 0.0);
     }
 
     #[test]

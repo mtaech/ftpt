@@ -138,7 +138,11 @@ export const useBatchStore = defineStore('batch', {
   getters: {
     /** 发送给后端的操作选项（BatchOpOptions 契约形态） */
     options(state): BatchOpOptions {
+      const filter = useFilterStore()
       return {
+        // 操作对象 = 当前筛选结果（ADR 0006 筛选驱动）；后端按白名单定位，
+        // 空白名单 = 空操作集，绝不落回全目录
+        paths: filter.filtered.map((m) => m.primaryPath),
         targetDir: state.targetDir,
         syncSiblings: state.syncSiblings,
         formats: state.formats,

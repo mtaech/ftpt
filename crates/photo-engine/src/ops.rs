@@ -74,19 +74,24 @@ pub fn move_capture(capture: &Capture, dest_dir: &Path) -> Result<(), OpError> {
         }
         if let Some(name) = path.file_name() {
             let dest = dest_dir.join(name);
+            // 目标与源同一路径（移动到自己所在目录）→ 无操作
+            if dest == *path {
+                continue;
+            }
+            // 防覆盖：std::fs::rename 在 Unix（rename(2)）与 Windows
+            // （MoveFileEx + MOVEFILE_REPLACE_EXISTING）都会静默覆盖已存在的目标，
+            // 必须在此统一拦截；否则合并两个卡/回导时同名旧文件永久丢失。
+            if dest.exists() {
+                return Err(OpError::Io(std::io::Error::new(
+                    ErrorKind::AlreadyExists,
+                    format!("目标文件已存在: {}", dest.display()),
+                )));
+            }
             // 尝试快速重命名（同文件系统）
             match std::fs::rename(path, &dest) {
                 Ok(()) => {}
                 Err(e) if e.kind() == ErrorKind::CrossesDevices => {
-                    // 跨文件系统：copy + delete 回退
-                    // 与同卷 rename 在 Windows 上的失败行为一致：目标已存在时报错，
-                    // 避免 fs::copy 静默覆盖已有目标后再删源，造成双份数据丢失
-                    if dest.exists() {
-                        return Err(OpError::Io(std::io::Error::new(
-                            ErrorKind::AlreadyExists,
-                            format!("目标文件已存在: {}", dest.display()),
-                        )));
-                    }
+                    // 跨文件系统：copy + delete 回退（目标存在性已在上方统一检查）
                     std::fs::copy(path, &dest)?;
                     std::fs::remove_file(path)?;
                 }
@@ -106,13 +111,39 @@ pub fn copy_capture(capture: &Capture, dest_dir: &Path, overwrite: bool) -> Resu
         }
         if let Some(name) = path.file_name() {
             let dest = dest_dir.join(name);
-            if dest.exists() && !overwrite {
+            // 目标与源同一路径（复制到自己所在目录）→ 无操作
+            if dest == *path {
                 continue;
+            }
+            // 防覆盖：目标已存在且未允许覆盖时报错（批量操作据此报告失败，
+            // 而不是静默跳过却显示成功）
+            if dest.exists() && !overwrite {
+                return Err(OpError::Io(std::io::Error::new(
+                    ErrorKind::AlreadyExists,
+                    format!("目标文件已存在: {}", dest.display()),
+                )));
             }
             std::fs::copy(path, &dest)?;
         }
     }
     Ok(())
+}
+
+/// 改名（防覆盖）：目标已存在（且非自身）时报错，避免 std::fs::rename
+/// 静默覆盖已有文件。返回新路径（new_name 与原名相同 = 无操作成功）。
+fn rename_to(old_path: &Path, new_name: &str) -> Result<PathBuf, OpError> {
+    let new_path = old_path.with_file_name(new_name);
+    if new_path == old_path {
+        return Ok(new_path);
+    }
+    if new_path.exists() {
+        return Err(OpError::Io(std::io::Error::new(
+            ErrorKind::AlreadyExists,
+            format!("目标文件已存在: {}", new_path.display()),
+        )));
+    }
+    std::fs::rename(old_path, &new_path)?;
+    Ok(new_path)
 }
 
 /// 批量重命名拍摄
@@ -136,9 +167,11 @@ pub fn rename_captures(
             }
             if let Some(ext) = old_path.extension() {
                 let new_name = format!("{}.{}", new_base, ext.to_string_lossy());
-                let new_path = old_path.with_file_name(&new_name);
-                let result = std::fs::rename(old_path, &new_path).map_err(OpError::from);
-                results.push((new_path, result));
+                let target = old_path.with_file_name(&new_name);
+                match rename_to(old_path, &new_name) {
+                    Ok(new_path) => results.push((new_path, Ok(()))),
+                    Err(e) => results.push((target, Err(e))),
+                }
             }
         }
     }
@@ -175,9 +208,11 @@ where
             }
             if let Some(ext) = old_path.extension() {
                 let new_name = format!("{}.{}", base, ext.to_string_lossy());
-                let new_path = old_path.with_file_name(&new_name);
-                let result = std::fs::rename(old_path, &new_path).map_err(OpError::from);
-                results.push((new_path, result));
+                let target = old_path.with_file_name(&new_name);
+                match rename_to(old_path, &new_name) {
+                    Ok(new_path) => results.push((new_path, Ok(()))),
+                    Err(e) => results.push((target, Err(e))),
+                }
             }
         }
     }
@@ -375,6 +410,52 @@ mod tests {
         // 源目录文件不存在
         assert!(!src.path().join("img.jpg").exists(), "jpg still in src");
         assert!(!src.path().join("img.NEF").exists(), "NEF still in src");
+    }
+
+    #[test]
+    fn test_move_capture_refuses_existing_target() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        let capture = make_test_capture(&src, "img", &["jpg"]);
+        std::fs::write(dst.path().join("img.jpg"), b"existing").unwrap();
+
+        let result = move_capture(&capture, dst.path());
+        assert!(result.is_err(), "同名目标存在时必须报错而不是覆盖");
+        // 源文件仍在、目标内容未被覆盖
+        assert!(src.path().join("img.jpg").exists());
+        assert_eq!(std::fs::read(dst.path().join("img.jpg")).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn test_copy_capture_refuses_existing_target() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        let capture = make_test_capture(&src, "img", &["jpg"]);
+        std::fs::write(dst.path().join("img.jpg"), b"existing").unwrap();
+
+        let result = copy_capture(&capture, dst.path(), false);
+        assert!(result.is_err(), "同名目标存在时 copy(overwrite=false) 必须报错");
+        assert_eq!(std::fs::read(dst.path().join("img.jpg")).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn test_rename_captures_refuses_collision() {
+        let dir = TempDir::new().unwrap();
+        let a = make_test_capture(&dir, "A", &["jpg"]);
+        let b = make_test_capture(&dir, "B", &["jpg"]);
+        // 模板不唯一（无 {seq}）：A/B 都渲染成「旅行」，已存在的目标必须拒绝覆盖
+        std::fs::write(dir.path().join("旅行.jpg"), b"occupied").unwrap();
+
+        let results = rename_captures_templated(
+            &[&a, &b],
+            "旅行",
+            1,
+            |_| NameTemplateContext::default(),
+        );
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|(_, r)| r.is_err()), "撞名必须全部失败");
+        assert_eq!(std::fs::read(dir.path().join("旅行.jpg")).unwrap(), b"occupied");
+        assert!(dir.path().join("A.jpg").exists() && dir.path().join("B.jpg").exists());
     }
 
     #[test]

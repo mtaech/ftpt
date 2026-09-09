@@ -73,7 +73,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 |`crates/photo-engine/src/`|文件机械：scanner, ops, exif, thumbnail, convert, folder_db, batch_ops, adjustments（全部同步）|
 |`crates/photo-engine/src/folder_db.rs`|文件夹级 SQLite（`.pt/data.db`）：exif_cache / xmp_meta / recognition / adjustments 四表，rusqlite_migration 版本化|
 |`crates/photo-recognize/src/`|识别管线：lib.rs(Recognizer 门面), detect(YOLO), classify(bird_model), catalog(名录映射), pipeline, eye, sharpness|
-|`crates/photo-config/src/lib.rs`|配置读写（TOML + SQLite 持久化）；AppConfig 含 favorite_dirs/recent_directories/theme(默认 Light)/leftPanelWidth/rightPanelWidth/thumbnailSize/recognitionThreadCount/stackMode(默认 ByTime 同组堆叠) 等|
+|`crates/photo-config/src/lib.rs`|配置读写（TOML + SQLite 持久化）；AppConfig 含 favorite_dirs/recent_directories/theme(默认 Light)/leftPanelWidth/rightPanelWidth/thumbnailSize/recognitionThreadCount/stackMode(默认 None 不堆叠) 等|
 |`crates/photo-tauri/src-tauri/src/lib.rs`|Tauri 后端：24 commands + 8 事件 + ptimg 协议 + 启动（配置便携优先 + 模型预热 + 上次目录自动恢复）|
 |`crates/photo-tauri/src-tauri/src/bin/export_bindings.rs`|specta TS 绑定导出（生成前端 bindings.ts）|
 |`crates/photo-tauri/src/stores/`|Pinia：captures（扫描/标记/事件接线）/ selection（多选锚点语义）/ preview（缩放平移/检测框/框选）/ filter（筛选排序）/ recognition（批量识别状态机）/ batch（批量操作两阶段）/ config（设置）/ contextMenu|
@@ -140,6 +140,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 - **exiftool `-stay_open` 长驻进程不能加 `-q`**：`-q` 同时抑制 `{ready}` 标记，导致 execute 读不到结果边界挂起
 - **Windows 官方 exiftool(-k).exe 内嵌 `-k`（每命令后等 ENTER）**：程序化调用必须用 `perl.exe exiftool.pl`（photo-engine 已自动处理）；开发时残留 perl.exe 进程会让后续 cargo 命令假死，`taskkill //F //IM perl.exe` 清理（cfg(test) 已跳过真实 spawn、photo-tauri 退出走 shutdown_provider，仅手动 example 需注意）
 - **exiftool 定位优先级**：`PHOTO_EXIFTOOL` env → exe 同级 `exiftool/`（打包）→ 仓库 `local-lib/exiftool/`（开发）→ PATH；升级版本见 `docs/exiftool-update.md`
+- **模型/名录库/全局索引库定位（`data_root()`，lib.rs）**：`PHOTO_DATA_DIR` env → exe 同级 `models/`+`data/`（打包便携）→ 仓库根（开发回退，从 CARGO_MANIFEST_DIR/cwd 向上找同时含 `models/` 与 `data/pica_ref.db` 的目录）；cargo run/tauri dev 下模型在仓库根，否则会报「YOLO 模型文件不存在: <target>/debug/models/detect.onnx」
 - 使用了 let-chains（edition 2024 特性），如 `photo-config/config.rs` 便携路径判断
 - **tauri-specta 生成 bindings.ts 会覆盖手写追加段**：specta 不导出的类型（FilterCriteria/SortBy 等——Rust 侧无 command 引用它们）需在文件尾部手写保留，重新导出后手动恢复
 - **export_bindings 按 cwd 相对路径写文件**：必须 `cd crates/photo-tauri/src-tauri` 再 `cargo run -p photo-tauri --bin export_bindings`；从 workspace 根跑会把 bindings.ts 写到 `crates/src/lib/` 错位置
@@ -219,6 +220,15 @@ kimi_cu 的 UIA 树看不到 WebView2 DOM；无 vision 模型时用 CDP：
 1. `tauri.conf.json` window 加 `"additionalBrowserArgs": "--remote-debugging-port=9222"`（env 变量不生效；tauri 覆盖）
 2. `curl localhost:9222/json/list` → 拿页面 `webSocketDebuggerUrl` → node_repl 直连（browser 工具连不上 WebView2 页面 target；DevTools 窗口会占用 target）
 3. 验证后移除该配置
+
+### 日志（tracing 统一管道）
+
+- Rust 侧（engine/recognize/tauri 后端）已大量 `tracing::*` 埋点，`run()` 启动时经 `src-tauri/src/logging.rs` 安装全局订阅者落盘：
+  - 滚动日切文件 `<配置目录>/logs/ftpt.YYYY-MM-DD.log`（即 `~/.config/pt/logs/`，Windows 为 `%USERPROFILE%/.config/pt/logs/`），保留 14 份；`PHOTO_LOG_LEVEL` 环境变量覆盖级别（默认 debug 构建 DEBUG、release INFO）；stderr 同步输出（tauri dev 终端可见）
+  - `tracing_log::LogTracer` 桥接 rawlib 等第三方 `log::*` 调用
+  - 前端 console/未捕获异常经 `log` command（ipc.ts `logToBackend`）转发到同一文件（target=frontend）；App.vue `installFrontendLogging()` 全局拦截 + onErrorCaptured
+  - 设置「关于」页展示当前日志路径，可打开日志文件/目录（`open_log_file` / `open_log_directory`）
+- 前端 `src/lib/log.ts`：`logToFile(level, msg, ctx?)` 随时写一条；mock 模式全部 no-op
 
 ---
 

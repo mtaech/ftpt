@@ -91,9 +91,12 @@ export const useCapturesStore = defineStore('captures', {
         await scanDirectory(path)
         await this.reload()
       } catch (e) {
-        // 扫描失败复位哨兵，等效 worker panic 兜底
+        // 扫描失败：复位哨兵并清空旧目录数据——否则网格仍显示上一个目录的照片，
+        // 且重试守卫（path === directory && items.length > 0）会永久挡住重试
         this.scanning = false
         this.progress = null
+        this.directory = null
+        this.items = []
         console.error('scan_directory 失败', e)
       }
     },

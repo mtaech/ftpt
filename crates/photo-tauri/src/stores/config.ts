@@ -14,15 +14,19 @@ const DEFAULT_CONFIG: AppConfig = {
   recentDirectories: [],
   theme: 'Light',
   accentColor: null,
-  leftPanelWidth: 180,
+  leftPanelWidth: 200,
   rightPanelVisible: true,
   rightPanelWidth: 200,
   fontFamily: 'Segoe UI',
   recognitionThreadCount: 2,
   detectionSource: 'Yolo',
   includeSubdirectories: false,
-  stackMode: 'ByTime',
+  // 导出预设必须带默认项：后端 export_presets 是 #[serde(default)]（缺字段 → 空数组），
+  // 启动加载失败时改任意设置会把已保存的预设清空
+  exportPresets: [{ name: '原图', longEdge: null, quality: 95, template: '{name}' }],
+  stackMode: 'None',
   gridColumns: 4,
+  uiScale: 100,
 }
 
 export const useConfigStore = defineStore('config', {
@@ -47,8 +51,8 @@ export const useConfigStore = defineStore('config', {
     thumbnailSize: (s) => s.config.thumbnailSize ?? 220,
     /** 扫描包含子目录开关（回退 false = 单层扫描，对齐 photo-config 默认） */
     includeSubdirectories: (s) => s.config.includeSubdirectories ?? false,
-    /** 网格堆叠模式（回退 ByTime = 同组照片堆叠，对齐 photo-config 默认） */
-    stackMode: (s) => s.config.stackMode ?? 'ByTime',
+    /** 网格堆叠模式（回退 None = 不堆叠，对齐 photo-config 默认） */
+    stackMode: (s) => s.config.stackMode ?? 'None',
     /** 网格每行图片数（回退 4，对齐 photo-config 默认；2-5 下拉） */
     gridColumns: (s) => s.config.gridColumns ?? 4,
     /** 界面缩放比例（回退 100 = 基准字号 15px；80-130） */

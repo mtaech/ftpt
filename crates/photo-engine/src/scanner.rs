@@ -70,6 +70,11 @@ fn scan_with_depth(
         if !path.is_file() {
             continue;
         }
+        // 跳过应用自己的缓存目录（<照片目录>/.pt/thumbs/*.jpg）：递归扫描时
+        // 这些缓存 JPEG 会被当成照片生成 Capture，污染网格/folder_db/global_db
+        if path.components().any(|c| c.as_os_str() == ".pt") {
+            continue;
+        }
         let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
             continue;
         };
@@ -169,6 +174,17 @@ mod tests {
         assert_eq!(captures[0].source_files[0].format, ImageFormat::Jpeg);
         assert!(matches!(captures[1].source_files[0].format, ImageFormat::Raw(_)));
         assert!(captures.iter().all(|c| c.base_name == "DSC_0001"));
+    }
+
+    #[test]
+    fn test_recursive_skips_pt_cache_dir() {
+        let dir = TempDir::new().unwrap();
+        create_test_files(&dir, &["IMG_1.jpg", ".pt/thumbs/abc.jpg"]);
+
+        let caps =
+            scan_directory_recursive(dir.path(), &FilterCriteria::default(), None).unwrap();
+        assert_eq!(caps.len(), 1, ".pt 缓存目录下的 JPEG 不应成为 Capture");
+        assert_eq!(caps[0].base_name, "IMG_1");
     }
 
     #[test]

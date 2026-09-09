@@ -67,8 +67,10 @@ describe('filterCaptures', () => {
     const c = defaultFilterCriteria()
     c.formatFilter = 'Jpeg'
     expect(filterCaptures(items, c)).toEqual([0])
+    // RAW 芯片是通配语义：mock 的 'raw' 与真实扩展名 'NEF' 都应命中
     c.formatFilter = { Raw: 'RAW' }
-    expect(filterCaptures(items, c)).toEqual([2])
+    expect(filterCaptures(items, c)).toEqual([2, 3])
+    // 带具体扩展名时精确匹配（仅测试/内部使用，芯片恒为 'RAW'）
     c.formatFilter = { Raw: 'NEF' }
     expect(filterCaptures(items, c)).toEqual([3])
   })

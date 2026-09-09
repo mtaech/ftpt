@@ -105,11 +105,19 @@ async function deleteSelected(paths: string[]) {
   const captures = useCapturesStore()
   const selection = useSelectionStore()
   const preview = usePreviewStore()
-  await deleteCaptures(paths)
-  await captures.reload()
+  // 先判断「当前预览的这张是否在被删集合里」：selection.clear() 之后 selectedIndex
+  // 恒为 null，原判断会无条件退出预览（哪怕删的是别的图）
+  const idx = selection.selectedIndex
+  const wasCurrent =
+    preview.isPreview && idx !== null && paths.includes(captures.items[idx]?.primaryPath ?? '')
+  try {
+    await deleteCaptures(paths)
+    await captures.reload()
+  } catch (e) {
+    console.error('删除失败', e)
+  }
   selection.clear()
-  // 预览中把当前图删掉后退回网格（避免停留空预览）
-  if (preview.isPreview && selection.selected === null) preview.closePreview()
+  if (wasCurrent) preview.closePreview()
 }
 
 /**
@@ -131,8 +139,10 @@ export function captureMenuItems(opts: {
   onToggleView: () => void
   /** 预览变体专属缩放项（以容器中心为锚点） */
   zoom?: { in: () => void; out: () => void; fit: () => void; actual: () => void }
+  /** 复制当前照片到剪贴板（预览变体专属；仅 inPreview 时渲染此项） */
+  onCopyImage?: (meta: CaptureMeta) => void
 }): ContextMenuItem[] {
-  const { meta, inPreview, selectedCount, paths, onToggleView, zoom } = opts
+  const { meta, inPreview, selectedCount, paths, onToggleView, zoom, onCopyImage } = opts
   const recognition = useRecognitionStore()
   const items: ContextMenuItem[] = [
     { kind: 'item', label: inPreview ? '返回网格' : '在预览中打开', action: onToggleView },
@@ -161,6 +171,14 @@ export function captureMenuItems(opts: {
       action: () => void useExportStore().openDialog(paths),
     },
   )
+  // 预览变体：复制图片项（调用方传入的 onCopyImage；多选时不渲染，仅复制当前图）
+  if (inPreview && onCopyImage && selectedCount <= 1) {
+    items.push({
+      kind: 'item',
+      label: '复制图片',
+      action: () => onCopyImage(meta),
+    })
+  }
   if (inPreview && zoom) {
     items.push(
       { kind: 'sep' },
@@ -175,4 +193,26 @@ export function captureMenuItems(opts: {
     { kind: 'item', label: '删除（移至回收站）', danger: true, action: () => void deleteSelected(paths) },
   )
   return items
+}
+/**
+ * 胶片条缩略图右键菜单（轻量变体）：
+ * 在预览中打开 / 复制图片 / 复制路径。仅对单张缩略图触发，无评分/标记等选片子菜单。
+ */
+export function filmstripMenuItems(opts: {
+  /** 缩略图对应的拍摄项 */
+  meta: CaptureMeta
+  /** 打开该照片（选中 + 进入预览） */
+  onOpen: () => void
+  /** 复制图片（全尺寸 RGBA 到剪贴板） */
+  onCopyImage: (meta: CaptureMeta) => void
+  /** 复制文件绝对路径（文本） */
+  onCopyPath: (meta: CaptureMeta) => void
+}): ContextMenuItem[] {
+  const { meta, onOpen, onCopyImage, onCopyPath } = opts
+  return [
+    { kind: 'item', label: '在预览中打开', action: onOpen },
+    { kind: 'sep' },
+    { kind: 'item', label: '复制图片', action: () => onCopyImage(meta) },
+    { kind: 'item', label: '复制路径', action: () => onCopyPath(meta) },
+  ]
 }

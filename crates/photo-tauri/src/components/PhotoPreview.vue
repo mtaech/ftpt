@@ -12,6 +12,7 @@ import { usePreviewStore } from '@/stores/preview'
 import { useRecognitionStore } from '@/stores/recognition'
 import { useContextMenuStore, captureMenuItems } from '@/stores/contextMenu'
 import { getClippingMask, getRecognition, ptimgUrl } from '@/lib/ipc'
+import { copyImage } from '@/lib/clipboard'
 import { registerZoomHost } from '@/lib/zoomHost'
 import { displayName, formatBadgeLabel } from '@/lib/format'
 import { pickBestFrame } from '@/lib/bestFrame'
@@ -97,6 +98,14 @@ function onStackWheel(e: WheelEvent) {
 
 /** 显示尺寸与定位（渲染公式 = previewMath，一致） */
 const disp = computed<Vec2>(() => preview.displaySize(containerSize.value, natural.value))
+/** 缩放百分比：相对原图自然尺寸（1:1 = 100%，适应窗口 = fit 比例）。
+ *  不能用 preview.zoom（相对 fit 的倍率）——那会让适应窗口与 1:1 都显示 100% */
+const zoomPercent = computed(() => {
+  if (preview.isOneToOne) return 100
+  const n = natural.value[0]
+  if (n <= 0) return 100
+  return Math.round((disp.value[0] / n) * 100)
+})
 const origin = computed<Vec2>(() => preview.imageOrigin(disp.value, containerSize.value))
 
 // ── 检测框 / 框选叠加 ──────────────────────────────────────────────
@@ -484,6 +493,7 @@ function onImageContextMenu(e: MouseEvent) {
       selectedCount: selection.selectedIndices.length,
       paths: selection.selectedPaths,
       onToggleView: () => preview.toggleView(),
+      onCopyImage: (meta) => void copyImage(meta.primaryPath),
       zoom: {
         in: () => preview.zoomBy(1, containerSize.value, natural.value, center),
         out: () => preview.zoomBy(-1, containerSize.value, natural.value, center),
@@ -655,7 +665,7 @@ function onImageContextMenu(e: MouseEvent) {
           <MinusIcon />
         </Button>
         <span class="w-12 text-center text-xs text-muted-foreground tabular-nums">
-          {{ preview.zoomPercent() }}%
+          {{ zoomPercent }}%
         </span>
         <Button size="sm" variant="ghost" title="放大" @click="zoomStep(1)">
           <PlusIcon />

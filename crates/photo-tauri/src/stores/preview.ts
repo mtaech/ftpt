@@ -178,11 +178,6 @@ export const usePreviewStore = defineStore('preview', {
       this.pan = [0, 0]
     },
 
-    /** 当前缩放百分比（1:1 = 100%） */
-    zoomPercent(): number {
-      return this.zoom === 0 ? 100 : Math.round(this.zoom * 100)
-    },
-
     /** 切换检测框叠加显示（V 键 / 工具条「检测框」） */
     toggleBbox() {
       this.bboxVisible = !this.bboxVisible

@@ -146,6 +146,21 @@ export const setAppConfig: (config: AppConfig) => Promise<void> = (config) =>
 /** 用系统默认文本编辑器打开配置文件（设置面板「打开配置文件」链接；文件不存在先落盘当前配置） */
 export const openConfigFile: () => Promise<void> = () => unwrapVoid(api.openConfigFile())
 
+// ── 日志（前端 console/异常 → 后端统一日志文件；log 命令本身不失败） ──────────
+
+/** 转发一条前端日志到后端日志管道（level ∈ debug|info|warn|error；context 标注来源） */
+export const logToBackend: (level: string, message: string, context: string | null) => Promise<void> = (
+  level,
+  message,
+  context,
+) => api.log(level, message, context)
+/** 当前日志文件路径（设置「关于」页展示；文件名含当天日期） */
+export const getLogFilePath: () => Promise<string> = () => api.getLogFilePath()
+/** 用系统默认文本编辑器打开当前日志文件 */
+export const openLogFile: () => Promise<void> = () => unwrapVoid(api.openLogFile())
+/** 在系统文件管理器中打开日志目录（<配置目录>/logs/） */
+export const openLogDirectory: () => Promise<void> = () => unwrapVoid(api.openLogDirectory())
+
 // ── T1 批次（SpeciesIndex）：全局鸟种统计 ─────────────────
 
 export const getSpeciesStats: () => Promise<SpeciesOverview> = () =>
@@ -316,3 +331,12 @@ export const onQualityProgress = (cb: (p: QualityProgressPayload) => void) =>
   listenEvent<QualityProgressPayload>('quality:progress', cb)
 export const onQualityDone = (cb: (p: QualityDonePayload) => void) =>
   listenEvent<QualityDonePayload>('quality:done', cb)
+
+// ── 剪贴板：复制图片 / 复制文本 ──────────────────────────
+
+/** 把指定照片复制到系统剪贴板（图片形式，全尺寸 RGBA；失败 reject 文案） */
+export const copyImageToClipboard: (path: string) => Promise<void> = (path) =>
+  unwrapVoid(api.copyImageToClipboard(path))
+/** 把指定文本复制到系统剪贴板（如文件绝对路径；失败 reject 文案） */
+export const copyTextToClipboard: (text: string) => Promise<void> = (text) =>
+  unwrapVoid(api.copyTextToClipboard(text))

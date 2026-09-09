@@ -96,7 +96,11 @@ fn resolve_source_opt(
         }
     }
 
-    let primary = &capture.source_files[capture.primary_index];
+    let primary = capture
+        .source_files
+        .get(capture.primary_index)
+        .or_else(|| capture.source_files.first())
+        .ok_or((RecognitionFailureStage::Assets, "Capture 无源文件"))?;
     let path = &primary.path;
 
     // 检查文件是否存在
@@ -264,6 +268,12 @@ fn recognize_capture_impl(
     on_progress: Option<&ProgressCallback>,
 ) -> Result<Recognition, RecognizeError> {
     let recognized_at = chrono::Utc::now().to_rfc3339();
+    tracing::debug!(
+        "[识别] 进入识别: {}（缩略图优先={}，焦点优先={}）",
+        capture.base_name,
+        thumb_bytes.is_some_and(|b| !b.is_empty()),
+        focus_override.is_some()
+    );
 
     // ---- 1. 输入源解析（pica recognition_pipeline_service.dart:41-49） ----
     let source = match resolve_source_with_thumbnail(capture, thumb_bytes) {
@@ -321,6 +331,7 @@ fn recognize_capture_impl(
         Ok(Some(d)) => d,
         Ok(None) => {
             // 检测无框 → Unrecognized (Detection)（pica recognition_pipeline_service.dart:68-75）
+            tracing::debug!("[识别] {} 未检出鸟体（Unrecognized）", capture.base_name);
             let (status, failure_stage) = stage_to_status(RecognitionFailureStage::Detection, true);
             return Ok(Recognition {
                 status,
@@ -439,6 +450,11 @@ fn recognize_region_impl(
     on_progress: Option<&ProgressCallback>,
 ) -> Result<Recognition, RecognizeError> {
     let recognized_at = chrono::Utc::now().to_rfc3339();
+    tracing::debug!(
+        "[识别] 进入框选识别: {}（缩略图优先={}）",
+        capture.base_name,
+        thumb_bytes.is_some_and(|b| !b.is_empty())
+    );
 
     // ---- 1. 输入源解析（与自动识别同源） ----
     let source = match resolve_source_with_thumbnail(capture, thumb_bytes) {
@@ -595,7 +611,12 @@ fn run_eye_stage(
     };
     let eye_bbox = match eye_bbox {
         Ok(Some(bbox)) => bbox,
-        _ => return (None, None),
+        Ok(None) => return (None, None),
+        Err(e) => {
+            // 系统错误（ORT 推理失败/OOM）与「确实没检出眼」必须可区分
+            tracing::warn!("[识别] 眼检测失败，跳过锐度: {e}");
+            return (None, None);
+        }
     };
 
     // 锐度计算

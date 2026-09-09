@@ -118,6 +118,8 @@ pub enum FolderDbError {
 #[derive(Clone)]
 pub struct FolderDb {
     conn: Arc<Mutex<rusqlite::Connection>>,
+    /// 照片目录根（recognition/adjustments 的相对路径键 → 磁盘存在性判定用）
+    root: PathBuf,
 }
 
 impl FolderDb {
@@ -159,6 +161,7 @@ impl FolderDb {
         ensure_exif_focus_column(&mut conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            root: dir.to_path_buf(),
         })
     }
 
@@ -225,10 +228,21 @@ impl FolderDb {
         if let Some(cached) = self.get_exif(path)? {
             return Ok(cached);
         }
-        let exif = crate::exif::extract_exif(path, format)
-            .unwrap_or_default();
-        let _ = self.put_exif(path, &exif);
-        Ok(exif)
+        // 提取失败不写缓存：失败若被写成全 NULL 行，会以正确指纹命中缓存，
+        // 之后 enrich 永远拿到空 EXIF 且不再重试（负缓存毒化）。
+        match crate::exif::extract_exif(path, format) {
+            Ok(exif) => {
+                let _ = self.put_exif(path, &exif);
+                Ok(exif)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "EXIF 提取失败（不写缓存，下次重试）: {} — {e}",
+                    path.display()
+                );
+                Ok(ExifMetadata::default())
+            }
+        }
     }
 
     /// 全量读取 exif_cache（扫描闭包一次性载入内存，替代逐文件 1 查询 + 1 stat）。
@@ -769,6 +783,11 @@ impl FolderDb {
     ///   统一由 app 层 `spawn_enrich_tasks` 并发提取回填（避免与 enrich 对同一新文件
     ///   重复 LibRaw open/unpack；RAW 100-300ms/次，串行跑会拖出数十秒的尾部）。
     /// - **xmp_meta** / **recognition**：仅删除文件已不存在的行，**不重新识别/不重新读取**。
+    /// 相对路径（正斜杠）→ 磁盘完整路径（孤儿清理的存在性判定用）。
+    fn full_path_of_rel(&self, rel: &str) -> PathBuf {
+        self.root.join(rel)
+    }
+
     pub fn sync_with_scan(
         &self,
         entries: &[FileEntry],
@@ -791,7 +810,9 @@ impl FolderDb {
                 .filter_map(|r| r.ok()).collect();
             let total = db_paths.len();
             for (i, p) in db_paths.iter().enumerate() {
-                if !entry_paths.contains(p.as_str()) {
+                // 只清「不在本次扫描清单 **且磁盘上确实不存在**」的行：单层扫描时
+                // 子目录文件不在清单里但真实存在，不能当孤儿删掉（会丢用户数据）
+                if !entry_paths.contains(p.as_str()) && !Path::new(p).exists() {
                     conn.execute("DELETE FROM exif_cache WHERE path = ?1", rusqlite::params![p])?;
                     stats.cache_deleted += 1;
                 }
@@ -803,7 +824,7 @@ impl FolderDb {
             let db_paths: Vec<String> = stmt.query_map([], |row| row.get(0))?
                 .filter_map(|r| r.ok()).collect();
             for p in &db_paths {
-                if !entry_paths.contains(p.as_str()) {
+                if !entry_paths.contains(p.as_str()) && !Path::new(p).exists() {
                     conn.execute("DELETE FROM xmp_meta WHERE path = ?1", rusqlite::params![p])?;
                 }
             }
@@ -815,7 +836,7 @@ impl FolderDb {
             let db_paths: Vec<String> = stmt.query_map([], |row| row.get(0))?
                 .filter_map(|r| r.ok()).collect();
             for p in &db_paths {
-                if !entry_paths.contains(p.as_str()) {
+                if !entry_paths.contains(p.as_str()) && !Path::new(p).exists() {
                     conn.execute("DELETE FROM keywords WHERE path = ?1", rusqlite::params![p])?;
                 }
             }
@@ -825,7 +846,7 @@ impl FolderDb {
             let db_rel_paths: Vec<String> = stmt.query_map([], |row| row.get(0))?
                 .filter_map(|r| r.ok()).collect();
             for rp in &db_rel_paths {
-                if !entry_rel_paths.contains(rp.as_str()) {
+                if !entry_rel_paths.contains(rp.as_str()) && !self.full_path_of_rel(rp).exists() {
                     conn.execute("DELETE FROM recognition WHERE rel_path = ?1", rusqlite::params![rp])?;
                     stats.recognition_deleted += 1;
                 }
@@ -836,7 +857,7 @@ impl FolderDb {
             let db_rel_paths: Vec<String> = stmt.query_map([], |row| row.get(0))?
                 .filter_map(|r| r.ok()).collect();
             for rp in &db_rel_paths {
-                if !entry_rel_paths.contains(rp.as_str()) {
+                if !entry_rel_paths.contains(rp.as_str()) && !self.full_path_of_rel(rp).exists() {
                     conn.execute("DELETE FROM adjustments WHERE rel_path = ?1", rusqlite::params![rp])?;
                     stats.adjustments_deleted += 1;
                 }

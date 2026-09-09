@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use photo_domain::{BatchOpType, Capture};
 
@@ -18,11 +18,23 @@ pub fn expand_with_siblings(
     if sync_formats.is_empty() {
         return indices.to_vec();
     }
-    // stem → 命中格式的 capture 索引（一次遍历建索引）
-    let mut by_stem: HashMap<&str, Vec<usize>> = HashMap::new();
+    // (父目录, stem) → 命中格式的 capture 索引：同 stem 不同目录不是同画面
+    // （递归扫描下 2024-01-01/IMG_1 与 2024-02-01/IMG_1），必须按目录隔离，
+    // 否则「同步同名文件」会把别的目录的同名兄弟一起移动/删除
+    let parent_of = |c: &Capture| -> PathBuf {
+        c.source_files
+            .get(c.primary_index)
+            .and_then(|f| f.path.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default()
+    };
+    let mut by_stem: HashMap<(PathBuf, &str), Vec<usize>> = HashMap::new();
     for (i, c) in captures.iter().enumerate() {
         if capture_format_matches(c, sync_formats) {
-            by_stem.entry(c.base_name.as_str()).or_default().push(i);
+            by_stem
+                .entry((parent_of(c), c.base_name.as_str()))
+                .or_default()
+                .push(i);
         }
     }
     let mut out = Vec::new();
@@ -34,7 +46,7 @@ pub fn expand_with_siblings(
         }
         out.push(idx);
         let Some(c) = captures.get(idx) else { continue };
-        if let Some(sibs) = by_stem.get(c.base_name.as_str()) {
+        if let Some(sibs) = by_stem.get(&(parent_of(c), c.base_name.as_str())) {
             for &s in sibs {
                 if seen.insert(s) {
                     out.push(s);
@@ -45,7 +57,29 @@ pub fn expand_with_siblings(
     out
 }
 
-/// 执行批量操作，返回每个文件的可读结果
+/// 按主文件路径白名单筛选 capture 索引（批量操作 = 前端筛选结果驱动）。
+///
+/// 空白名单返回空索引——**不落回全量**，避免「筛选结果为空」时误操作整个目录。
+pub fn select_by_paths(captures: &[Capture], paths: &HashSet<String>) -> Vec<usize> {
+    if paths.is_empty() {
+        return Vec::new();
+    }
+    captures
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| {
+            c.source_files
+                .get(c.primary_index)
+                .is_some_and(|f| paths.contains(f.path.to_string_lossy().as_ref()))
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// 执行批量操作，返回每个文件的结果（Ok = 成功消息，Err = 失败消息）。
+///
+/// 结构化返回避免调用方按「消息里是否含『失败』」这种字符串判定分类——文件名
+/// 本身可能含该子串，导致成功项被误判为失败并漏记撤销日志。
 ///
 /// `target_dir` — 复制/移动的目标目录（删除操作时可为 None）
 /// `on_progress` — 处理完每个文件后回调 (completed, total)
@@ -55,14 +89,19 @@ pub fn execute(
     op_type: BatchOpType,
     target_dir: Option<&Path>,
     on_progress: impl Fn(u32, u32),
-) -> Vec<String> {
+) -> Vec<Result<String, String>> {
     let mut results = Vec::new();
     let total = indices.len() as u32;
 
     let target_dir = if op_type.needs_target_dir() {
         match target_dir {
             Some(d) if !d.as_os_str().is_empty() => Some(d),
-            _ => return vec!["错误：目标目录未指定".into()],
+            _ => {
+                return indices
+                    .iter()
+                    .map(|_| Err("错误：目标目录未指定".to_string()))
+                    .collect();
+            }
         }
     } else {
         None
@@ -83,8 +122,8 @@ pub fn execute(
         };
 
         match result {
-            Ok(msg) => results.push(msg),
-            Err(e) => results.push(format!("{verb}失败: {} — {e}", name)),
+            Ok(msg) => results.push(Ok(msg)),
+            Err(e) => results.push(Err(format!("{verb}失败: {} — {e}", name))),
         }
 
         on_progress(i as u32 + 1, total);
@@ -156,6 +195,27 @@ mod tests {
     }
 
     #[test]
+    fn test_expand_with_siblings_same_stem_different_dirs_not_merged() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("a")).unwrap();
+        std::fs::create_dir_all(dir.path().join("b")).unwrap();
+        std::fs::write(dir.path().join("a").join("IMG_1.JPG"), b"x").unwrap();
+        std::fs::write(dir.path().join("b").join("IMG_1.NEF"), b"x").unwrap();
+        let caps =
+            scanner::scan_directory_recursive(dir.path(), &Default::default(), None).unwrap();
+
+        let idx_jpg = caps
+            .iter()
+            .position(|c| {
+                c.base_name == "IMG_1" && c.source_files[0].format == ImageFormat::Jpeg
+            })
+            .expect("a/IMG_1.JPG");
+        let sync: HashSet<String> = ["NEF".into()].into();
+        let expanded = expand_with_siblings(&caps, &[idx_jpg], &sync);
+        assert_eq!(expanded, vec![idx_jpg], "跨目录同 stem 不应并入兄弟");
+    }
+
+    #[test]
     fn test_expand_with_siblings_empty_formats_no_expand() {
         let dir = TempDir::new().unwrap();
         create_files(&dir, &[("A", "JPG"), ("A", "NEF")]);
@@ -200,14 +260,37 @@ mod tests {
     }
 
     #[test]
+    fn test_select_by_paths_whitelist_and_empty() {
+        let dir = TempDir::new().unwrap();
+        create_files(&dir, &[("a", "JPG"), ("b", "JPG"), ("c", "JPG")]);
+        let caps = scan(&dir);
+
+        // 空白名单 = 空操作集（绝不落回全量）
+        let empty: HashSet<String> = HashSet::new();
+        assert!(select_by_paths(&caps, &empty).is_empty());
+
+        // 只选 b：其余文件不进入操作集
+        let mut allow = HashSet::new();
+        let b_path = caps
+            .iter()
+            .find(|c| c.base_name == "b")
+            .map(|c| c.source_files[c.primary_index].path.to_string_lossy().to_string())
+            .unwrap();
+        allow.insert(b_path);
+        let idx = select_by_paths(&caps, &allow);
+        assert_eq!(idx.len(), 1);
+        assert_eq!(caps[idx[0]].base_name, "b");
+    }
+
+    #[test]
     fn test_execute_delete_requires_no_target() {
         let dir = TempDir::new().unwrap();
         create_files(&dir, &[("del_me", "RW2")]);
         let source = scan(&dir);
 
         let results = execute(&source, &[0], BatchOpType::Delete, None, |_, _| {});
-        assert!(results.iter().any(|r| r.contains("删除")));
-        assert!(results.iter().all(|r| !r.contains("失败")));
+        assert!(results.iter().any(|r| r.as_ref().is_ok_and(|s| s.contains("删除"))));
+        assert!(results.iter().all(|r| r.is_ok()));
     }
 
     #[test]
@@ -217,6 +300,8 @@ mod tests {
         let source = scan(&dir);
 
         let results = execute(&source, &[0], BatchOpType::Copy, None, |_, _| {});
-        assert!(results.iter().any(|r| r.contains("目标目录未指定")));
+        assert!(results
+            .iter()
+            .any(|r| r.as_ref().is_err_and(|e| e.contains("目标目录未指定"))));
     }
 }

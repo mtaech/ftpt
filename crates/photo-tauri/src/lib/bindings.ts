@@ -48,7 +48,7 @@ export const commands = {
 	listSubdirs: (path: string) => typedError<SubdirInfo[], string>(__TAURI_INVOKE("list_subdirs", { path })),
 	/**
 	 *  名录库全量鸟种（拼音排序，筛选下拉数据源）。
-	 *  名录库在 exe 同级 data/pica_ref.db（与 Recognizer 同路径约定）；
+	 *  名录库在数据根目录下 data/pica_ref.db（与 Recognizer 同路径约定）；
 	 *  photo-recognize 的 list_all_species 已按 cn_name_pinyin 排序（缺失回退中文名）。
 	 */
 	listBirdSpecies: () => typedError<string[], string>(__TAURI_INVOKE("list_bird_species")),
@@ -63,6 +63,17 @@ export const commands = {
 	 *  加载不阻塞主图：前端异步拉取后以主图同尺寸叠放；内存缓存按 (路径, 文件大小)。
 	 */
 	getClippingMask: (path: string) => typedError<number[], string>(__TAURI_INVOKE("get_clipping_mask", { path })),
+	/**
+	 *  把指定照片解码为全尺寸 RGBA，写入系统剪贴板（图片形式）。
+	 *  - 常规可解码格式（JPEG/PNG/WebP/BMP/GIF）：直接读原文件字节，image crate 全尺寸解码——
+	 *    不缩放（微信/修图粘贴需原分辨率）。
+	 *  - RAW / TIFF / HEIF：复用缩略图缓存的全尺寸生成路径（RAW 走 full 母版，TIFF/HEIF 走
+	 *    u32::MAX 母版 JPEG），再解码为 RGBA。
+	 *  失败（文件不存在/解码异常）返回文案。
+	 */
+	copyImageToClipboard: (path: string) => typedError<null, string>(__TAURI_INVOKE("copy_image_to_clipboard", { path })),
+	/**  把指定文本写入系统剪贴板（如复制文件绝对路径；供「复制路径」菜单项使用）。 */
+	copyTextToClipboard: (text: string) => typedError<null, string>(__TAURI_INVOKE("copy_text_to_clipboard", { text })),
 	/**
 	 *  批量识别：spawn_blocking 后台逐张识别（多线程分块，每线程独占 Recognizer——
 	 *  Session 需 &mut，不可跨线程共享）。
@@ -138,7 +149,7 @@ export const commands = {
 	/**
 	 *  名录搜索（SpeciesCorrectDialog 数据源）：按中文名/拼音/拉丁名子串匹配，
 	 *  仅鸟纲，中文名命中优先、拼音次之、拉丁名最后（组内拼音排序）。
-	 *  名录库在 exe 同级 data/pica_ref.db（与 list_bird_species 同路径约定）。
+	 *  名录库在数据根目录下 data/pica_ref.db（与 list_bird_species 同路径约定）。
 	 */
 	searchCatalog: (query: string, limit: number) => typedError<CatalogEntry[], string>(__TAURI_INVOKE("search_catalog", { query, limit })),
 	/**
@@ -179,10 +190,9 @@ export const commands = {
 	 */
 	listSystemFonts: () => typedError<string[], string>(__TAURI_INVOKE("list_system_fonts")),
 	/**
-	 *  更新并保存配置（设置面板）：钳制校验后替换 st.config + save_config。
-	 *  钳制范围：leftPanelWidth 200–480、rightPanelWidth 200–480、
-	 *  recognitionThreadCount 1–4、thumbnailSize 64–1024（网格 cell = 尺寸 + 56，
-	 *  越界值钳到合理区间，设置语义一致，非法输入不报错）。
+	 *  更新并保存配置（设置面板）：钳制后替换 st.config + save_config。
+	 *  钳制范围集中在 photo-config 的 AppConfig::clamped（与 load_config 同一套，
+	 *  手改配置文件也不会拖坏 UI）；非法输入钳到合理区间，不报错。
 	 */
 	setAppConfig: (config: AppConfig) => typedError<null, string>(__TAURI_INVOKE("set_app_config", { config })),
 	/**
@@ -290,6 +300,18 @@ export const commands = {
 	 *  供前端启动自愈/重拉（对应 captures.reload 模式）。
 	 */
 	getQualityScores: () => __TAURI_INVOKE<([string, number | null])[]>("get_quality_scores"),
+	/**
+	 *  前端日志转发：console / 未捕获异常 → 同一日志管道（与 Rust tracing 同文件）。
+	 *  level 取值 debug|info|warn|error；context 标注来源（组件/调用点），日志 target 为
+	 *  frontend。命令本身不失败：日志链路故障静默，不影响前端主流程。
+	 */
+	log: (level: string, message: string, context: string | null) => __TAURI_INVOKE<void>("log", { level, message, context }),
+	/**  当前日志文件路径（设置「关于」页展示；文件名含当天日期） */
+	getLogFilePath: () => __TAURI_INVOKE<string>("get_log_file_path"),
+	/**  用系统默认文本编辑器打开当前日志文件（复用 open_config_file 的打开语义） */
+	openLogFile: () => typedError<null, string>(__TAURI_INVOKE("open_log_file")),
+	/**  在系统文件管理器中打开日志目录（<配置目录>/logs/） */
+	openLogDirectory: () => typedError<null, string>(__TAURI_INVOKE("open_log_directory")),
 };
 
 /* Types */
@@ -312,7 +334,7 @@ export type AppConfig = {
 	lastDirectory?: string | null,
 	recentDirectories?: string[],
 	theme?: Theme,
-	/**  Material You 主题 seed 色（`#RRGGBB`）。None = 前端用默认琥珀 seed `#d99a3c`。 */
+	/**  Material You 主题 seed 色（`#RRGGBB`）。None = 前端用默认蓝 seed `#3b82f6`。 */
 	accentColor?: string | null,
 	leftPanelWidth?: number,
 	rightPanelVisible?: boolean,
@@ -333,7 +355,7 @@ export type AppConfig = {
 	 *  布尔字段无需钳制；改动后需重新扫描生效（scan 编排处按此值选单层/递归）。
 	 */
 	includeSubdirectories?: boolean,
-	/**  网格堆叠模式（默认 ByTime = 同组照片堆叠；旧配置无此字段时回退默认）。 */
+	/**  网格堆叠模式（默认 None = 不堆叠；旧配置无此字段时回退默认）。 */
 	stackMode?: StackMode,
 	/**
 	 *  网格每行图片数（2-5，默认 4）。固定列数后 cell 宽由容器自适应，
@@ -375,9 +397,15 @@ export type BatchOpItem = {
 
 /**
  *  `batch_op_preview`/`batch_op_execute` 的选项：
+ *  paths = 操作对象白名单（前端筛选结果，ADR 0006 筛选驱动）；
  *  targetDir = Move/Copy 必填、Delete 忽略；syncSiblings + formats = 画面粒度同步同名兄弟
  */
 export type BatchOpOptions = {
+	/**
+	 *  操作对象白名单（主文件绝对路径 = 当前筛选结果）。
+	 *  空 = 空操作集（不落回全量，防「筛选后误操作整个目录」）
+	 */
+	paths: string[],
 	/**  目标目录（Move/Copy 必填；Delete 忽略） */
 	targetDir: string | null,
 	/**  是否按同名扩展操作集（同步兄弟文件，画面粒度 ADR 0006） */
@@ -793,7 +821,7 @@ export type SpeciesStat = {
 /**
  *  网格堆叠模式：None = 不堆叠（每文件一项）；ByFileName = 同文件名（stem）合并
  *  （JPG/NEF 同画面，前端 stacks.ts 按 baseName 分组）；ByTime = 同组照片堆叠
- *  （拍摄时间差 ≤2s 的连拍合并，前端按 dateTaken 聚类）。默认 ByTime。
+ *  （拍摄时间差 ≤2s 的连拍合并，前端按 dateTaken 聚类）。默认 None = 不堆叠。
  */
 export type StackMode = "None" | "ByFileName" | "ByTime";
 
@@ -859,7 +887,6 @@ export type FilterCriteria = {
   lensFilter: string[]
   keywordFilter: string[]
 }
-
 /* Tauri Specta runtime */
 async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {
     try {

@@ -36,6 +36,8 @@ export const useFilterStore = defineStore('filter', {
     speciesOptions: [] as string[],
     /** 堆叠激活覆盖：stem → 激活成员下标（用户手动切换；空对象 = 全部默认主格式） */
     stackActive: {} as Record<string, number>,
+    /** 激活覆盖所属目录（换目录后下标语义失效，旧覆盖不再生效） */
+    stackActiveDir: null as string | null,
   }),
   getters: {
     /** 过滤+排序后的下标数组（captures.items 下标，对齐 Rust display_order） */
@@ -84,9 +86,12 @@ export const useFilterStore = defineStore('filter', {
           : mode === 'ByFileName'
             ? groupStacks(indices, captures.items)
             : groupByTime(indices, captures.items)
-      for (const g of groups) {
-        const override = this.stackActive[g.key]
-        if (override !== undefined && g.members.includes(override)) g.active = override
+      // 激活覆盖只在同一目录内有效：换目录后 items 下标语义失效，忽略旧覆盖
+      if (this.stackActiveDir === captures.directory) {
+        for (const g of groups) {
+          const override = this.stackActive[g.key]
+          if (override !== undefined && g.members.includes(override)) g.active = override
+        }
       }
       return groups
     },
@@ -161,6 +166,7 @@ export const useFilterStore = defineStore('filter', {
     /** 手动指定堆叠激活成员（分组键不存在时写入无害——getter 落不到组上） */
     setStackActive(key: string, index: number) {
       this.stackActive = { ...this.stackActive, [key]: index }
+      this.stackActiveDir = useCapturesStore().directory
     },
     /**
      * 堆叠内循环切换激活成员（±1 循环）。返回新激活成员下标（组不存在/单成员

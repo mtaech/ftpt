@@ -5,7 +5,7 @@
 // 成功后在 captures store 本地同步识别摘要字段。
 // 入口：InfoPanel 识别卡「纠正…」按钮 / 网格右键「纠正鸟种…」（recognition store 管理显隐）。
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { SearchIcon, XIcon } from '@lucide/vue'
+import { CheckIcon, SearchIcon, XIcon } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -43,8 +43,10 @@ let debounceTimer: ReturnType<typeof setTimeout> | null = null
 /** 加载序号：切图后旧请求结果直接丢弃（防异步回填串图，同 InfoPanel loadRecognition 模式） */
 let loadSeq = 0
 
-/** Top-5 候选（含未映射项：bird 为 null 显示「未映射」不可选） */
-const candidates = computed(() => fullRecognition.value?.candidates ?? [])
+/** Top-5 候选（仅已映射项：bird 非空；未映射类别不出现在候选列表，用户可走「名录搜索」手动选） */
+const candidates = computed(() =>
+  (fullRecognition.value?.candidates ?? []).filter((c) => c.bird != null),
+)
 
 /** 置信度归一化：mock 为 0–1 小数、真实后端 0–100，统一到 0–100 */
 function confPercent(c: number | null): number {
@@ -113,22 +115,26 @@ function selectFromBird(bird: BirdMatch) {
   selected.value = { birdId: bird.birdId, cnName: bird.cnName, latinName: bird.latinName }
 }
 
-/** 候选点击：仅 bird 非空项可选（未映射项置灰） */
+/** 候选点击：选中已映射候选（候选列表已过滤，bird 均非空） */
 function pickCandidate(c: BirdCandidate) {
   if (c.bird) selectFromBird(c.bird)
 }
 
-/** 候选按钮样式：选中高亮 / 未映射置灰 */
-function candidateCls(c: BirdCandidate): string {
-  if (!c.bird) return 'cursor-not-allowed border-border/60 text-muted-foreground/60'
-  return selected.value?.birdId === c.bird.birdId
-    ? 'border-primary bg-primary/10 text-primary'
-    : 'border-border hover:bg-accent hover:text-accent-foreground'
+/** 候选是否已选中（列表样式与勾选标记共用判断） */
+function isCandidateSelected(c: BirdCandidate): boolean {
+  return selected.value?.birdId === c.bird!.birdId
 }
 
-/** 候选按钮文案：有映射显示中文名，未映射显示类别号 */
+/** 候选按钮样式：选中高亮（候选已过滤，无未映射置灰态） */
+function candidateCls(c: BirdCandidate): string {
+  return isCandidateSelected(c)
+    ? 'border-primary/40 bg-primary/10 text-primary'
+    : 'border-transparent bg-muted/50 text-foreground hover:bg-element-hover'
+}
+
+/** 候选按钮文案：中文明（候选已过滤，无「未映射（类别 #）」文案） */
 function candidateLabel(c: BirdCandidate): string {
-  return c.bird ? c.bird.cnName : `未映射（类别 #${c.classIndex}）`
+  return c.bird!.cnName
 }
 
 /** 名录条目选中 */
@@ -184,8 +190,10 @@ onUnmounted(() => {
       class="flex max-h-[85vh] w-[26rem] flex-col gap-0 p-0 sm:max-w-[26rem]"
     >
       <!-- 头栏 -->
-      <div class="flex shrink-0 items-center justify-between border-b px-4 py-3">
-        <DialogTitle class="text-base font-semibold">纠正鸟种（{{ paths.length }} 张）</DialogTitle>
+      <div class="flex shrink-0 items-center justify-between gap-2 border-b border-border/70 px-4 py-3.5">
+        <DialogTitle class="text-sm font-semibold tracking-tight">
+          纠正鸟种<span class="ml-1 font-normal text-muted-foreground">（{{ paths.length }} 张）</span>
+        </DialogTitle>
         <DialogClose as-child>
           <Button
             variant="ghost"
@@ -198,7 +206,7 @@ onUnmounted(() => {
         </DialogClose>
       </div>
 
-      <div class="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+      <div class="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
         <DialogDescription class="sr-only">
           从模型候选或名录搜索中选择鸟种，批量写回识别结果
         </DialogDescription>
@@ -206,31 +214,33 @@ onUnmounted(() => {
         <!-- 当前识别（无识别记录时不显示，直接从候选/搜索选择） -->
         <div
           v-if="fullRecognition?.bird"
-          class="rounded-md border border-border px-3 py-2 text-xs"
+          class="flex items-center justify-between gap-2 rounded-md border border-primary/20 bg-primary/5 px-3 py-2.5"
         >
-          <span class="text-muted-foreground">当前：</span>
-          <span class="font-medium text-primary">{{ fullRecognition.bird.cnName }}</span>
-          <span v-if="fullRecognition.confidence != null" class="ml-1 text-muted-foreground">
+          <div class="flex min-w-0 items-center gap-1.5">
+            <span class="shrink-0 text-[11px] text-muted-foreground">当前</span>
+            <span class="truncate text-xs font-medium text-primary">{{ fullRecognition.bird.cnName }}</span>
+          </div>
+          <span v-if="fullRecognition.confidence != null" class="shrink-0 text-xs tabular-nums text-muted-foreground">
             {{ confPercent(fullRecognition.confidence) }}%
           </span>
         </div>
 
-        <!-- Top-5 模型候选：bird 非空项点击即选中，未映射项置灰不可选 -->
+        <!-- Top-5 模型候选：仅展示已映射 bird 的候选（未映射类别已在 candidates 过滤，不出现）；点击即选中 -->
         <div class="space-y-1.5">
-          <label class="text-sm font-medium">模型候选</label>
+          <label class="text-[11px] font-semibold text-muted-foreground">模型候选</label>
           <template v-if="candidates.length > 0">
             <button
               v-for="(c, i) in candidates"
               :key="i"
               type="button"
-              :disabled="!c.bird"
-              class="flex w-full items-center justify-between rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors"
+              class="flex w-full items-center justify-between gap-2 rounded-md border px-2.5 py-2 text-left text-xs transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
               :class="candidateCls(c)"
               @click="pickCandidate(c)"
             >
               <span class="truncate">{{ candidateLabel(c) }}</span>
-              <span v-if="c.bird" class="shrink-0 text-muted-foreground">
-                {{ confPercent(c.confidence) }}%
+              <span class="flex shrink-0 items-center gap-1.5">
+                <CheckIcon v-if="isCandidateSelected(c)" class="size-3.5 text-primary" />
+                <span class="tabular-nums text-muted-foreground">{{ confPercent(c.confidence) }}%</span>
               </span>
             </button>
           </template>
@@ -239,7 +249,7 @@ onUnmounted(() => {
 
         <!-- 常用：高频鸟种快捷项（空搜索词时显示；本机使用频次降序，沿用原修正下拉） -->
         <div v-if="frequent.length > 0 && !query.trim()" class="space-y-1.5">
-          <label class="text-sm font-medium">常用</label>
+          <label class="text-[11px] font-semibold text-muted-foreground">常用</label>
           <div class="flex flex-wrap gap-1.5">
             <button
               v-for="name in frequent"
@@ -249,8 +259,8 @@ onUnmounted(() => {
               class="rounded-full border px-2.5 py-1 text-xs transition-colors"
               :class="
                 selected?.cnName === name
-                  ? 'border-primary bg-primary/10 text-primary'
-                  : 'border-border hover:bg-accent hover:text-accent-foreground'
+                  ? 'border-primary/40 bg-primary/10 text-primary'
+                  : 'border-border/70 bg-muted/40 hover:bg-element-hover hover:text-foreground'
               "
               @click="pickFrequent(name)"
             >
@@ -261,32 +271,32 @@ onUnmounted(() => {
 
         <!-- 名录搜索：300ms 防抖调 search_catalog -->
         <div class="space-y-1.5">
-          <label class="text-sm font-medium">名录搜索</label>
+          <label class="text-[11px] font-semibold text-muted-foreground">名录搜索</label>
           <div class="relative">
             <SearchIcon
-              class="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground"
+              class="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
             />
             <input
               v-model="query"
               type="text"
               placeholder="中文名 / 拼音 / 拉丁名…"
-              class="h-8 w-full rounded-md border border-input bg-background pr-2 pl-7 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              class="h-8 w-full rounded-md border border-input bg-background pr-2 pl-8 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-ring/40"
             />
           </div>
           <div
             v-if="query.trim()"
-            class="max-h-44 overflow-y-auto rounded-md border border-border"
+            class="max-h-44 overflow-y-auto rounded-md border border-border bg-popover"
           >
-            <p v-if="searching" class="px-2 py-1.5 text-xs text-muted-foreground">搜索中…</p>
+            <p v-if="searching" class="px-2.5 py-1.5 text-xs text-muted-foreground">搜索中…</p>
             <template v-else>
               <button
                 v-for="e in results"
                 :key="e.birdId"
                 type="button"
-                class="flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left text-xs"
+                class="flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left text-xs transition-colors"
                 :class="
                   selected?.birdId === e.birdId
-                    ? 'bg-accent text-accent-foreground'
+                    ? 'bg-primary/10 text-primary'
                     : 'hover:bg-accent hover:text-accent-foreground'
                 "
                 @click="selectEntry(e)"
@@ -296,7 +306,7 @@ onUnmounted(() => {
               </button>
               <p
                 v-if="!searching && results.length === 0"
-                class="px-2 py-1.5 text-xs text-muted-foreground"
+                class="px-2.5 py-1.5 text-xs text-muted-foreground"
               >
                 无匹配鸟种
               </p>
@@ -309,7 +319,7 @@ onUnmounted(() => {
       </div>
 
       <!-- 底部：取消 / 应用（选中条目后启用） -->
-      <div class="flex shrink-0 items-center justify-end gap-2 border-t px-4 py-3">
+      <div class="flex shrink-0 items-center justify-end gap-2 border-t border-border/70 px-4 py-3">
         <Button
           variant="ghost"
           size="sm"

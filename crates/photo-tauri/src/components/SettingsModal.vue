@@ -6,13 +6,19 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { getVersion, getTauriVersion } from '@tauri-apps/api/app'
 import { version as vueVersion } from 'vue'
-import { BookOpenIcon, FileTextIcon, InfoIcon, MoonIcon, SettingsIcon, SunIcon, XIcon } from '@lucide/vue'
+import { BookOpenIcon, FileTextIcon, FolderOpenIcon, InfoIcon, MoonIcon, SettingsIcon, SunIcon, XIcon } from '@lucide/vue'
 import { Dialog, DialogClose, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Button } from '@/components/ui/button'
 import { useConfigStore } from '@/stores/config'
 import { useCapturesStore } from '@/stores/captures'
-import { listSystemFonts, openConfigFile as openConfigFileIpc } from '@/lib/ipc'
+import {
+  getLogFilePath,
+  listSystemFonts,
+  openConfigFile as openConfigFileIpc,
+  openLogDirectory,
+  openLogFile,
+} from '@/lib/ipc'
 import { BINDINGS, type KeyBinding, type KeymapAction } from '@/keymap'
 import type { DetectionSource, StackMode, Theme } from '@/lib/bindings'
 import { DEFAULT_ACCENT } from '@/lib/m3Theme'
@@ -277,6 +283,37 @@ async function openConfigFile() {
     await openConfigFileIpc()
   } catch (e) {
     configOpenError.value = String(e)
+  }
+}
+
+// ── 日志：当前日志文件路径 + 打开日志文件/目录（对齐 open_config_file 语义） ──
+
+/** 当前日志文件路径（加载中/失败为空；mock 模式返回占位文案） */
+const logFilePath = ref('')
+const logOpenError = ref<string | null>(null)
+onMounted(async () => {
+  try {
+    logFilePath.value = await getLogFilePath()
+  } catch {
+    // 非 Tauri 环境（mock）静默
+  }
+})
+
+async function openLogFileBtn() {
+  logOpenError.value = null
+  try {
+    await openLogFile()
+  } catch (e) {
+    logOpenError.value = String(e)
+  }
+}
+
+async function openLogDirectoryBtn() {
+  logOpenError.value = null
+  try {
+    await openLogDirectory()
+  } catch (e) {
+    logOpenError.value = String(e)
   }
 }
 </script>
@@ -578,6 +615,37 @@ async function openConfigFile() {
               <p>配置存于用户主目录统一位置（~/.config/pt/config.toml，Windows 为 %USERPROFILE%\.config\pt\config.toml）。</p>
               <p>缩略图缓存随扫描目录存放（每个目录下 .pt/thumbs）。</p>
             </div>
+            <!-- 日志：路径 + 打开文件/目录（对齐 logging.rs 落盘语义） -->
+            <section class="space-y-2.5 rounded-md border border-border bg-card/50 p-3 text-xs">
+              <div class="flex items-center justify-between">
+                <p class="text-sm font-medium text-foreground">运行日志</p>
+                <div class="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    class="inline-flex shrink-0 items-center gap-1 text-sm font-medium text-primary underline-offset-4 hover:underline"
+                    @click="openLogFileBtn"
+                  >
+                    <FileTextIcon class="size-4" />
+                    打开日志文件
+                  </button>
+                  <button
+                    type="button"
+                    class="inline-flex shrink-0 items-center gap-1 text-sm font-medium text-primary underline-offset-4 hover:underline"
+                    @click="openLogDirectoryBtn"
+                  >
+                    <FolderOpenIcon class="size-4" />
+                    打开日志目录
+                  </button>
+                </div>
+              </div>
+              <p class="break-all text-muted-foreground">
+                路径：{{ logFilePath || '（加载中…）' }}
+              </p>
+              <p class="text-muted-foreground">
+                记录 Rust 后端（扫描/识别/批量操作）与前端 console/异常；按天滚动保留 14 份。
+              </p>
+              <p v-if="logOpenError" class="text-destructive">打开失败：{{ logOpenError }}</p>
+            </section>
           </TabsContent>
         </div>
       </Tabs>

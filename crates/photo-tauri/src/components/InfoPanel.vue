@@ -510,6 +510,8 @@ function fmtField(key: keyof AdjustParams, v: number): string {
 /** 加载序号：切图后旧请求的结果直接丢弃（防异步回填串图） */
 let loadSeq = 0
 let persistTimer: ReturnType<typeof setTimeout> | null = null
+/** 待写去抖对应的目标路径（切图时把最后一笔写回旧图，而不是写进新图） */
+let persistPath: string | null = null
 
 const isNeutral = computed(
   () => adj.exposure === 0 && adj.contrast === 0 && adj.saturation === 0,
@@ -518,11 +520,9 @@ const isNeutral = computed(
 /** 焦点图变化：重新拉取该图已持久化的调整参数 */
 watch(
   focusedPath,
-  (path) => {
-    if (persistTimer) {
-      clearTimeout(persistTimer)
-      persistTimer = null
-    }
+  (path, oldPath) => {
+    // 切图前把旧图最后一笔未落盘的调整写回：否则 350ms 去抖内的改动静默丢失
+    if (oldPath && persistTimer) flushPersist()
     if (!path) {
       adj.exposure = 0
       adj.contrast = 0
@@ -541,19 +541,19 @@ watch(
   { immediate: true },
 )
 
-function persistNow() {
-  const path = focusedPath.value
-  if (!path) return
+/** 把当前 adj 写回指定路径 */
+function persistTo(path: string) {
   void setAdjustments(path, { exposure: adj.exposure, contrast: adj.contrast, saturation: adj.saturation })
 }
 
 /** 拖动/键盘调整：立即更新本地值，350ms 去抖后持久化（去抖语义） */
 function onSliderInput(key: keyof AdjustParams, e: Event) {
   adj[key] = Number((e.target as HTMLInputElement).value)
+  persistPath = focusedPath.value
   if (persistTimer) clearTimeout(persistTimer)
   persistTimer = setTimeout(() => {
     persistTimer = null
-    persistNow()
+    flushPersist()
   }, 350)
 }
 
@@ -573,11 +573,14 @@ function flushPersist() {
     clearTimeout(persistTimer)
     persistTimer = null
   }
-  persistNow()
+  const path = persistPath ?? focusedPath.value
+  persistPath = null
+  if (path) persistTo(path)
 }
 
 onUnmounted(() => {
-  if (persistTimer) clearTimeout(persistTimer)
+  // 卸载前把待写调整落盘（而不是直接丢弃）
+  if (persistTimer) flushPersist()
 })
 
 /** 数值文案：曝光 ±0.00 EV，对比度/饱和度 ±N */
@@ -879,8 +882,9 @@ function fmtSigned(v: number): string {
               <span class="tabular-nums">眼锐度 {{ fullRecognition.eyeSharpness.toFixed(2) }}</span>
               <InfoIcon class="size-3 shrink-0 text-muted-foreground/70" />
             </div>
-            <!-- 动作行：纠正 + 重新识别 + 检测框 -->
-            <div class="flex justify-end gap-1">
+            <!-- 动作行：纠正 + 重新识别 + 检测框
+                 flex-wrap：窄面板（右栏可拖至 200px）下三按钮放不下时换行而非溢出，防 justify-end 把「纠正…」顶出左缘被裁 -->
+            <div class="flex flex-wrap justify-end gap-1">
               <Button size="sm" variant="ghost" @click="onCorrectOpen">
                 <BadgeCheckIcon data-icon="inline-start" />
                 纠正…

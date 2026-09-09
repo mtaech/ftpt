@@ -10,6 +10,7 @@
 //! - 单张识别完成 / 人工修正 → `upsert_rows`
 //! - 文件删除 / 移出 → `delete_rows`（或整文件夹 `delete_folder_rows`）
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -121,15 +122,30 @@ impl GlobalDb {
         })
     }
 
-    /// 全量替换某文件夹的索引行（扫描完成时调用；rows 为空 = 清空该文件夹全部行）。
+    /// 以本次扫描结果替换某文件夹的索引行（扫描完成时调用）。
+    /// 只删除「本次未出现 **且磁盘上确实不存在**」的行：单层扫描时子目录照片不在
+    /// rows 里但文件真实存在，整批清空会丢掉子目录索引（切换扫描深度时常见）。
     /// 事务包裹；幂等——重复调用结果一致。
     pub fn replace_folder(&self, folder: &str, rows: &[SpeciesRow]) -> Result<(), GlobalDbError> {
         let conn = self.conn.lock();
         let tx = conn.unchecked_transaction()?;
-        tx.execute(
-            "DELETE FROM species_index WHERE folder = ?1",
-            rusqlite::params![folder],
-        )?;
+        let new_rels: HashSet<&str> = rows.iter().map(|r| r.rel_path.as_str()).collect();
+        let existing: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT rel_path FROM species_index WHERE folder = ?1")?;
+            let iter = stmt.query_map(rusqlite::params![folder], |row| row.get::<_, String>(0))?;
+            iter.filter_map(|r| r.ok()).collect()
+        };
+        for rel in existing {
+            if new_rels.contains(rel.as_str()) {
+                continue;
+            }
+            if !Path::new(folder).join(&rel).exists() {
+                tx.execute(
+                    "DELETE FROM species_index WHERE folder = ?1 AND rel_path = ?2",
+                    rusqlite::params![folder, rel],
+                )?;
+            }
+        }
         Self::insert_rows(&tx, rows)?;
         tx.commit()?;
         Ok(())
@@ -425,6 +441,31 @@ mod tests {
         // 空 rows 替换 = 清空该文件夹（文件被外部删除后重扫场景）
         db.replace_folder("E:/A", &[]).unwrap();
         assert!(db.species_stats().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_global_db_replace_folder_keeps_existing_unscanned_rows() {
+        let tmp = TempDir::new().unwrap();
+        let db = GlobalDb::open(tmp.path()).unwrap();
+        let folder = tmp.path().to_string_lossy().to_string();
+        // 子目录文件真实存在：模拟「包含子目录」扫描入库后切回单层扫描
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("bird.jpg"), b"x").unwrap();
+
+        db.replace_folder(
+            &folder,
+            &[row(&folder, "sub/bird.jpg", "白鹭", None, "confirmed", None, None)],
+        )
+        .unwrap();
+        // 单层扫描：rows 为空但文件仍在磁盘 → 索引行保留
+        db.replace_folder(&folder, &[]).unwrap();
+        assert_eq!(db.photos_of_species("白鹭").unwrap().len(), 1);
+
+        // 文件被外部删除后重扫：行才被清掉
+        std::fs::remove_file(sub.join("bird.jpg")).unwrap();
+        db.replace_folder(&folder, &[]).unwrap();
+        assert!(db.photos_of_species("白鹭").unwrap().is_empty());
     }
 
     #[test]
