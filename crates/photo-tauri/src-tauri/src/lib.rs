@@ -2983,14 +2983,46 @@ pub struct ImportCandidate {
     pub size: u64,
 }
 
-/// 导入计划组（目标目录 = destRoot/dateDir/）
+/// 导入计划的单文件目标：源路径 + 目标文件名（可被重命名模板改写）
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportFileTarget {
+    /// 源文件完整路径
+    pub source: String,
+    /// 目标文件名（含扩展名）
+    pub target_name: String,
+}
+
+/// 导入计划组（目标目录 = destRoot/subDir/；subDir 为空 = 直接放 destRoot）
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportGroup {
-    /// 日期目录名（YYYY-MM-DD，相对 destRoot）
-    pub date_dir: String,
-    /// 组内源文件完整路径
-    pub files: Vec<String>,
+    /// 目标子目录（相对 destRoot 的正斜杠路径；空串 = 不建子目录）
+    pub sub_dir: String,
+    /// 组内文件（源路径 + 目标文件名）
+    pub files: Vec<ImportFileTarget>,
+}
+
+/// 子目录模式：None 不建子目录 / DateDash 2026-09-10 / DateSlash 2026/09/10 / DateCompact 20260910
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub enum ImportSubfolder {
+    None,
+    #[default]
+    DateDash,
+    DateSlash,
+    DateCompact,
+}
+
+/// 导入的目录/命名选项
+#[derive(Debug, Clone, Default, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportOptions {
+    /// 子目录模式
+    #[serde(default)]
+    pub subfolder: ImportSubfolder,
+    /// 文件重命名模板（None/空 = 保留原名）；占位符 {name} {date} {seq}
+    #[serde(default)]
+    pub rename_template: Option<String>,
 }
 
 /// 计划阶段被跳过的文件
@@ -3113,7 +3145,11 @@ async fn scan_import_source(path: String) -> Result<Vec<ImportCandidate>, String
 /// 不碰任何文件；跳过清单供前端预览前 20 条。
 #[tauri::command]
 #[specta::specta]
-async fn plan_import(candidates: Vec<ImportCandidate>, dest_root: String) -> Result<ImportPlan, String> {
+async fn plan_import(
+    candidates: Vec<ImportCandidate>,
+    dest_root: String,
+    options: ImportOptions,
+) -> Result<ImportPlan, String> {
     let dest = PathBuf::from(dest_root);
     tauri::async_runtime::spawn_blocking(move || {
         let cands: Vec<photo_engine::import::ImportCandidate> = candidates
@@ -3124,14 +3160,30 @@ async fn plan_import(candidates: Vec<ImportCandidate>, dest_root: String) -> Res
                 size: c.size,
             })
             .collect();
-        let plan = photo_engine::import::plan_import(&cands, &dest);
+        let engine_options = photo_engine::import::ImportOptions {
+            subfolder: match options.subfolder {
+                ImportSubfolder::None => photo_engine::import::ImportSubfolder::None,
+                ImportSubfolder::DateDash => photo_engine::import::ImportSubfolder::DateDash,
+                ImportSubfolder::DateSlash => photo_engine::import::ImportSubfolder::DateSlash,
+                ImportSubfolder::DateCompact => photo_engine::import::ImportSubfolder::DateCompact,
+            },
+            rename_template: options.rename_template,
+        };
+        let plan = photo_engine::import::plan_import(&cands, &dest, &engine_options);
         Ok(ImportPlan {
             groups: plan
                 .groups
                 .into_iter()
                 .map(|g| ImportGroup {
-                    date_dir: g.date_dir,
-                    files: g.files.into_iter().map(|p| p.to_string_lossy().to_string()).collect(),
+                    sub_dir: g.sub_dir,
+                    files: g
+                        .files
+                        .into_iter()
+                        .map(|f| ImportFileTarget {
+                            source: f.source.to_string_lossy().to_string(),
+                            target_name: f.target_name,
+                        })
+                        .collect(),
                 })
                 .collect(),
             skipped: plan
@@ -3169,8 +3221,15 @@ async fn execute_import(
             .groups
             .iter()
             .map(|g| photo_engine::import::ImportGroup {
-                date_dir: g.date_dir.clone(),
-                files: g.files.iter().map(PathBuf::from).collect(),
+                sub_dir: g.sub_dir.clone(),
+                files: g
+                    .files
+                    .iter()
+                    .map(|f| photo_engine::import::ImportFileTarget {
+                        source: PathBuf::from(&f.source),
+                        target_name: f.target_name.clone(),
+                    })
+                    .collect(),
             })
             .collect(),
         skipped: Vec::new(),

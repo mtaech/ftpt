@@ -18,6 +18,7 @@ import {
   type ImportCandidate,
   type ImportDrive,
   type ImportMode,
+  type ImportOptions,
   type ImportPlan,
   type ImportResult,
   type Recognition,
@@ -274,8 +275,9 @@ export const scanImportSource: (path: string) => Promise<ImportCandidate[]> = (p
 export const planImport: (
   candidates: ImportCandidate[],
   destRoot: string,
-) => Promise<ImportPlan> = (candidates, destRoot) =>
-  unwrap(api.planImport(candidates, destRoot))
+  options: ImportOptions,
+) => Promise<ImportPlan> = (candidates, destRoot, options) =>
+  unwrap(api.planImport(candidates, destRoot, options))
 export const executeImport: (
   plan: ImportPlan,
   destRoot: string,

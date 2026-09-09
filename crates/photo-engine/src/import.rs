@@ -18,7 +18,7 @@ use thiserror::Error;
 use walkdir::WalkDir;
 
 use chrono::Datelike;
-use photo_domain::{Capture, ImageFormat, SourceFile};
+use photo_domain::ImageFormat;
 
 use crate::exif;
 use crate::ops;
@@ -56,13 +56,22 @@ pub struct ImportCandidate {
     pub size: u64,
 }
 
-/// 按日期分组的导入计划组（目标目录 = dest_root/date_dir/）
+/// 导入计划的单文件目标：源路径 + 目标文件名（可被重命名模板改写）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportFileTarget {
+    /// 源文件完整路径
+    pub source: PathBuf,
+    /// 目标文件名（含扩展名）
+    pub target_name: String,
+}
+
+/// 按子目录分组的导入计划组（目标目录 = dest_root/sub_dir/；sub_dir 为空 = 直接放 dest_root）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportGroup {
-    /// 日期目录名（YYYY-MM-DD，相对 dest_root）
-    pub date_dir: String,
-    /// 该组内的源文件路径
-    pub files: Vec<PathBuf>,
+    /// 目标子目录（相对 dest_root 的正斜杠路径；空串 = 不建子目录）
+    pub sub_dir: String,
+    /// 该组内的源文件与目标文件名
+    pub files: Vec<ImportFileTarget>,
 }
 
 /// 计划阶段被跳过的文件
@@ -213,29 +222,112 @@ fn mtime_date(meta: &std::fs::Metadata) -> String {
         .unwrap_or_else(|_| "1970-01-01".to_string())
 }
 
+/// 子目录模式（相对 dest_root；None = 不建子目录，文件直接放 dest_root）
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ImportSubfolder {
+    /// 不建子目录
+    None,
+    /// 按日期 2026-09-10（默认，与旧行为一致）
+    #[default]
+    DateDash,
+    /// 按日期 2026/09/10
+    DateSlash,
+    /// 按日期 20260910
+    DateCompact,
+}
+
+/// 导入的目录/命名选项
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImportOptions {
+    /// 子目录模式
+    pub subfolder: ImportSubfolder,
+    /// 文件重命名模板（None/空 = 保留原名）；占位符复用 template.rs：
+    /// {name} 原名(无扩展) / {date} 拍摄日期 YYYYMMDD / {seq} 序号（补零 3 位）
+    pub rename_template: Option<String>,
+}
+
+/// 按模式把候选日期（YYYY-MM-DD）渲染为目标子目录（正斜杠）。
+fn render_subdir(mode: ImportSubfolder, date: &str) -> String {
+    let parts: Vec<&str> = date.split('-').collect();
+    let ymd = (parts.len() == 3).then(|| (parts[0], parts[1], parts[2]));
+    match (mode, ymd) {
+        (ImportSubfolder::None, _) => String::new(),
+        (ImportSubfolder::DateSlash, Some((y, m, d))) => format!("{y}/{m}/{d}"),
+        (ImportSubfolder::DateCompact, Some((y, m, d))) => format!("{y}{m}{d}"),
+        // 非法日期原样回退（不会 panic）
+        _ => date.to_string(),
+    }
+}
+
+/// 渲染目标文件名：无模板/模板为空 = 原名；有模板 = 复用 engine::template 渲染
+/// （占位符 {name}/{date}/{seq}，结果经文件名清洗，空结果回退原名）+ 保留原扩展名。
+fn render_target_name(template: Option<&str>, source: &Path, date: &str, seq: u32) -> String {
+    let orig = source
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let Some(template) = template.map(str::trim).filter(|t| !t.is_empty()) else {
+        return orig;
+    };
+    let ext = source
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let stem = source
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let ctx = crate::template::NameTemplateContext {
+        name: stem,
+        species: None,
+        date: Some(date.to_string()),
+        camera: None,
+        seq,
+    };
+    let base = crate::template::render_name_template(template, &ctx);
+    if ext.is_empty() {
+        base
+    } else {
+        format!("{base}.{ext}")
+    }
+}
+
 /// 生成导入计划（干跑，不碰文件）：
-///   1. 按候选日期（YYYY-MM-DD）分组，目标目录 = dest_root/YYYY-MM-DD/
+///   1. 按选项渲染子目录（默认按日期 YYYY-MM-DD）与目标文件名（可选重命名模板）
 ///   2. 目标去重：目标已存在同名文件 → 大小相同 = 已完成导入（跳过）；
 ///      大小不同 = 同名冲突防覆盖（跳过）
-///   3. 组内冲突：两个源文件映射同一目标名 → 保留先者，后者跳过
-pub fn plan_import(candidates: &[ImportCandidate], dest_root: &Path) -> ImportPlan {
+///   3. 计划内冲突：两个源文件映射同一目标（同子目录 + 同目标名）→ 保留先者，后者跳过
+pub fn plan_import(
+    candidates: &[ImportCandidate],
+    dest_root: &Path,
+    options: &ImportOptions,
+) -> ImportPlan {
     let mut groups: Vec<ImportGroup> = Vec::new();
     let mut skipped: Vec<ImportSkipped> = Vec::new();
-    // date_dir → 组索引（保持候选首次出现顺序）
-    let mut group_index: HashMap<&str, usize> = HashMap::new();
-    // date_dir → (目标文件名 → 源大小)：组内已计划目标，防组内同名互踩
+    // sub_dir → 组索引（保持候选首次出现顺序）
+    let mut group_index: HashMap<String, usize> = HashMap::new();
+    // sub_dir → (目标文件名 → 源大小)：已计划目标，防同名互踩
     let mut planned: HashMap<String, HashMap<String, u64>> = HashMap::new();
+    // 重命名序号：只对「被接受」的文件递增（跳过的不占号）
+    let mut next_seq: u32 = 1;
 
     for cand in candidates {
-        let Some(file_name) = cand.path.file_name().map(|n| n.to_string_lossy().to_string()) else {
+        if cand.path.file_name().is_none() {
             skipped.push(ImportSkipped {
                 path: cand.path.clone(),
                 reason: "无法解析文件名".to_string(),
             });
             continue;
-        };
+        }
+        let sub_dir = render_subdir(options.subfolder, &cand.date);
+        let target_name = render_target_name(
+            options.rename_template.as_deref(),
+            &cand.path,
+            &cand.date,
+            next_seq,
+        );
         // 目标已存在：同名同大小 = 去重跳过；同名不同大小 = 防覆盖跳过
-        let target_path = dest_root.join(&cand.date).join(&file_name);
+        let target_path = dest_root.join(&sub_dir).join(&target_name);
         if let Ok(meta) = std::fs::metadata(&target_path) {
             let reason = if meta.len() == cand.size {
                 "目标已存在且大小相同".to_string()
@@ -248,9 +340,9 @@ pub fn plan_import(candidates: &[ImportCandidate], dest_root: &Path) -> ImportPl
             });
             continue;
         }
-        // 组内同名冲突：同一日期组两个源文件映射到同一目标名
-        let planned_for_group = planned.entry(cand.date.clone()).or_default();
-        if let Some(&prev_size) = planned_for_group.get(&file_name) {
+        // 计划内同名冲突：同一目标目录两个源文件映射到同一目标名
+        let planned_for_group = planned.entry(sub_dir.clone()).or_default();
+        if let Some(&prev_size) = planned_for_group.get(&target_name) {
             let reason = if prev_size == cand.size {
                 "源内重复（另一候选同名同大小）".to_string()
             } else {
@@ -262,28 +354,32 @@ pub fn plan_import(candidates: &[ImportCandidate], dest_root: &Path) -> ImportPl
             });
             continue;
         }
-        // 接受该文件时才创建/复用日期组（全部被跳过的日期不产生空组）
-        let group_pos = match group_index.get(cand.date.as_str()) {
+        // 接受该文件时才创建/复用组（全部被跳过的目标目录不产生空组）
+        let group_pos = match group_index.get(&sub_dir) {
             Some(&i) => i,
             None => {
                 groups.push(ImportGroup {
-                    date_dir: cand.date.clone(),
+                    sub_dir: sub_dir.clone(),
                     files: Vec::new(),
                 });
                 let i = groups.len() - 1;
-                group_index.insert(cand.date.as_str(), i);
+                group_index.insert(sub_dir.clone(), i);
                 i
             }
         };
-        planned_for_group.insert(file_name, cand.size);
-        groups[group_pos].files.push(cand.path.clone());
+        planned_for_group.insert(target_name.clone(), cand.size);
+        groups[group_pos].files.push(ImportFileTarget {
+            source: cand.path.clone(),
+            target_name,
+        });
+        next_seq += 1;
     }
 
     ImportPlan { groups, skipped }
 }
 
-/// 执行导入计划：逐文件委托 ops 复制/移动（move 跨文件系统走 EXDEV 回退），
-/// 返回逐文件结果（顺序 = 计划组顺序）。
+/// 执行导入计划：逐文件委托 ops 复制/移动到计划里解析好的目标路径
+/// （move 跨文件系统走 EXDEV 回退），返回逐文件结果（顺序 = 计划组顺序）。
 ///
 /// `on_progress` — 每个文件处理后回调（done 从 1 开始；total = 计划文件总数）。
 pub fn execute_import(
@@ -297,63 +393,43 @@ pub fn execute_import(
     let mut done: u32 = 0;
 
     for group in &plan.groups {
-        let target_dir = dest_root.join(&group.date_dir);
-        for src in &group.files {
-            let result = import_one_file(src, &target_dir, mode);
+        // 空子目录 = 直接放 dest_root
+        let target_dir = if group.sub_dir.is_empty() {
+            dest_root.to_path_buf()
+        } else {
+            dest_root.join(&group.sub_dir)
+        };
+        for file in &group.files {
+            let dest = target_dir.join(&file.target_name);
+            let result = import_one_file(&file.source, &dest, mode);
             done += 1;
             if let Some(cb) = &on_progress {
                 cb(ImportProgress {
                     done,
                     total,
-                    current: src.clone(),
+                    current: file.source.clone(),
                 });
             }
-            results.push((src.clone(), result));
+            results.push((file.source.clone(), result));
         }
     }
     results
 }
 
-/// 单个文件导入：源存在性 + 目标存在性防御检查后，委托 ops 复制/移动。
-fn import_one_file(src: &Path, target_dir: &Path, mode: ImportMode) -> Result<(), ImportError> {
+/// 单个文件导入：源存在性 + 目标存在性防御检查后，委托 ops 复制/移动到显式目标。
+fn import_one_file(src: &Path, dest: &Path, mode: ImportMode) -> Result<(), ImportError> {
     if !src.exists() {
         return Err(ImportError::SourceNotFound(src.to_path_buf()));
     }
-    let Some(name) = src.file_name() else {
-        return Err(ImportError::SourceNotFound(src.to_path_buf()));
-    };
-    let dest = target_dir.join(name);
     // 计划与执行之间目标可能被并发写入：不静默覆盖（ops 层跨设备回退同样报错）
     if dest.exists() {
-        return Err(ImportError::TargetExists(dest));
+        return Err(ImportError::TargetExists(dest.to_path_buf()));
     }
-    let capture = single_file_capture(src);
     match mode {
-        ImportMode::Copy => ops::copy_capture(&capture, target_dir, false).map_err(ImportError::from)?,
-        ImportMode::Move => ops::move_capture(&capture, target_dir).map_err(ImportError::from)?,
+        ImportMode::Copy => ops::copy_file_to(src, dest, false).map_err(ImportError::from)?,
+        ImportMode::Move => ops::move_file_to(src, dest).map_err(ImportError::from)?,
     }
     Ok(())
-}
-
-/// 构造单文件 Capture（导入按文件粒度操作，ops 层需要 Capture 形态）
-fn single_file_capture(path: &Path) -> Capture {
-    let format = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .and_then(ImageFormat::from_extension)
-        .unwrap_or(ImageFormat::Other);
-    Capture {
-        base_name: path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default(),
-        source_files: vec![SourceFile {
-            path: path.to_path_buf(),
-            format,
-            file_size: None,
-        }],
-        primary_index: 0,
-    }
 }
 
 // ============================================================================
@@ -762,12 +838,12 @@ mod tests {
             cand(a2, "2024-05-01", 1),
             cand(b1, "2024-06-02", 1),
         ];
-        let plan = plan_import(&cands, &dest);
+        let plan = plan_import(&cands, &dest, &ImportOptions::default());
         assert_eq!(plan.skipped.len(), 0);
         assert_eq!(plan.groups.len(), 2, "应按日期分两组");
-        assert_eq!(plan.groups[0].date_dir, "2024-05-01");
+        assert_eq!(plan.groups[0].sub_dir, "2024-05-01");
         assert_eq!(plan.groups[0].files.len(), 2);
-        assert_eq!(plan.groups[1].date_dir, "2024-06-02");
+        assert_eq!(plan.groups[1].sub_dir, "2024-06-02");
         assert_eq!(plan.groups[1].files.len(), 1);
     }
 
@@ -780,7 +856,7 @@ mod tests {
         let existing = make_file(&dir, "dest/2024-05-01/photo.jpg", b"12345");
         assert_eq!(existing.file_name().unwrap().to_str().unwrap(), "photo.jpg");
         let cands = vec![cand(src, "2024-05-01", 5)];
-        let plan = plan_import(&cands, &dest);
+        let plan = plan_import(&cands, &dest, &ImportOptions::default());
         assert_eq!(plan.groups.len(), 0, "全部跳过 → 无组");
         assert_eq!(plan.skipped.len(), 1);
         assert!(plan.skipped[0].reason.contains("大小相同"), "原因: {}", plan.skipped[0].reason);
@@ -794,7 +870,7 @@ mod tests {
         // 目标已存在同名但大小不同 → 防覆盖跳过
         make_file(&dir, "dest/2024-05-01/photo.jpg", b"different-size");
         let cands = vec![cand(src, "2024-05-01", 5)];
-        let plan = plan_import(&cands, &dest);
+        let plan = plan_import(&cands, &dest, &ImportOptions::default());
         assert_eq!(plan.skipped.len(), 1);
         assert!(plan.skipped[0].reason.contains("大小不同"), "原因: {}", plan.skipped[0].reason);
     }
@@ -807,7 +883,7 @@ mod tests {
         let s2 = make_file(&dir, "src/d2/IMG_1.jpg", b"22222");
         let dest = dir.path().join("dest");
         let cands = vec![cand(s1, "2024-05-01", 5), cand(s2, "2024-05-01", 5)];
-        let plan = plan_import(&cands, &dest);
+        let plan = plan_import(&cands, &dest, &ImportOptions::default());
         assert_eq!(plan.groups.len(), 1);
         assert_eq!(plan.groups[0].files.len(), 1, "保留先者");
         assert_eq!(plan.skipped.len(), 1);
@@ -815,9 +891,72 @@ mod tests {
     }
 
     #[test]
+    fn test_plan_import_subfolder_modes_and_rename() {
+        let dir = TempDir::new().unwrap();
+        let s1 = make_file(&dir, "src/d1/IMG_1.JPG", b"11111");
+        let s2 = make_file(&dir, "src/d2/IMG_2.JPG", b"22222");
+        let dest = dir.path().join("dest");
+        let cands = vec![cand(s1, "2024-05-01", 5), cand(s2, "2024-05-01", 5)];
+
+        // 不建子目录：直接放 dest_root，保留原名
+        let flat = plan_import(
+            &cands,
+            &dest,
+            &ImportOptions {
+                subfolder: ImportSubfolder::None,
+                rename_template: None,
+            },
+        );
+        assert_eq!(flat.groups.len(), 1);
+        assert_eq!(flat.groups[0].sub_dir, "");
+        assert_eq!(flat.groups[0].files[0].target_name, "IMG_1.JPG");
+
+        // 斜杠日期 + 重命名模板（{date} 归一为 YYYYMMDD，{seq} 补零 3 位）
+        let opts = ImportOptions {
+            subfolder: ImportSubfolder::DateSlash,
+            rename_template: Some("{date}_{seq}".to_string()),
+        };
+        let plan = plan_import(&cands, &dest, &opts);
+        assert_eq!(plan.groups[0].sub_dir, "2024/05/01");
+        assert_eq!(plan.groups[0].files[0].target_name, "20240501_001.JPG");
+        assert_eq!(plan.groups[0].files[1].target_name, "20240501_002.JPG");
+
+        // 紧凑日期
+        let compact = plan_import(
+            &cands,
+            &dest,
+            &ImportOptions {
+                subfolder: ImportSubfolder::DateCompact,
+                rename_template: None,
+            },
+        );
+        assert_eq!(compact.groups[0].sub_dir, "20240501");
+    }
+
+    #[test]
+    fn test_execute_import_flat_renamed_creates_dest_root() {
+        let dir = TempDir::new().unwrap();
+        let src = make_file(&dir, "src/a.jpg", b"aaa");
+        // 目标根目录不存在：执行时自动创建（LR 式「新建文件夹」）
+        let dest = dir.path().join("new/root");
+        let plan = plan_import(
+            &[cand(src.clone(), "2024-05-01", 3)],
+            &dest,
+            &ImportOptions {
+                subfolder: ImportSubfolder::None,
+                rename_template: Some("{seq}_{name}".to_string()),
+            },
+        );
+        assert_eq!(plan.groups[0].files[0].target_name, "001_a.jpg");
+        let results = execute_import(&plan, &dest, ImportMode::Copy, None);
+        assert!(results[0].1.is_ok(), "{:?}", results[0].1);
+        assert!(dest.join("001_a.jpg").is_file(), "目标根目录应自动创建");
+    }
+
+    #[test]
     fn test_plan_import_empty() {
         let dir = TempDir::new().unwrap();
-        let plan = plan_import(&[], &dir.path().join("dest"));
+        let plan = plan_import(&[], &dir.path().join("dest"), &ImportOptions::default());
         assert_eq!(plan.groups.len(), 0);
         assert_eq!(plan.skipped.len(), 0);
     }
@@ -836,6 +975,7 @@ mod tests {
                 cand(s2.clone(), "2024-05-02", 4),
             ],
             &dest,
+            &ImportOptions::default(),
         );
         assert_eq!(plan.skipped.len(), 0);
 
@@ -871,7 +1011,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let s1 = make_file(&dir, "src/a.jpg", b"aaa");
         let dest = dir.path().join("dest");
-        let plan = plan_import(&[cand(s1.clone(), "2024-05-01", 3)], &dest);
+        let plan = plan_import(&[cand(s1.clone(), "2024-05-01", 3)], &dest, &ImportOptions::default());
         let results = execute_import(&plan, &dest, ImportMode::Move, None);
         assert_eq!(results.len(), 1);
         assert!(results[0].1.is_ok());
@@ -885,7 +1025,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let missing = dir.path().join("src/ghost.jpg");
         let dest = dir.path().join("dest");
-        let plan = plan_import(&[cand(missing.clone(), "2024-05-01", 3)], &dest);
+        let plan = plan_import(&[cand(missing.clone(), "2024-05-01", 3)], &dest, &ImportOptions::default());
         // plan 阶段不查源存在性 → 计划通过；执行时报 SourceNotFound
         assert_eq!(plan.skipped.len(), 0);
         let results = execute_import(&plan, &dest, ImportMode::Copy, None);
@@ -898,7 +1038,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let s1 = make_file(&dir, "src/a.jpg", b"aaa");
         let dest = dir.path().join("dest");
-        let plan = plan_import(&[cand(s1.clone(), "2024-05-01", 3)], &dest);
+        let plan = plan_import(&[cand(s1.clone(), "2024-05-01", 3)], &dest, &ImportOptions::default());
         // 计划后目标被并发写入 → 执行时 TargetExists 报错（不覆盖）
         make_file(&dir, "dest/2024-05-01/a.jpg", b"concurrent");
         let results = execute_import(&plan, &dest, ImportMode::Copy, None);

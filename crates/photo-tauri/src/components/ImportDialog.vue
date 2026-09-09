@@ -24,7 +24,14 @@ import {
   type ImportDonePayload,
   type ImportProgressPayload,
 } from '@/lib/ipc'
-import type { ImportCandidate, ImportDrive, ImportMode, ImportPlan, ImportResult } from '@/lib/bindings'
+import type {
+  ImportCandidate,
+  ImportDrive,
+  ImportMode,
+  ImportPlan,
+  ImportResult,
+  ImportSubfolder,
+} from '@/lib/bindings'
 import { useCapturesStore } from '@/stores/captures'
 import { useImportDialogStore } from '@/stores/importDialog'
 
@@ -55,8 +62,12 @@ const source = ref<string | null>(null)
 const scanning = ref(false)
 /** 扫描出的候选文件 */
 const candidates = ref<ImportCandidate[]>([])
-/** 目标根目录（导入后生成 destRoot/YYYY-MM-DD/） */
+/** 目标根目录（可手动输入；不存在时导入自动创建） */
 const destRoot = ref<string | null>(null)
+/** 子目录模式（LR 式 Into Subfolder）：默认按日期 YYYY-MM-DD */
+const subfolder = ref<ImportSubfolder>('DateDash')
+/** 文件重命名模板（LR 式 File Naming；空 = 保留原名） */
+const renameTemplate = ref('')
 /** 执行模式：复制（源保留）/ 移动（源删除） */
 const mode = ref<ImportMode>('Copy')
 /** 干跑计划（plan_import 结果，不碰文件） */
@@ -90,7 +101,7 @@ const skippedPreview = computed(() =>
 /** 日期目录清单（前 10 组 + 每组张数） */
 const groupPreview = computed(() =>
   (plan.value?.groups ?? []).slice(0, 10).map((g) => ({
-    dateDir: g.dateDir,
+    subDir: g.subDir,
     count: g.files.length,
   })),
 )
@@ -182,6 +193,12 @@ async function chooseDest() {
   result.value = null
 }
 
+// 目标/子目录/重命名变化 → 计划失效（需重新干跑）
+watch([destRoot, subfolder, renameTemplate], () => {
+  plan.value = null
+  result.value = null
+})
+
 /** 切换复制/移动（计划与模式无关，不失效） */
 function setMode(m: ImportMode) {
   mode.value = m
@@ -193,7 +210,10 @@ async function generatePlan() {
   planning.value = true
   result.value = null
   try {
-    plan.value = await planImport(candidates.value, destRoot.value)
+    plan.value = await planImport(candidates.value, destRoot.value, {
+      subfolder: subfolder.value,
+      renameTemplate: renameTemplate.value.trim() || null,
+    })
   } catch (e) {
     toast.value = `生成导入计划失败：${String(e)}`
   } finally {
@@ -359,18 +379,44 @@ watch(toast, (t) => {
           </div>
         </div>
 
-        <!-- ── 目标根目录 ── -->
+        <!-- ── 目标根目录（可输入/新建）+ 子目录模式 + 文件重命名（LR 式） ── -->
         <div class="space-y-1.5">
-          <div class="text-xs font-medium text-muted-foreground">目标根目录（按日期建子目录）</div>
+          <div class="text-xs font-medium text-muted-foreground">目标根目录（不存在时导入自动创建）</div>
           <div class="flex items-center gap-1.5">
-            <div
-              class="min-w-0 flex-1 truncate rounded-md border bg-muted/40 px-2 py-1 tabular-nums text-[0.6875rem]"
-              :class="destRoot ? 'text-foreground' : 'text-muted-foreground'"
-              :title="destRoot ?? ''"
-            >
-              {{ destRoot ?? '未选择目标根目录' }}
-            </div>
+            <input
+              v-model="destRoot"
+              type="text"
+              placeholder="选择或输入目标目录…"
+              class="min-w-0 flex-1 rounded-md border bg-background px-2 py-1 tabular-nums text-[0.6875rem] outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              :disabled="running"
+            />
             <Button size="xs" variant="outline" :disabled="running" @click="chooseDest">选择…</Button>
+          </div>
+          <div class="flex items-center gap-1.5">
+            <span class="shrink-0 text-[0.6875rem] text-muted-foreground">子目录</span>
+            <select
+              v-model="subfolder"
+              class="min-w-0 flex-1 rounded-md border bg-background px-2 py-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              :disabled="running"
+            >
+              <option value="DateDash">按日期 2026-09-10</option>
+              <option value="DateSlash">按日期 2026/09/10</option>
+              <option value="DateCompact">按日期 20260910</option>
+              <option value="None">不建子目录（直接放根目录）</option>
+            </select>
+          </div>
+          <div class="flex items-center gap-1.5">
+            <span class="shrink-0 text-[0.6875rem] text-muted-foreground">重命名</span>
+            <input
+              v-model="renameTemplate"
+              type="text"
+              placeholder="留空 = 保留原名，如 {date}_{name}_{seq}"
+              class="min-w-0 flex-1 rounded-md border bg-background px-2 py-1 text-[0.6875rem] outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              :disabled="running"
+            />
+          </div>
+          <div class="px-1 text-[0.6875rem] text-muted-foreground">
+            占位符：{name} 原名 · {date} 拍摄日期 YYYYMMDD · {seq} 序号（补零 3 位）
           </div>
         </div>
 
@@ -411,17 +457,17 @@ watch(toast, (t) => {
 
           <div v-if="plan" class="space-y-2 rounded-md border bg-muted/30 p-2">
             <div class="text-[0.6875rem] font-medium text-foreground">
-              {{ candidates.length }} 张 → {{ plan.groups.length }} 个日期目录
+              {{ candidates.length }} 张 → {{ plan.groups.length }} 个目标目录
               <template v-if="plan.skipped.length">，跳过 {{ plan.skipped.length }} 张</template>
             </div>
             <!-- 日期目录清单（前 10 组） -->
             <div v-if="groupPreview.length" class="max-h-28 space-y-0.5 overflow-y-auto pr-1">
               <div
                 v-for="g in groupPreview"
-                :key="g.dateDir"
+                :key="g.subDir"
                 class="flex justify-between rounded-sm bg-muted/50 px-2 py-0.5 text-[0.6875rem] tabular-nums"
               >
-                <span>{{ g.dateDir }}</span>
+                <span>{{ g.subDir || '（根目录）' }}</span>
                 <span class="text-muted-foreground">{{ g.count }} 张</span>
               </div>
               <div v-if="hasGroupMore" class="text-[0.6875rem] text-muted-foreground">

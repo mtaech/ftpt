@@ -129,6 +129,54 @@ pub fn copy_capture(capture: &Capture, dest_dir: &Path, overwrite: bool) -> Resu
     Ok(())
 }
 
+/// 复制单个文件到显式目标路径（导入重命名用；父目录自动创建）。
+/// 防覆盖语义与 `copy_capture` 一致：目标已存在且 `!overwrite` 时报错。
+pub fn copy_file_to(src: &Path, dest: &Path, overwrite: bool) -> Result<(), OpError> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if dest == src {
+        return Ok(());
+    }
+    if dest.exists() {
+        if !overwrite {
+            return Err(OpError::Io(std::io::Error::new(
+                ErrorKind::AlreadyExists,
+                format!("目标文件已存在: {}", dest.display()),
+            )));
+        }
+        std::fs::remove_file(dest)?;
+    }
+    std::fs::copy(src, dest)?;
+    Ok(())
+}
+
+/// 移动单个文件到显式目标路径（导入重命名用；父目录自动创建）。
+/// 跨文件系统（EXDEV）回退 copy + delete；目标已存在时报错（不覆盖）。
+pub fn move_file_to(src: &Path, dest: &Path) -> Result<(), OpError> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if dest == src {
+        return Ok(());
+    }
+    if dest.exists() {
+        return Err(OpError::Io(std::io::Error::new(
+            ErrorKind::AlreadyExists,
+            format!("目标文件已存在: {}", dest.display()),
+        )));
+    }
+    match std::fs::rename(src, dest) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::CrossesDevices => {
+            std::fs::copy(src, dest)?;
+            std::fs::remove_file(src)?;
+            Ok(())
+        }
+        Err(e) => Err(OpError::Io(e)),
+    }
+}
+
 /// 改名（防覆盖）：目标已存在（且非自身）时报错，避免 std::fs::rename
 /// 静默覆盖已有文件。返回新路径（new_name 与原名相同 = 无操作成功）。
 fn rename_to(old_path: &Path, new_name: &str) -> Result<PathBuf, OpError> {
@@ -436,6 +484,34 @@ mod tests {
         let result = copy_capture(&capture, dst.path(), false);
         assert!(result.is_err(), "同名目标存在时 copy(overwrite=false) 必须报错");
         assert_eq!(std::fs::read(dst.path().join("img.jpg")).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn test_copy_file_to_creates_dirs_and_refuses_overwrite() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("a.jpg");
+        std::fs::write(&src, b"data").unwrap();
+        let dest = dir.path().join("deep/nested/b.jpg");
+        copy_file_to(&src, &dest, false).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"data");
+        // 目标已存在 → 不覆盖报错，内容不变
+        assert!(copy_file_to(&src, &dest, false).is_err());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"data");
+    }
+
+    #[test]
+    fn test_move_file_to_renames_and_refuses_overwrite() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("a.jpg");
+        std::fs::write(&src, b"data").unwrap();
+        let dest = dir.path().join("out/renamed.jpg");
+        move_file_to(&src, &dest).unwrap();
+        assert!(dest.is_file() && !src.exists());
+        // 目标已存在 → 报错且源保留
+        let src2 = dir.path().join("b.jpg");
+        std::fs::write(&src2, b"x").unwrap();
+        assert!(move_file_to(&src2, &dest).is_err());
+        assert!(src2.exists());
     }
 
     #[test]

@@ -243,7 +243,7 @@ export const commands = {
 	 *  （目标已存在同名同大小 = 已完成导入跳过；同名不同大小 = 防覆盖跳过）。
 	 *  不碰任何文件；跳过清单供前端预览前 20 条。
 	 */
-	planImport: (candidates: ImportCandidate[], destRoot: string) => typedError<ImportPlan, string>(__TAURI_INVOKE("plan_import", { candidates, destRoot })),
+	planImport: (candidates: ImportCandidate[], destRoot: string, options: ImportOptions) => typedError<ImportPlan, string>(__TAURI_INVOKE("plan_import", { candidates, destRoot, options })),
 	/**
 	 *  执行导入：spawn_blocking 内逐文件委托 engine 复制/移动，逐文件 emit
 	 *  import:progress，完成 emit import:done。返回 ImportResult（= done 负载）。
@@ -669,12 +669,20 @@ export type ImportDrive = {
 	label: string | null,
 };
 
-/**  导入计划组（目标目录 = destRoot/dateDir/） */
+/**  导入计划的单文件目标：源路径 + 目标文件名（可被重命名模板改写） */
+export type ImportFileTarget = {
+	/**  源文件完整路径 */
+	source: string,
+	/**  目标文件名（含扩展名） */
+	targetName: string,
+};
+
+/**  导入计划组（目标目录 = destRoot/subDir/；subDir 为空 = 直接放 destRoot） */
 export type ImportGroup = {
-	/**  日期目录名（YYYY-MM-DD，相对 destRoot） */
-	dateDir: string,
-	/**  组内源文件完整路径 */
-	files: string[],
+	/**  目标子目录（相对 destRoot 的正斜杠路径；空串 = 不建子目录） */
+	subDir: string,
+	/**  组内文件（源路径 + 目标文件名） */
+	files: ImportFileTarget[],
 };
 
 /**  导入执行模式 */
@@ -690,6 +698,14 @@ export type ImportMode =
  */
 export type ImportOpen = {
 	path: string,
+};
+
+/**  导入的目录/命名选项 */
+export type ImportOptions = {
+	/**  子目录模式 */
+	subfolder?: ImportSubfolder,
+	/**  文件重命名模板（None/空 = 保留原名）；占位符 {name} {date} {seq} */
+	renameTemplate?: string | null,
 };
 
 /**  导入计划（`plan_import` 返回 / `execute_import` 输入；干跑不碰文件） */
@@ -722,6 +738,9 @@ export type ImportSkipped = {
 	/**  跳过原因（目标已存在且大小相同 / 同名冲突等） */
 	reason: string,
 };
+
+/**  子目录模式：None 不建子目录 / DateDash 2026-09-10 / DateSlash 2026/09/10 / DateCompact 20260910 */
+export type ImportSubfolder = "None" | "DateDash" | "DateSlash" | "DateCompact";
 
 /**
  *  `quality:done` 事件负载：批量技术质量评分完成（scores = 完整路径 → 0..1 技术分，

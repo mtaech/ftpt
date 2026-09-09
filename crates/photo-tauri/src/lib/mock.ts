@@ -18,6 +18,7 @@ import type {
   ImportCandidate,
   ImportDrive,
   ImportMode,
+  ImportOptions,
   ImportPlan,
   ImportResult,
   Recognition,
@@ -460,9 +461,13 @@ export const mockCommands = {
     await sleep(120)
     return { status: 'ok', data: mockImportCandidates(path) }
   },
-  async planImport(candidates: ImportCandidate[], _destRoot: string): Promise<MockResult<ImportPlan>> {
+  async planImport(
+    candidates: ImportCandidate[],
+    _destRoot: string,
+    options: ImportOptions,
+  ): Promise<MockResult<ImportPlan>> {
     await sleep(60)
-    return { status: 'ok', data: mockPlanImport(candidates) }
+    return { status: 'ok', data: mockPlanImport(candidates, options) }
   },
   async executeImport(plan: ImportPlan, destRoot: string, _mode: ImportMode): Promise<MockResult<ImportResult>> {
     const files = plan.groups.flatMap((g) => g.files)
@@ -471,7 +476,7 @@ export const mockCommands = {
     for (const file of files) {
       await sleep(40)
       done += 1
-      mockEmit('import:progress', { done, total, current: file })
+      mockEmit('import:progress', { done, total, current: file.source })
     }
     const imported = total
     const skipped = plan.skipped.length
@@ -756,22 +761,48 @@ function mockImportCandidates(source: string): ImportCandidate[] {
   return out
 }
 
-/** mock 计划：按日期分组（保持候选顺序）；dup_ 前缀 = 跳过（模拟目标去重命中） */
-function mockPlanImport(candidates: ImportCandidate[]): ImportPlan {
+/** mock 计划：按子目录模式分组 + 可选重命名（保持候选顺序）；dup_ 前缀 = 跳过（模拟目标去重命中） */
+function mockPlanImport(candidates: ImportCandidate[], options: ImportOptions): ImportPlan {
   const groups: ImportPlan['groups'] = []
   const skipped: ImportPlan['skipped'] = []
+  const subDirOf = (date: string): string => {
+    const [y, m, d] = date.split('-')
+    switch (options.subfolder) {
+      case 'None':
+        return ''
+      case 'DateSlash':
+        return `${y}/${m}/${d}`
+      case 'DateCompact':
+        return `${y}${m}${d}`
+      default:
+        return date
+    }
+  }
+  let seq = 1
   for (const c of candidates) {
     const name = c.path.split(/[\\/]/).pop() ?? c.path
     if (name.startsWith('dup_')) {
       skipped.push({ path: c.path, reason: '目标已存在且大小相同' })
       continue
     }
-    let g = groups.find((x) => x.dateDir === c.date)
+    const stem = name.replace(/\.[^.]+$/, '')
+    const ext = name.includes('.') ? name.slice(name.lastIndexOf('.')) : ''
+    const tpl = (options.renameTemplate ?? '').trim()
+    const targetName = tpl
+      ? renderNameTemplate(tpl, {
+          name: stem,
+          date: c.date,
+          seq,
+        }) + ext
+      : name
+    const subDir = subDirOf(c.date)
+    let g = groups.find((x) => x.subDir === subDir)
     if (!g) {
-      g = { dateDir: c.date, files: [] }
+      g = { subDir, files: [] }
       groups.push(g)
     }
-    g.files.push(c.path)
+    g.files.push({ source: c.path, targetName })
+    seq += 1
   }
   return { groups, skipped }
 }
