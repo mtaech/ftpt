@@ -148,7 +148,7 @@ export const mockCommands = {
     return MOCK_DIR
   },
 
-  async scanDirectory(path: string): Promise<number> {
+  async scanDirectory(path: string, _recursive?: boolean | null): Promise<number> {
     captures = makeCaptures()
     mockCurrentDir = path
     const total = captures.length

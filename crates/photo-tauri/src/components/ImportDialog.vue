@@ -223,6 +223,21 @@ async function generatePlan() {
   }
 }
 
+/** 导入成功后要展示的目录：单组 → 该组目标目录（如 destRoot/2026-09-10）；
+ *  多组（跨日期）→ 目标根目录；无分组 → null（不跳转）。扫描一律递归，
+ *  这样按日期建的子目录里的新照片立即可见。 */
+function importedDir(): string | null {
+  const p = plan.value
+  if (!p || !destRoot.value || p.groups.length === 0) return null
+  if (p.groups.length > 1) return destRoot.value
+  const sub = p.groups[0].subDir
+  if (!sub) return destRoot.value
+  // 后端 subDir 用 / 分隔；Windows 目标根（E:\）需回退到反斜杠，并去掉根尾部斜杠
+  const sep = destRoot.value.includes('\\') && !destRoot.value.includes('/') ? '\\' : '/'
+  const root = destRoot.value.replace(/[\\/]+$/, '')
+  return `${root}${sep}${sub.replace(/^[\\/]+/, '')}`
+}
+
 /** 执行导入：进度事件驱动进度条；全部成功自动关闭（结果走状态栏提示），有失败留在面板看明细 */
 async function execute() {
   if (!plan.value || !destRoot.value || running.value) return
@@ -235,7 +250,10 @@ async function execute() {
     if (r.failed === 0) {
       const skipped = r.skipped > 0 ? `，跳过 ${r.skipped}` : ''
       recognition.setNotice(`导入完成：成功 ${r.imported} 张${skipped}`)
+      // 导入后默认展示结果：跳到目标目录递归扫描（force 绕过同目录早退）
+      const dir = importedDir()
       open.value = false
+      if (dir) void captures.openPath(dir, { recursive: true, force: true })
     }
   } catch (e) {
     toast.value = `导入执行失败：${String(e)}`

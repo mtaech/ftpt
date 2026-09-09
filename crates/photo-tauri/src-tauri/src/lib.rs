@@ -440,12 +440,14 @@ async fn pick_directory(app: AppHandle) -> Option<String> {
 /// 读 exif_cache 回填 → 返回总数；随后后台任务做 EXIF 增量提取 + 缩略图预生成。
 #[tauri::command]
 #[specta::specta]
-async fn scan_directory(app: AppHandle, path: String) -> u32 {
-    scan_impl(app, PathBuf::from(path)).await
+async fn scan_directory(app: AppHandle, path: String, recursive: Option<bool>) -> u32 {
+    scan_impl(app, PathBuf::from(path), recursive).await
 }
 
-/// scan_directory 的实现主体（command 与启动自动恢复共用）
-async fn scan_impl(app: AppHandle, dir: PathBuf) -> u32 {
+/// scan_directory 的实现主体（command 与启动自动恢复共用）。
+/// recursive_override：None = 跟随 AppConfig.include_subdirectories；
+/// Some(_) = 本次强制指定（导入完成后展示导入结果，需跨日期子目录，不受用户配置限制）。
+async fn scan_impl(app: AppHandle, dir: PathBuf, recursive_override: Option<bool>) -> u32 {
     // 换代：在途的 EXIF/缩略图后台任务按代数丢弃（旧索引对新 captures 无意义）
     // + 读取扫描递归开关（AppConfig.include_subdirectories：true = 递归扫全部子层）
     let (generation, recursive) = {
@@ -462,7 +464,10 @@ async fn scan_impl(app: AppHandle, dir: PathBuf) -> u32 {
         st.quality_task.invalidate();
         st.duplicate_groups.clear();
         st.quality_scores.clear();
-        (st.scan_generation, st.config.include_subdirectories)
+        (
+            st.scan_generation,
+            recursive_override.unwrap_or(st.config.include_subdirectories),
+        )
     };
     match do_scan(&app, &dir, recursive).await {
         Ok((metas, folder_db)) => {
@@ -1571,7 +1576,7 @@ async fn undo_batch_operation(app: AppHandle) -> Result<UndoBatchResult, String>
     .map_err(|e| format!("撤销任务中断: {e}"))??;
 
     // 3. 撤销后全量重扫（文件已回到原位置，captures 需重建 + scan:done 驱动前端 reload）
-    let _ = scan_impl(app, dir).await;
+    let _ = scan_impl(app, dir, None).await;
     Ok(result)
 }
 
@@ -3290,7 +3295,7 @@ async fn execute_import(
     };
     if let Some(cur) = current_dir {
         if path_under(&cur, &dest) {
-            let _ = scan_impl(app, cur).await;
+            let _ = scan_impl(app, cur, None).await;
         }
     }
 
@@ -4148,7 +4153,7 @@ pub fn run() {
             if let Some(dir) = last_dir {
                 let app_scan = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    let _ = scan_impl(app_scan, PathBuf::from(dir)).await;
+                    let _ = scan_impl(app_scan, PathBuf::from(dir), None).await;
                 });
             }
 

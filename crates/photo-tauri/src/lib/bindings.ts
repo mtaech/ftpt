@@ -13,7 +13,7 @@ export const commands = {
 	 *  扫描目录：spawn_blocking 内 scanner 扫描 → folder_db 打开/三表同步 →
 	 *  读 exif_cache 回填 → 返回总数；随后后台任务做 EXIF 增量提取 + 缩略图预生成。
 	 */
-	scanDirectory: (path: string) => __TAURI_INVOKE<number>("scan_directory", { path }),
+	scanDirectory: (path: string, recursive: boolean | null) => __TAURI_INVOKE<number>("scan_directory", { path, recursive }),
 	/**  全量下推当前扫描结果（前端筛选/排序在 TS 侧做，零 IPC） */
 	getCaptures: () => __TAURI_INVOKE<CaptureMeta[]>("get_captures"),
 	/**

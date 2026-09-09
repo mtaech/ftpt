@@ -61,7 +61,12 @@ async function unwrapVoid<E>(
 // ── commands（契约 6 个） ─────────────────────────────
 
 export const pickDirectory: () => Promise<string | null> = () => api.pickDirectory()
-export const scanDirectory: (path: string) => Promise<number> = (path) => api.scanDirectory(path)
+/** 扫描目录：recursive 省略/null = 后端跟随 AppConfig.include_subdirectories，
+ *  true/false = 本次强制递归/单层（导入完成后展示结果用） */
+export const scanDirectory: (path: string, recursive?: boolean) => Promise<number> = (
+  path,
+  recursive,
+) => api.scanDirectory(path, recursive ?? null)
 export const getCaptures: () => Promise<CaptureMeta[]> = () => api.getCaptures()
 export const setRating: (paths: string[], rating: number) => Promise<void> = (paths, rating) =>
   unwrapVoid(api.setRating(paths, rating))
