@@ -142,6 +142,11 @@ pub fn scan_import_source(dir: &Path) -> Result<Vec<ImportCandidate>, ImportErro
             continue;
         }
         let path = entry.path();
+        // 跳过应用自己的缓存目录（源盘被本应用浏览过会生成 <目录>/.pt/）：
+        // 否则 .pt/thumbs 下的缓存 JPEG 会被当成待导入的照片
+        if path.components().any(|c| c.as_os_str() == ".pt") {
+            continue;
+        }
         let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
             continue;
         };
@@ -666,6 +671,18 @@ mod tests {
             assert_eq!(c.date, expect, "mtime 回退日期不匹配: {:?}", c.path);
             assert_eq!(c.size, meta.len());
         }
+    }
+
+    #[test]
+    fn test_scan_import_source_skips_pt_cache_dir() {
+        let dir = TempDir::new().unwrap();
+        make_file(&dir, "IMG_1.jpg", b"photo");
+        // 应用浏览过源盘后生成的缓存目录：其中的缩略图不能被当成本次导入的照片
+        make_file(&dir, ".pt/thumbs/abc.jpg", b"cached-thumb");
+
+        let cands = scan_import_source(dir.path()).unwrap();
+        assert_eq!(cands.len(), 1, "候选: {:?}", cands.iter().map(|c| &c.path).collect::<Vec<_>>());
+        assert!(cands[0].path.ends_with("IMG_1.jpg"));
     }
 
     #[test]

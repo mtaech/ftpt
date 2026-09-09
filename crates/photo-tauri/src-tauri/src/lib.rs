@@ -3917,10 +3917,74 @@ fn parse_pending_import_path(args: impl Iterator<Item = String>) -> Option<Strin
     None
 }
 
+/// xdg-activation token 暂存文件名（第二实例写、已运行实例读；同一用户同一 TMPDIR）
+const ACTIVATION_TOKEN_FILE: &str = "ftpt-xdg-activation-token";
+
+/// 第二实例：把启动环境里的 `XDG_ACTIVATION_TOKEN`（KDE 的 KIO 启动进程时会设置）
+/// 暂存到临时文件，供已运行实例置顶时使用。无 token 时 no-op。
+fn stash_activation_token() {
+    let Ok(token) = std::env::var("XDG_ACTIVATION_TOKEN") else {
+        return;
+    };
+    if token.is_empty() {
+        return;
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = std::fs::write(
+        std::env::temp_dir().join(ACTIVATION_TOKEN_FILE),
+        format!("{ts}\n{token}"),
+    );
+}
+
+/// 已运行实例：取出暂存的激活 token（10 秒内有效，取一次即删）。
+fn take_activation_token() -> Option<String> {
+    let path = std::env::temp_dir().join(ACTIVATION_TOKEN_FILE);
+    let text = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    let (ts, token) = text.split_once('\n')?;
+    let ts: u64 = ts.trim().parse().ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    if now.saturating_sub(ts) > 10 {
+        return None;
+    }
+    let token = token.trim();
+    (!token.is_empty()).then(|| token.to_string())
+}
+
+/// 把窗口拉到前台：Wayland 下把 xdg-activation token 交给 GTK（KWin 焦点防抢占会
+/// 忽略无 token 的激活请求）；无 token/非 Linux 回退 set_focus。
+fn raise_window(window: &tauri::WebviewWindow, token: Option<&str>) {
+    let _ = window.unminimize();
+    let _ = window.show();
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(token) = token {
+            use gtk::prelude::*;
+            if let Ok(gtk_window) = window.gtk_window() {
+                gtk_window.set_startup_id(token);
+                gtk_window.present();
+                return;
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = token;
+    let _ = window.set_focus();
+}
+
 pub fn run() {
     // 先初始化日志：后续配置加载/启动/运行期错误全部进日志文件（WorkerGuard 持有到
     // 应用退出，保证非阻塞 writer 缓冲在退出时落盘）
     let _log_guard = logging::init();
+
+    // 第二实例若由 KDE 菜单启动，环境里带 xdg-activation token：先暂存，供已运行实例置顶
+    stash_activation_token();
 
     // 外部入口（KDE Solid 设备动作等）：--import <挂载点> → 启动后自动打开导入对话框
     let pending_import_path = parse_pending_import_path(std::env::args().skip(1));
@@ -3940,18 +4004,18 @@ pub fn run() {
         // 已运行实例后退出；已运行实例发 import:open 事件让前端打开导入对话框。
         // 必须第一个注册（官方要求，先于其它插件）。
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            // 先把已有窗口从后台拉到前台：unminimize + show + set_focus。
-            // Wayland/KWin 的焦点防抢占可能忽略 set_focus，稍后复查；若仍未获得焦点
-            // 就发"请求注意"（任务栏闪烁/高亮），保证用户知道应用被唤起了。
+            // 把已有窗口从后台拉到前台。Wayland/KWin 焦点防抢占会忽略无 token 的激活
+            // 请求，因此优先用第二实例暂存的 xdg-activation token；拿不到再回退
+            // set_focus，并在 300ms 后复查焦点，仍未获得就请求注意（任务栏闪烁）。
             let windows = app.webview_windows();
-            tracing::info!("单实例激活：收到第二实例请求（窗口数 {}）", windows.len());
+            let token = take_activation_token();
+            tracing::info!(
+                "单实例激活：收到第二实例请求（窗口数 {}，激活 token={}）",
+                windows.len(),
+                token.is_some()
+            );
             for window in windows.values() {
-                let _ = window.unminimize();
-                let _ = window.show();
-                match window.set_focus() {
-                    Ok(()) => tracing::info!("单实例激活：已请求置顶窗口 {}", window.label()),
-                    Err(e) => tracing::warn!("单实例激活：置顶请求失败 {}: {e}", window.label()),
-                }
+                raise_window(window, token.as_deref());
                 let w = window.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(300));

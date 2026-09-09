@@ -223,18 +223,30 @@ impl ExifToolProvider {
                     return Some(f);
                 }
             }
-            // 开发/测试布局：向上找仓库 local-lib/exiftool/
-            let mut dir = exe.parent();
-            for _ in 0..5 {
-                if let Some(d) = dir {
-                    let cand = d.join("local-lib").join("exiftool");
-                    if cand.is_dir() {
-                        return Some(cand);
-                    }
-                    dir = d.parent();
-                } else {
-                    break;
+        }
+        // 开发/测试布局：从 CARGO_MANIFEST_DIR / cwd / exe 向上找仓库 local-lib/exiftool/
+        // （CARGO_TARGET_DIR 在仓库外时，只从 exe 向上找不到仓库根——cargo run/tauri dev 常见）
+        let mut starts: Vec<PathBuf> = Vec::new();
+        if let Ok(m) = std::env::var("CARGO_MANIFEST_DIR") {
+            starts.push(PathBuf::from(m));
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            starts.push(cwd);
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(d) = exe.parent() {
+                starts.push(d.to_path_buf());
+            }
+        }
+        for start in starts {
+            let mut dir = Some(start);
+            for _ in 0..6 {
+                let Some(d) = dir else { break };
+                let cand = d.join("local-lib").join("exiftool");
+                if cand.is_dir() {
+                    return Some(cand);
                 }
+                dir = d.parent().map(|p| p.to_path_buf());
             }
         }
         // PATH

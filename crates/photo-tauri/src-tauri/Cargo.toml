@@ -41,6 +41,10 @@ tracing-log.workspace = true
 parking_lot.workspace = true
 percent-encoding = "2"
 
+# Linux：Wayland 焦点防抢占需要把 xdg-activation token 交给 GTK（见 lib.rs raise_window）
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
 [build-dependencies]
 tauri-build.workspace = true
 

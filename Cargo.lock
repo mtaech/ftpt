@@ -3395,6 +3395,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "font-kit",
+ "gtk",
  "image",
  "parking_lot",
  "percent-encoding",
