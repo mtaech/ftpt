@@ -36,7 +36,8 @@ import { useCapturesStore } from '@/stores/captures'
 import { useImportDialogStore } from '@/stores/importDialog'
 import { useRecognitionStore } from '@/stores/recognition'
 
-/** 弹窗开关（store 驱动：文件树 tab「导入」按钮打开、×/Esc/遮罩关闭） */
+/** 弹窗开关（store 驱动：文件树 tab「导入」按钮打开；关闭只走右上角 ×——
+ *  遮罩点击与 Esc 都不关，避免扫描/计划状态被误操作清掉） */
 const open = defineModel<boolean>('open', { default: false })
 
 const captures = useCapturesStore()
@@ -293,10 +294,14 @@ watch(toast, (t) => {
 
 <template>
   <Dialog :open="open" @update:open="open = $event">
-    <!-- 自绘头栏（× 按钮放标题右侧，对齐 SettingsModal 头栏样式） -->
+    <!-- 自绘头栏（× 按钮放标题右侧，对齐 SettingsModal 头栏样式）。
+         点遮罩不关闭：导入是有状态的流程（已扫描候选/已生成计划），误点外面丢失代价大；
+         关闭只走右上角 ×（Esc 也被全局键位接管，同样不关）。 -->
     <DialogContent
       :show-close-button="false"
       class="flex max-h-[85vh] w-full max-w-xl flex-col gap-0 p-0 sm:max-w-xl"
+      @pointer-down-outside="(e) => e.preventDefault()"
+      @interact-outside="(e) => e.preventDefault()"
     >
       <!-- 头栏：标题 + 关闭按钮 -->
       <div class="flex shrink-0 items-center justify-between border-b px-4 py-3">
