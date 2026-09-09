@@ -3584,9 +3584,12 @@ async fn do_scan(
     .map_err(|e| format!("扫描任务中断: {e}"))?
 }
 
-/// 后台 EXIF 增量提取 + 缩略图预生成（一次任务两产物，照 spawn_enrich_tasks 移植）。
-/// 窗口化并发（4 张一组）替代 的逐张 worker spawn；逐张 emit thumb:ready，
-/// 完成后 emit capture:enriched（携带需重排的索引，前端据此重排）。
+/// 后台 EXIF 增量提取 + 缩略图预生成（两阶段：EXIF 批量提取 → 缩略图预生成）。
+///
+/// 阶段 1 走 exiftool 批量命令（一批 64 张一次往返，实测 ~10ms/张；逐文件往返慢两个
+/// 数量级），每批结束立刻回填内存并 emit capture:enriched——EXIF 边提取边可见，不必等
+/// 整个目录（数百张可达数分钟）跑完。阶段 2 逐张预生成缩略图缓存（窗口化并发 4），
+/// 每张 emit thumb:ready。
 async fn enrich_and_pregen_thumbs(app: AppHandle, generation: u64) {
     // 快照：需要提取 EXIF 的 capture（扫描闭包只查缓存，未命中的字段为空）
     let (paths, folder_db, thumb_cache, thumbnail_size) = {
@@ -3616,11 +3619,12 @@ async fn enrich_and_pregen_thumbs(app: AppHandle, generation: u64) {
         return;
     }
     let total = paths.len() as u32;
-    let mut done: u32 = 0;
-    let mut enriched: Vec<u32> = Vec::new();
 
-    const CONCURRENCY: usize = 4;
-    for chunk in paths.chunks(CONCURRENCY) {
+    // ── 阶段 1：EXIF 批量提取 ──
+    let mut enriched: Vec<u32> = Vec::new();
+    let mut exif_done: u32 = 0;
+    const EXIF_BATCH: usize = 64;
+    for chunk in paths.chunks(EXIF_BATCH) {
         // 换目录后中止：旧索引对新 captures 无意义
         {
             let st = app.state::<Mutex<AppState>>();
@@ -3628,69 +3632,95 @@ async fn enrich_and_pregen_thumbs(app: AppHandle, generation: u64) {
                 return;
             }
         }
-        let mut handles = Vec::with_capacity(chunk.len());
-        for &(idx, ref path) in chunk {
-            let db = folder_db.clone();
-            let cache = thumb_cache.clone();
-            let path = path.clone();
-            handles.push((
-                idx,
-                tauri::async_runtime::spawn_blocking(move || {
-                    let ext = path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("")
-                        .to_lowercase();
-                    let Some(format) = ImageFormat::from_extension(&ext) else {
-                        return (path, None, false);
-                    };
-                    // 经 SQLite 缓存提取并写回：下次扫描命中缓存，不再重复 LibRaw open
-                    let exif = if let Some(db) = &db {
-                        db.get_or_extract_exif(&path, &format).ok()
-                    } else {
-                        exif::extract_exif(&path, &format).ok()
-                    };
-                    // 顺带预生成缩略图缓存（RAW 内嵌提取 / JPG DCT 缩放；视频无缩略图跳过，
-                    // file_size 用真实 stat 与浏览时 ptimg 的键一致）
-                    let mut thumb_ok = false;
-                    if let Some(cache) = &cache
-                        && !format.is_other()
-                    {
-                        let source = SourceFile {
-                            path: path.clone(),
-                            format: format.clone(),
-                            file_size: std::fs::metadata(&path).ok().map(|m| m.len()),
-                        };
-                        let result = if matches!(format, ImageFormat::Raw(_)) {
-                            cache.get_or_generate_embedded(&source, thumbnail_size * 2, None)
-                        } else {
-                            cache.get_or_generate(&source, thumbnail_size * 2, None)
-                        };
-                        thumb_ok = result.is_ok();
-                    }
-                    (path, exif, thumb_ok)
-                }),
-            ));
-        }
-        for (idx, handle) in handles {
-            let Ok((path, exif, thumb_ok)) = handle.await else {
-                continue;
-            };
+        let batch: Vec<(u32, PathBuf)> = chunk.to_vec();
+        let db = folder_db.clone();
+        let Ok(hits) =
+            tauri::async_runtime::spawn_blocking(move || extract_exif_batch(&batch, db.as_ref()))
+                .await
+        else {
+            continue;
+        };
+        {
+            let st = app.state::<Mutex<AppState>>();
+            let mut st = st.lock().expect("AppState 锁中毒");
             // 过期目录/列表：丢弃，防按新索引错绑 EXIF
-            {
-                let st = app.state::<Mutex<AppState>>();
-                let mut st = st.lock().expect("AppState 锁中毒");
-                if st.scan_generation != generation {
-                    return;
-                }
-                if let Some(exif) = &exif
-                    && let Some(meta) = st.captures.get_mut(idx as usize)
+            if st.scan_generation != generation {
+                return;
+            }
+            for (idx, path, exif) in hits {
+                if let Some(meta) = st.captures.get_mut(idx as usize)
                     && meta.primary_path == path.to_string_lossy()
                 {
-                    meta.enrich_with_exif(exif);
+                    meta.enrich_with_exif(&exif);
                     enriched.push(idx);
                 }
             }
+        }
+        exif_done = (exif_done + chunk.len() as u32).min(total);
+        let _ = app.emit(
+            "scan:progress",
+            ScanProgress {
+                stage: ScanStage::Exif,
+                done: exif_done,
+                total,
+            },
+        );
+        // 每批通知前端重排：EXIF 日期/尺寸影响 DateTaken 排序与预览 fit 尺寸
+        let _ = app.emit(
+            "capture:enriched",
+            CaptureEnriched {
+                indices: enriched.clone(),
+            },
+        );
+    }
+
+    // ── 阶段 2：缩略图预生成（RAW 内嵌提取 / JPG DCT 缩放；视频无缩略图跳过）──
+    const CONCURRENCY: usize = 4;
+    let mut done: u32 = 0;
+    for chunk in paths.chunks(CONCURRENCY) {
+        {
+            let st = app.state::<Mutex<AppState>>();
+            if st.lock().expect("AppState 锁中毒").scan_generation != generation {
+                return;
+            }
+        }
+        let mut handles = Vec::with_capacity(chunk.len());
+        for (_, path) in chunk {
+            let cache = thumb_cache.clone();
+            let path = path.clone();
+            handles.push(tauri::async_runtime::spawn_blocking(move || {
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                let Some(format) = ImageFormat::from_extension(&ext) else {
+                    return (path, false);
+                };
+                if format.is_other() {
+                    return (path, false);
+                }
+                let Some(cache) = &cache else {
+                    return (path, false);
+                };
+                // file_size 用真实 stat 与浏览时 ptimg 的键一致
+                let source = SourceFile {
+                    path: path.clone(),
+                    format: format.clone(),
+                    file_size: std::fs::metadata(&path).ok().map(|m| m.len()),
+                };
+                let result = if matches!(format, ImageFormat::Raw(_)) {
+                    cache.get_or_generate_embedded(&source, thumbnail_size * 2, None)
+                } else {
+                    cache.get_or_generate(&source, thumbnail_size * 2, None)
+                };
+                (path, result.is_ok())
+            }));
+        }
+        for handle in handles {
+            let Ok((path, thumb_ok)) = handle.await else {
+                continue;
+            };
             if thumb_ok {
                 let _ = app.emit(
                     "thumb:ready",
@@ -3705,7 +3735,7 @@ async fn enrich_and_pregen_thumbs(app: AppHandle, generation: u64) {
                 let _ = app.emit(
                     "scan:progress",
                     ScanProgress {
-                        stage: ScanStage::Exif,
+                        stage: ScanStage::Thumb,
                         done,
                         total,
                     },
@@ -3713,8 +3743,48 @@ async fn enrich_and_pregen_thumbs(app: AppHandle, generation: u64) {
             }
         }
     }
-    // 全部提取完成后通知重排（EXIF 日期/尺寸影响 DateTaken 排序与预览 fit 尺寸）
-    let _ = app.emit("capture:enriched", CaptureEnriched { indices: enriched });
+}
+
+/// 一批文件：先查 SQLite 缓存（指纹命中直接返回，不再重复 exiftool），
+/// 未命中的一次批量提取并写回缓存。返回 (capture index, 路径, EXIF)。
+fn extract_exif_batch(
+    batch: &[(u32, PathBuf)],
+    db: Option<&FolderDb>,
+) -> Vec<(u32, PathBuf, photo_domain::ExifMetadata)> {
+    let mut out = Vec::new();
+    let mut misses: Vec<(u32, PathBuf, ImageFormat)> = Vec::new();
+    for (idx, path) in batch {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let Some(format) = ImageFormat::from_extension(&ext) else {
+            continue;
+        };
+        if let Some(db) = db
+            && let Ok(Some(cached)) = db.get_exif(path)
+        {
+            out.push((*idx, path.clone(), cached));
+            continue;
+        }
+        misses.push((*idx, path.clone(), format));
+    }
+    if !misses.is_empty() {
+        let files: Vec<(PathBuf, ImageFormat)> = misses
+            .iter()
+            .map(|(_, p, f)| (p.clone(), f.clone()))
+            .collect();
+        for ((idx, path, _), (_, result)) in misses.iter().zip(exif::extract_batch(&files)) {
+            if let Ok(meta) = result {
+                if let Some(db) = db {
+                    let _ = db.put_exif(path, &meta);
+                }
+                out.push((*idx, path.clone(), meta));
+            }
+        }
+    }
+    out
 }
 
 // ============================================================================

@@ -103,6 +103,20 @@ pub fn extract_exif(path: &Path, format: &ImageFormat) -> Result<ExifMetadata, E
     result
 }
 
+/// 统一入口：批量提取（exiftool 后端一次命令处理整批，~10ms/张，远快于逐文件往返；
+/// 其他后端按 trait 默认实现退化为逐文件）。返回顺序与入参一致。
+pub fn extract_batch(
+    files: &[(PathBuf, ImageFormat)],
+) -> Vec<(PathBuf, Result<ExifMetadata, ExifError>)> {
+    let results = provider().extract_batch(files);
+    for (path, r) in &results {
+        if let Err(e) = r {
+            tracing::warn!("EXIF 批量提取失败 {}: {e}", path.display());
+        }
+    }
+    results
+}
+
 // ============================================================================
 // exiftool 后端（主）：-stay_open 长驻进程 + JSON 输出
 // ============================================================================

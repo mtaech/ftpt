@@ -138,6 +138,7 @@ pub fn detect_removable_drives() -> Vec<DriveInfo> {
 ///
 /// 日期 = EXIF DateTimeOriginal 优先（解析为 YYYY-MM-DD），回退文件修改时间；
 /// 单文件提取失败不影响整体（跳过该文件并记 warning）。返回按完整路径排序。
+/// EXIF 按批提取（exiftool 一次命令处理一批，整卡数百张从分钟级降到秒级）。
 pub fn scan_import_source(dir: &Path) -> Result<Vec<ImportCandidate>, ImportError> {
     if !dir.is_dir() {
         return Err(ImportError::Io(std::io::Error::new(
@@ -145,7 +146,8 @@ pub fn scan_import_source(dir: &Path) -> Result<Vec<ImportCandidate>, ImportErro
             format!("源目录不存在: {}", dir.display()),
         )));
     }
-    let mut candidates = Vec::new();
+    // 1. 收集可查看文件（跳过应用自己的 .pt 缓存目录）
+    let mut files: Vec<(PathBuf, ImageFormat)> = Vec::new();
     for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
         if !entry.file_type().is_file() {
             continue;
@@ -159,39 +161,55 @@ pub fn scan_import_source(dir: &Path) -> Result<Vec<ImportCandidate>, ImportErro
         let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
             continue;
         };
-        if !ImageFormat::is_viewable(ext) {
+        let Some(format) = ImageFormat::from_extension(ext) else {
             continue;
-        }
-        if let Some(candidate) = build_candidate(path) {
-            candidates.push(candidate);
-        }
+        };
+        files.push((path.to_path_buf(), format));
     }
     // 确定性顺序（walkdir 目录序不定）：按完整路径排序
-    candidates.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(candidates)
-}
+    files.sort_by(|a, b| a.0.cmp(&b.0));
 
-/// 单个文件 → 候选（EXIF 提取/元数据失败返回 None，由调用方跳过）
-fn build_candidate(path: &Path) -> Option<ImportCandidate> {
-    let meta = std::fs::metadata(path).ok()?;
-    let format = path.extension().and_then(|e| e.to_str()).and_then(ImageFormat::from_extension);
-    // 视频等非图片格式不尝试 EXIF（无后端支持，直接走 mtime）
-    let date = match format {
-        Some(f) if !f.is_other() => match exif::extract_exif(path, &f) {
-            Ok(m) => m
-                .date_time_original
-                .as_deref()
-                .and_then(parse_exif_date)
-                .unwrap_or_else(|| mtime_date(&meta)),
-            Err(_) => mtime_date(&meta),
-        },
-        _ => mtime_date(&meta),
-    };
-    Some(ImportCandidate {
-        path: path.to_path_buf(),
-        date,
-        size: meta.len(),
-    })
+    // 2. 批量提取 EXIF 日期（视频等非图片格式无 EXIF，直接走 mtime）
+    let mut dates: HashMap<PathBuf, String> = HashMap::new();
+    const EXIF_BATCH: usize = 64;
+    for chunk in files.chunks(EXIF_BATCH) {
+        let extractable: Vec<(PathBuf, ImageFormat)> = chunk
+            .iter()
+            .filter(|(_, f)| !f.is_other())
+            .cloned()
+            .collect();
+        if extractable.is_empty() {
+            continue;
+        }
+        for (path, result) in exif::extract_batch(&extractable) {
+            if let Ok(meta) = result
+                && let Some(date) = meta
+                    .date_time_original
+                    .as_deref()
+                    .and_then(parse_exif_date)
+            {
+                dates.insert(path, date);
+            }
+        }
+    }
+
+    // 3. 组装候选（元数据读取失败的文件跳过）
+    let mut candidates = Vec::with_capacity(files.len());
+    for (path, _) in files {
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let date = dates
+            .get(&path)
+            .cloned()
+            .unwrap_or_else(|| mtime_date(&meta));
+        candidates.push(ImportCandidate {
+            path,
+            date,
+            size: meta.len(),
+        });
+    }
+    Ok(candidates)
 }
 
 /// EXIF 日期串 → YYYY-MM-DD。
@@ -815,11 +833,12 @@ mod tests {
 
     #[test]
     fn test_mtime_fallback_plain_file() {
-        // 无 EXIF 的普通文件：build_candidate 走 mtime 回退
+        // 无 EXIF 的普通文件：scan_import_source 走 mtime 回退
         let dir = TempDir::new().unwrap();
         let path = make_file(&dir, "plain.jpg", b"no-exif");
         let meta = std::fs::metadata(&path).unwrap();
-        let c = build_candidate(&path).unwrap();
+        let cands = scan_import_source(dir.path()).unwrap();
+        let c = cands.iter().find(|c| c.path == path).unwrap();
         assert_eq!(c.date, mtime_date(&meta));
         assert_eq!(c.size, meta.len());
     }
