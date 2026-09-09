@@ -169,9 +169,12 @@ pub fn scan_import_source(dir: &Path) -> Result<Vec<ImportCandidate>, ImportErro
     // 确定性顺序（walkdir 目录序不定）：按完整路径排序
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // 2. 批量提取 EXIF 日期（视频等非图片格式无 EXIF，直接走 mtime）
+    // 2. 提取拍摄日期（视频等非图片格式无 EXIF，直接走 mtime）。
+    // 相机 USB 挂载的持续读很慢（实测 ~1.7MB/s，读整张 RAW 要 2–3 秒），而 EXIF 头
+    // 通常在前 2MB——先只读文件头提取；前缀拿不到再回退完整提取（布局特殊时才发生）。
     let mut dates: HashMap<PathBuf, String> = HashMap::new();
     const EXIF_BATCH: usize = 64;
+    const EXIF_PREFIX: u64 = 2 * 1024 * 1024;
     for chunk in files.chunks(EXIF_BATCH) {
         let extractable: Vec<(PathBuf, ImageFormat)> = chunk
             .iter()
@@ -181,14 +184,27 @@ pub fn scan_import_source(dir: &Path) -> Result<Vec<ImportCandidate>, ImportErro
         if extractable.is_empty() {
             continue;
         }
-        for (path, result) in exif::extract_batch(&extractable) {
-            if let Ok(meta) = result
-                && let Some(date) = meta
-                    .date_time_original
-                    .as_deref()
-                    .and_then(parse_exif_date)
-            {
+        for (path, meta) in exif::extract_batch_prefix(&extractable, EXIF_PREFIX) {
+            let date = meta
+                .as_ref()
+                .and_then(|m| m.date_time_original.as_deref())
+                .and_then(parse_exif_date);
+            if let Some(date) = date {
                 dates.insert(path, date);
+            } else if meta.is_none() {
+                // 前缀解析失败（非 TIFF 布局/截断）：回退完整提取，慢但正确
+                let Some(format) = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .and_then(ImageFormat::from_extension)
+                else {
+                    continue;
+                };
+                if let Ok(m) = exif::extract_exif(&path, &format)
+                    && let Some(date) = m.date_time_original.as_deref().and_then(parse_exif_date)
+                {
+                    dates.insert(path, date);
+                }
             }
         }
     }
