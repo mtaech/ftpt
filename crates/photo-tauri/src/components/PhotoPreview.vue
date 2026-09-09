@@ -2,7 +2,7 @@
 // 单图预览：ptimg master 图源（1:1 时切 full），滚轮光标中心缩放（×1.25 步进，
 // 数学走 previewMath 纯函数），左键拖拽平移，工具条 −/%/+/适应/1:1/返回网格。
 import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue'
-import { CrosshairIcon, CrownIcon, MinusIcon, PlusIcon, MaximizeIcon, ScanIcon, ScanLineIcon, Grid2x2Icon, ImageIcon } from '@lucide/vue'
+import { CrosshairIcon, CrownIcon, MinusIcon, PlusIcon, MaximizeIcon, ScanIcon, ScanLineIcon, Grid2x2Icon, ImageIcon, LoaderCircleIcon } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import Filmstrip from '@/components/Filmstrip.vue'
 import { useCapturesStore } from '@/stores/captures'
@@ -39,11 +39,13 @@ const loading = ref(true)
 
 const current = computed(() => selection.selected)
 
-/** 缩略图占位源：RAW 母版要解码数秒，先用网格同款缩略图顶上（同宽高比 → 几何与母版一致） */
+/** 占位图源：fit 用网格缩略图（最快，扫描期已缓存）；1:1 用半尺寸母版（清晰度远高于缩略图，
+ *  且通常已随 fit 预览解码过）——1:1 全尺寸 AHD 解码需数秒，期间先用它顶上 */
 const placeholderSrc = computed(() => {
   const c = current.value
   if (!c) return ''
-  return ptimgUrl('thumb', c.primaryPath, captures.thumbVersions[c.primaryPath])
+  const kind = preview.isOneToOne ? 'master' : 'thumb'
+  return ptimgUrl(kind, c.primaryPath, captures.thumbVersions[c.primaryPath])
 })
 /** 占位图已就绪（加载成功）；视频等无缩略图时保持 false，回退加载卡片 */
 const placeholderReady = ref(false)
@@ -370,8 +372,14 @@ watch(
 // 1:1 切换换图源，同样进入加载态
 watch(
   () => preview.isOneToOne,
-  () => {
+  (one) => {
     loading.value = true
+    // 1:1 图源是 full（RAW 全尺寸 AHD 解码需数秒）：EXIF 尺寸已知时先按它撑开布局，
+    // 避免半尺寸母版 → 全尺寸的 2x 跳变；EXIF 缺失/不准时图片加载完成会自然校正
+    if (one) {
+      const c = current.value
+      if (c?.imageWidth && c?.imageHeight) natural.value = [c.imageWidth, c.imageHeight]
+    }
   },
 )
 // 容器尺寸/原图尺寸变化时重新钳制平移（窗口缩放等场景）
@@ -700,8 +708,10 @@ function onImageContextMenu(e: MouseEvent) {
         <Button size="sm" variant="ghost" title="缩小" @click="zoomStep(-1)">
           <MinusIcon />
         </Button>
-        <span class="w-12 text-center text-xs text-muted-foreground tabular-nums">
+        <span class="flex w-14 items-center justify-center gap-1 text-xs text-muted-foreground tabular-nums">
           {{ zoomPercent }}%
+          <!-- 高分辨率图源解码中（1:1 的 RAW 全尺寸 AHD 约数秒）：占位图已可见，这里给个进度提示 -->
+          <LoaderCircleIcon v-if="loading" class="size-3 animate-spin" />
         </span>
         <Button size="sm" variant="ghost" title="放大" @click="zoomStep(1)">
           <PlusIcon />

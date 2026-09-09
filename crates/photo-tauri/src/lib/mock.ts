@@ -119,17 +119,16 @@ let captures: CaptureMeta[] = []
 
 /**
  * SVG 占位图（离线可用）：按路径哈希取色相，网格纹理 + 文件名，
- * kind 决定尺寸（thumb 400×300，master/full 2400×1600）。
+ * kind 决定尺寸（thumb 400×300，master 2400×1600，full 4800×3200）——
+ * 与真实 ptimg 三路分辨率关系一致，1:1 切图源时能看出清晰度变化。
  */
 export function placeholderImage(kind: string, path: string): string {
   let hash = 0
   for (let i = 0; i < path.length; i++) hash = (hash * 31 + path.charCodeAt(i)) | 0
   const hue = ((hash % 360) + 360) % 360
-  const big = kind !== 'thumb'
-  const w = big ? 2400 : 400
-  const h = big ? 1600 : 300
+  const [w, h] = kind === 'thumb' ? [400, 300] : kind === 'full' ? [4800, 3200] : [2400, 1600]
   const name = path.split('/').pop() ?? path
-  const step = big ? 150 : 50
+  const step = kind === 'thumb' ? 50 : 150
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">` +
     `<rect width="${w}" height="${h}" fill="hsl(${hue},30%,18%)"/>` +
@@ -137,7 +136,7 @@ export function placeholderImage(kind: string, path: string): string {
     `<path d="M ${step} 0 L 0 0 0 ${step}" fill="none" stroke="hsl(${hue},25%,30%)" stroke-width="1"/>` +
     `</pattern><rect width="${w}" height="${h}" fill="url(#g)"/>` +
     `<text x="${w / 2}" y="${h / 2}" fill="hsl(${hue},60%,75%)" font-family="monospace" ` +
-    `font-size="${big ? 72 : 20}" text-anchor="middle" dominant-baseline="middle">${name}</text>` +
+    `font-size="${kind === 'thumb' ? 20 : 72}" text-anchor="middle" dominant-baseline="middle">${name}</text>` +
     `</svg>`
   return `data:image/svg+xml,${encodeURIComponent(svg)}`
 }
