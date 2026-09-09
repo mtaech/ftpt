@@ -62,7 +62,12 @@ import { installFrontendLogging, logToFile } from '@/lib/log'
 import { zoomHost } from '@/lib/zoomHost'
 import { nonBestPaths } from '@/lib/bestFrame'
 import type { CaptureMeta } from '@/lib/bindings'
-import { deleteCaptures, takePendingImportPath, undoBatchOperation } from '@/lib/ipc'
+import {
+  deleteCaptures,
+  onImportOpen,
+  takePendingImportPath,
+  undoBatchOperation,
+} from '@/lib/ipc'
 
 const captures = useCapturesStore()
 const selection = useSelectionStore()
@@ -429,6 +434,8 @@ onMounted(async () => {
   void takePendingImportPath().then((p) => {
     if (p) importDialog.openWithSource(p)
   })
+  // 单实例：应用已在运行时，第二个实例转发的 --import <挂载点> 经此事件到达
+  void onImportOpen((p) => importDialog.openWithSource(p.path))
   // 根容器圆角跟窗口最大化状态联动（本应用默认 maximized:true，需在挂载后读真实状态）
   await refreshMaximized()
   try {

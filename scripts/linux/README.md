@@ -29,5 +29,8 @@ kquitapp6 plasmashell && kstart plasmashell
 
 - 谓词沿用 Gwenview 导入器的写法（`StorageVolume.usage == 'FileSystem'`），因此对所有已挂载
   文件系统生效；Device Notifier 默认只展示可移动/热插拔设备。
-- 每次点击会启动一个新实例；单实例复用（已有窗口时聚焦并传入路径）需要
-  `tauri-plugin-single-instance`，当前未接入。
+- 已接入 `tauri-plugin-single-instance`：应用已在运行时，再次点击菜单项会把
+  `--import <挂载点>` 转发给已运行实例（发 `import:open` 事件让前端打开导入对话框），
+  不会开出第二个窗口。
+- 开发运行（`pnpm run tauri dev`）时 debug 二进制从 vite（1420）加载前端，所以设备动作
+  需要 dev 进程在跑；要独立可启动就用 `pnpm run tauri build` 的 release 产物（前端已内嵌）。

@@ -291,9 +291,13 @@ export const takePendingImportPath: () => Promise<string | null> = () =>
 
 export type ImportProgressPayload = { done: number; total: number; current: string }
 export type ImportDonePayload = { imported: number; skipped: number; failed: number }
+/** 外部入口（KDE 设备动作等）请求打开导入对话框：单实例模式下由已运行实例转发 */
+export type ImportOpenPayload = { path: string }
 
 export const onImportProgress = (cb: (p: ImportProgressPayload) => void) =>
   listenEvent<ImportProgressPayload>('import:progress', cb)
+export const onImportOpen = (cb: (p: ImportOpenPayload) => void) =>
+  listenEvent<ImportOpenPayload>('import:open', cb)
 export const onImportDone = (cb: (p: ImportDonePayload) => void) =>
   listenEvent<ImportDonePayload>('import:done', cb)
 

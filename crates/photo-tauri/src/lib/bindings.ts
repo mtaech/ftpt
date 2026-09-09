@@ -684,6 +684,14 @@ export type ImportMode =
 /**  移动（源删除；跨文件系统走 copy + delete 回退） */
 "Move";
 
+/**
+ *  `import:open` 事件负载：外部入口（KDE Solid 设备动作等）请求打开导入对话框。
+ *  单实例模式下由已在运行的实例收到第二实例的 `--import <path>` 后发出。
+ */
+export type ImportOpen = {
+	path: string,
+};
+
 /**  导入计划（`plan_import` 返回 / `execute_import` 输入；干跑不碰文件） */
 export type ImportPlan = {
 	/**  按日期分组（YYYY-MM-DD） */
@@ -893,7 +901,6 @@ export type FilterCriteria = {
   lensFilter: string[]
   keywordFilter: string[]
 }
-
 /* Tauri Specta runtime */
 async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {
     try {

@@ -3041,6 +3041,14 @@ pub struct ImportDone {
     pub failed: u32,
 }
 
+/// `import:open` 事件负载：外部入口（KDE Solid 设备动作等）请求打开导入对话框。
+/// 单实例模式下由已在运行的实例收到第二实例的 `--import <path>` 后发出。
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportOpen {
+    pub path: String,
+}
+
 /// `execute_import` 返回（与 import:done 同内容，供 invoke 调用方直接使用）
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
@@ -3884,6 +3892,7 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .typ::<ExportDone>()
         .typ::<ImportProgress>()
         .typ::<ImportDone>()
+        .typ::<ImportOpen>()
         .typ::<DuplicatesProgress>()
         .typ::<DuplicatesDone>()
         .typ::<photo_recognize::CatalogEntry>()
@@ -3927,6 +3936,14 @@ pub fn run() {
     let builder = specta_builder();
 
     tauri::Builder::default()
+        // 单实例：第二个实例（如 KDE 设备动作再次点击）把 --import <path> 转发给
+        // 已运行实例后退出；已运行实例发 import:open 事件让前端打开导入对话框。
+        // 必须第一个注册（官方要求，先于其它插件）。
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(path) = parse_pending_import_path(argv.into_iter().skip(1)) {
+                let _ = app.emit("import:open", ImportOpen { path });
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
