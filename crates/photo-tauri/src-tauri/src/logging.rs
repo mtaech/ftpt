@@ -61,10 +61,17 @@ fn init_into(dir: &PathBuf) -> WorkerGuard {
     // 非阻塞 writer：文件 IO 走独立线程，不阻塞业务线程
     let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
 
-    // 级别过滤：PHOTO_LOG_LEVEL 环境变量优先；否则 debug 构建 DEBUG、release INFO
+    // 级别过滤：PHOTO_LOG_LEVEL 环境变量优先；否则 debug 构建 DEBUG、release INFO。
+    // 第三方噪声默认压制：ort（ONNX Runtime）在 INFO 级会刷几百行初始化/图优化/内存
+    // 预留日志，把目标 ort 压到 warn；需要排查时用更具体的指令覆盖
+    // （如 PHOTO_LOG_LEVEL=ort=info,debug，EnvFilter 取最具体的匹配）。
     let default_level = if cfg!(debug_assertions) { "debug" } else { "info" };
-    let filter = EnvFilter::try_from_env("PHOTO_LOG_LEVEL")
-        .unwrap_or_else(|_| EnvFilter::new(default_level));
+    let base = std::env::var("PHOTO_LOG_LEVEL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| default_level.to_string());
+    let filter = EnvFilter::new(format!("{base},ort=warn"));
 
     // 时间戳：读取系统本地时区（chrono::Local），默认 SystemTime 为 UTC 会偏离本地时间
     let timer = tracing_subscriber::fmt::time::ChronoLocal::rfc_3339();
