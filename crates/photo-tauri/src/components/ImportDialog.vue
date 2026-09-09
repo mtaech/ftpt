@@ -171,7 +171,7 @@ async function browseSource() {
   void scan()
 }
 
-/** 递归扫描源（EXIF 日期优先，回退 mtime） */
+/** 递归扫描源（只 stat 取文件时间，不读 EXIF——相机挂载下读整文件太慢） */
 async function scan() {
   if (!source.value || scanning.value || running.value) return
   scanning.value = true
@@ -447,7 +447,7 @@ watch(toast, (t) => {
             />
           </div>
           <div class="px-1 text-[0.6875rem] text-muted-foreground">
-            占位符：{name} 原名 · {date} 拍摄日期 YYYYMMDD · {seq} 序号（补零 3 位）
+            占位符：{name} 原名 · {date} 文件日期 YYYYMMDD · {seq} 序号（补零 3 位）
           </div>
         </div>
 
@@ -561,7 +561,7 @@ watch(toast, (t) => {
 
       <!-- 底部：目标目录提示（对齐 BatchOpsPanel 对话框描述风格） -->
       <DialogDescription class="sr-only">
-        从 {{ source ?? '源' }} 导入照片到 {{ destRoot ?? '目标根目录' }}（按拍摄日期建子目录，同名同大小自动跳过）
+        从 {{ source ?? '源' }} 导入照片到 {{ destRoot ?? '目标根目录' }}（按文件日期建子目录，同名同大小自动跳过）
       </DialogDescription>
     </DialogContent>
   </Dialog>

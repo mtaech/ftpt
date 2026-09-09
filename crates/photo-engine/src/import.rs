@@ -2,7 +2,7 @@
 //!
 //! 全同步实现（与 scanner/ops 一致，core 层禁止 async）。流程：
 //!   1. `detect_removable_drives` —— 检测可移动驱动器（Windows 原生 API）
-//!   2. `scan_import_source`     —— 递归扫描源，EXIF 拍摄日期优先（回退 mtime）
+//!   2. `scan_import_source`     —— 递归扫描源，日期取文件修改时间（只 stat，不读 EXIF）
 //!   3. `plan_import`            —— 按 YYYY-MM-DD 分组 + 目标去重（同名同大小跳过）
 //!   4. `execute_import`         —— 逐文件委托 ops 复制/移动，进度回调
 //!
@@ -20,7 +20,6 @@ use walkdir::WalkDir;
 use chrono::Datelike;
 use photo_domain::ImageFormat;
 
-use crate::exif;
 use crate::ops;
 
 /// 导入错误
@@ -50,7 +49,7 @@ pub struct DriveInfo {
 pub struct ImportCandidate {
     /// 源文件完整路径
     pub path: PathBuf,
-    /// 拍摄日期 YYYY-MM-DD（EXIF DateTimeOriginal 优先，回退文件修改时间）
+    /// 文件日期 YYYY-MM-DD（取文件修改时间；不读 EXIF——相机挂载下读整文件太慢）
     pub date: String,
     /// 文件大小（字节，去重用）
     pub size: u64,
@@ -136,9 +135,9 @@ pub fn detect_removable_drives() -> Vec<DriveInfo> {
 
 /// 递归扫描导入源目录（整棵子树，不限 DCIM），收集可查看媒体文件（图片/RAW/视频）。
 ///
-/// 日期 = EXIF DateTimeOriginal 优先（解析为 YYYY-MM-DD），回退文件修改时间；
-/// 单文件提取失败不影响整体（跳过该文件并记 warning）。返回按完整路径排序。
-/// EXIF 按批提取（exiftool 一次命令处理一批，整卡数百张从分钟级降到秒级）。
+/// 日期 = 文件修改时间（YYYY-MM-DD）：只 stat 不读文件内容——相机 USB 挂载下持续读只有
+/// ~1.7MB/s，逐张读 EXIF 会让整卡扫描从瞬时变成十几分钟。元数据读取失败的文件跳过，
+/// 返回按完整路径排序。
 pub fn scan_import_source(dir: &Path) -> Result<Vec<ImportCandidate>, ImportError> {
     if !dir.is_dir() {
         return Err(ImportError::Io(std::io::Error::new(
@@ -169,84 +168,23 @@ pub fn scan_import_source(dir: &Path) -> Result<Vec<ImportCandidate>, ImportErro
     // 确定性顺序（walkdir 目录序不定）：按完整路径排序
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // 2. 提取拍摄日期（视频等非图片格式无 EXIF，直接走 mtime）。
-    // 相机 USB 挂载的持续读很慢（实测 ~1.7MB/s，读整张 RAW 要 2–3 秒），而 EXIF 头
-    // 通常在前 2MB——先只读文件头提取；前缀拿不到再回退完整提取（布局特殊时才发生）。
-    let mut dates: HashMap<PathBuf, String> = HashMap::new();
-    const EXIF_BATCH: usize = 64;
-    const EXIF_PREFIX: u64 = 2 * 1024 * 1024;
-    for chunk in files.chunks(EXIF_BATCH) {
-        let extractable: Vec<(PathBuf, ImageFormat)> = chunk
-            .iter()
-            .filter(|(_, f)| !f.is_other())
-            .cloned()
-            .collect();
-        if extractable.is_empty() {
-            continue;
-        }
-        for (path, meta) in exif::extract_batch_prefix(&extractable, EXIF_PREFIX) {
-            let date = meta
-                .as_ref()
-                .and_then(|m| m.date_time_original.as_deref())
-                .and_then(parse_exif_date);
-            if let Some(date) = date {
-                dates.insert(path, date);
-            } else if meta.is_none() {
-                // 前缀解析失败（非 TIFF 布局/截断）：回退完整提取，慢但正确
-                let Some(format) = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .and_then(ImageFormat::from_extension)
-                else {
-                    continue;
-                };
-                if let Ok(m) = exif::extract_exif(&path, &format)
-                    && let Some(date) = m.date_time_original.as_deref().and_then(parse_exif_date)
-                {
-                    dates.insert(path, date);
-                }
-            }
-        }
-    }
-
-    // 3. 组装候选（元数据读取失败的文件跳过）
+    // 2. 组装候选：日期取文件修改时间（相机写入时即拍摄时间），不读 EXIF——
+    //    相机挂载下读整文件每张要 2–3 秒，整卡要十几分钟；stat 只取元数据，瞬时完成。
     let mut candidates = Vec::with_capacity(files.len());
     for (path, _) in files {
         let Ok(meta) = std::fs::metadata(&path) else {
             continue;
         };
-        let date = dates
-            .get(&path)
-            .cloned()
-            .unwrap_or_else(|| mtime_date(&meta));
         candidates.push(ImportCandidate {
             path,
-            date,
+            date: mtime_date(&meta),
             size: meta.len(),
         });
     }
     Ok(candidates)
 }
 
-/// EXIF 日期串 → YYYY-MM-DD。
-/// 支持标准 EXIF 形态 "2024:01:02 10:30:00" 与 "-" 分隔形态（部分相机/手机）。
-fn parse_exif_date(raw: &str) -> Option<String> {
-    let raw = raw.trim();
-    for fmt in ["%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"] {
-        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(raw, fmt) {
-            return Some(format!("{:04}-{:02}-{:02}", dt.year(), dt.month(), dt.day()));
-        }
-    }
-    // 仅日期形态（部分机型无时间字段）
-    for fmt in ["%Y:%m:%d", "%Y-%m-%d"] {
-        if let Ok(d) = chrono::NaiveDate::parse_from_str(raw, fmt) {
-            return Some(format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day()));
-        }
-    }
-    None
-}
-
-/// 文件修改时间 → YYYY-MM-DD（mtime 回退；读不到按纪元日兜底）
+/// 文件修改时间 → YYYY-MM-DD（读不到按纪元日兜底）
 fn mtime_date(meta: &std::fs::Metadata) -> String {
     meta.modified()
         .map(|t| {
@@ -276,7 +214,7 @@ pub struct ImportOptions {
     /// 子目录模式
     pub subfolder: ImportSubfolder,
     /// 文件重命名模板（None/空 = 保留原名）；占位符复用 template.rs：
-    /// {name} 原名(无扩展) / {date} 拍摄日期 YYYYMMDD / {seq} 序号（补零 3 位）
+    /// {name} 原名(无扩展) / {date} 文件日期 YYYYMMDD / {seq} 序号（补零 3 位）
     pub rename_template: Option<String>,
 }
 
@@ -832,19 +770,6 @@ mod tests {
         let missing = dir.path().join("nope");
         let err = scan_import_source(&missing).unwrap_err();
         assert!(matches!(err, ImportError::Io(_)), "缺失目录应报 Io(NotFound): {err:?}");
-    }
-
-    // ── 日期解析（EXIF 路径的解析机械）──
-
-    #[test]
-    fn test_parse_exif_date_variants() {
-        assert_eq!(parse_exif_date("2024:01:02 10:30:00"), Some("2024-01-02".to_string()));
-        assert_eq!(parse_exif_date("2024-01-02 10:30:00"), Some("2024-01-02".to_string()));
-        assert_eq!(parse_exif_date("2024:01:02"), Some("2024-01-02".to_string()));
-        assert_eq!(parse_exif_date("2024-01-02"), Some("2024-01-02".to_string()));
-        assert_eq!(parse_exif_date(" 2024:01:02 10:30:00 "), Some("2024-01-02".to_string()));
-        assert_eq!(parse_exif_date("garbage"), None);
-        assert_eq!(parse_exif_date(""), None);
     }
 
     #[test]

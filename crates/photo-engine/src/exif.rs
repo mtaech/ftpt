@@ -117,78 +117,6 @@ pub fn extract_batch(
     results
 }
 
-/// 慢速介质批量提取：只读每个文件头部 `prefix_len` 字节到临时文件，再一次性交给 exiftool。
-/// 相机 USB 挂载的持续读常只有 1–2MB/s（首段之后更慢），而 EXIF 头通常在前 1–2MB——
-/// 读整文件每张要 2–3 秒，读前缀只要几十毫秒（整卡数百张从十几分钟降到几十秒）。
-///
-/// 返回与入参同序的 (原始路径, Option<ExifMetadata>)；前缀里拿不到的（布局特殊、无 EXIF、
-/// 读取失败）返回 None，由调用方回退完整提取或 mtime。
-pub fn extract_batch_prefix(
-    files: &[(PathBuf, ImageFormat)],
-    prefix_len: u64,
-) -> Vec<(PathBuf, Option<ExifMetadata>)> {
-    use std::io::Read;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let tmp_dir = std::env::temp_dir();
-    let pid = std::process::id();
-    // slots[i] = 该文件对应的临时路径（读取失败为 None），保证返回顺序与入参一致
-    let mut slots: Vec<Option<PathBuf>> = Vec::with_capacity(files.len());
-    let mut temps: Vec<(PathBuf, PathBuf, ImageFormat)> = Vec::new();
-    for (i, (path, format)) in files.iter().enumerate() {
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("bin");
-        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        let tmp = tmp_dir.join(format!("ftpt-exif-{pid}-{seq}-{i}.{ext}"));
-        let read_ok = std::fs::File::open(path)
-            .and_then(|f| {
-                let mut buf = Vec::with_capacity(prefix_len as usize);
-                f.take(prefix_len).read_to_end(&mut buf)?;
-                std::fs::write(&tmp, &buf)
-            })
-            .is_ok();
-        if read_ok {
-            temps.push((path.clone(), tmp.clone(), format.clone()));
-            slots.push(Some(tmp));
-        } else {
-            tracing::warn!("EXIF 前缀读取失败: {}", path.display());
-            slots.push(None);
-        }
-    }
-    // 一次 exiftool 命令处理整批小文件
-    let batch: Vec<(PathBuf, ImageFormat)> = temps
-        .iter()
-        .map(|(_, t, f)| (t.clone(), f.clone()))
-        .collect();
-    let mut by_temp: std::collections::HashMap<PathBuf, Option<ExifMetadata>> =
-        std::collections::HashMap::new();
-    if !batch.is_empty() {
-        for (tmp, result) in extract_batch(&batch) {
-            by_temp.insert(tmp, result.ok());
-        }
-    }
-    let out: Vec<(PathBuf, Option<ExifMetadata>)> = files
-        .iter()
-        .enumerate()
-        .map(|(i, (path, _))| {
-            let mut meta = slots[i]
-                .as_ref()
-                .and_then(|tmp| by_temp.remove(tmp))
-                .flatten();
-            // 临时文件只有前缀长度：file_size 用原始文件大小覆盖
-            if let Some(m) = meta.as_mut()
-                && let Ok(md) = std::fs::metadata(path)
-            {
-                m.file_size = Some(md.len());
-            }
-            (path.clone(), meta)
-        })
-        .collect();
-    for (_, tmp, _) in &temps {
-        let _ = std::fs::remove_file(tmp);
-    }
-    out
-}
-
 // ============================================================================
 // exiftool 后端（主）：-stay_open 长驻进程 + JSON 输出
 // ============================================================================
@@ -946,27 +874,6 @@ mod tests {
         let path = std::path::Path::new("/nonexistent/photo.jpg");
         let result = extract_exif(path, &ImageFormat::Jpeg);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_extract_batch_prefix_keeps_order_and_cleans_up() {
-        // 慢速介质前缀提取：返回顺序与入参一致；测试环境 provider 为 rawlib，
-        // 截断的假文件解析失败 → None（调用方据此回退完整提取或 mtime）
-        let dir = TempDir::new().unwrap();
-        let a = dir.path().join("a.jpg");
-        let b = dir.path().join("b.rw2");
-        std::fs::write(&a, b"not a real jpeg").unwrap();
-        std::fs::write(&b, b"not a real raw").unwrap();
-        let files = vec![
-            (a.clone(), ImageFormat::Jpeg),
-            (b.clone(), ImageFormat::Raw("RW2".into())),
-        ];
-        let out = extract_batch_prefix(&files, 1024);
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].0, a);
-        assert_eq!(out[1].0, b);
-        assert!(out[0].1.is_none());
-        assert!(out[1].1.is_none());
     }
 
     #[test]
