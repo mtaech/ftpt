@@ -282,6 +282,10 @@ export const executeImport: (
   mode: ImportMode,
 ) => Promise<ImportResult> = (plan, destRoot, mode) =>
   unwrap(api.executeImport(plan, destRoot, mode))
+/** 取出启动参数 `--import <path>` 传入的导入源（取一次即清空；无则 null）。
+ *  供 KDE Solid 设备动作等外部入口在启动后打开导入对话框并预选挂载点。 */
+export const takePendingImportPath: () => Promise<string | null> = () =>
+  api.takePendingImportPath()
 
 // ── Phase 4 events：导入进度/完成 ──────────────────────
 

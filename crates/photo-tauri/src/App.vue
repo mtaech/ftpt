@@ -62,7 +62,7 @@ import { installFrontendLogging, logToFile } from '@/lib/log'
 import { zoomHost } from '@/lib/zoomHost'
 import { nonBestPaths } from '@/lib/bestFrame'
 import type { CaptureMeta } from '@/lib/bindings'
-import { deleteCaptures, undoBatchOperation } from '@/lib/ipc'
+import { deleteCaptures, takePendingImportPath, undoBatchOperation } from '@/lib/ipc'
 
 const captures = useCapturesStore()
 const selection = useSelectionStore()
@@ -425,6 +425,10 @@ onMounted(async () => {
   // 主题/字体/右栏可见性跟随后端配置（config store 集中处理 DOM 应用；默认 Light）
   await configStore.load()
   rightPanelVisible.value = configStore.config.rightPanelVisible ?? true
+  // 外部入口（KDE Solid 设备动作等）：启动参数 --import <挂载点> → 打开导入对话框并预选源
+  void takePendingImportPath().then((p) => {
+    if (p) importDialog.openWithSource(p)
+  })
   // 根容器圆角跟窗口最大化状态联动（本应用默认 maximized:true，需在挂载后读真实状态）
   await refreshMaximized()
   try {

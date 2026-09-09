@@ -26,11 +26,13 @@ import {
 } from '@/lib/ipc'
 import type { ImportCandidate, ImportDrive, ImportMode, ImportPlan, ImportResult } from '@/lib/bindings'
 import { useCapturesStore } from '@/stores/captures'
+import { useImportDialogStore } from '@/stores/importDialog'
 
 /** 弹窗开关（store 驱动：文件树 tab「导入」按钮打开、×/Esc/遮罩关闭） */
 const open = defineModel<boolean>('open', { default: false })
 
 const captures = useCapturesStore()
+const importDialog = useImportDialogStore()
 
 /** 顶部选项：导入（SD 卡 → 复制/移动）| 添加（选目录直接打开浏览，不动文件） */
 const tab = ref<'import' | 'add'>('import')
@@ -114,8 +116,10 @@ const progressPct = computed(() => {
 /** 打开时：复位 + 加载驱动器列表（对齐 SettingsModal watch(open) 模式） */
 watch(open, (v) => {
   if (!v) return
+  // 外部入口（KDE 设备动作）预选的源：打开即扫描；否则清空等待用户选择
+  const pending = importDialog.consumePendingSource()
   tab.value = 'import'
-  source.value = null
+  source.value = pending ?? null
   scanning.value = false
   candidates.value = []
   destRoot.value = null
@@ -126,6 +130,7 @@ watch(open, (v) => {
   progress.value = null
   result.value = null
   void loadDrives()
+  if (pending) void scan()
 })
 
 async function loadDrives() {

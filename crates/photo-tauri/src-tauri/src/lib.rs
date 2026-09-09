@@ -372,10 +372,13 @@ pub struct AppState {
     quality_scores: HashMap<String, f64>,
     /// 技术质量评分任务：防并发并隔离切目录后的旧 worker
     quality_task: DirectoryTaskTracker,
+    /// 启动时经 CLI `--import <path>` 传入的导入源（KDE Solid 设备动作等外部入口）；
+    /// 前端启动后 take 一次即清空
+    pending_import_path: Option<String>,
 }
 
 impl AppState {
-    fn new(config: AppConfig, config_path: PathBuf) -> Self {
+    fn new(config: AppConfig, config_path: PathBuf, pending_import_path: Option<String>) -> Self {
         // 全局鸟种索引库：数据根目录下 data/global.db（便携约定，与 bird_catalog.db 同路径）；
         // 打开失败降级 None 不阻塞启动（统计视图显示空数据），失败仅记日志
         let global_db = data_root()
@@ -404,6 +407,7 @@ impl AppState {
             op_journal: photo_engine::undo::OpJournal::new(),
             quality_scores: HashMap::new(),
             quality_task: DirectoryTaskTracker::default(),
+            pending_import_path,
         }
     }
 }
@@ -3060,6 +3064,18 @@ fn list_import_drives() -> Vec<ImportDrive> {
         .collect()
 }
 
+/// 取出启动时经 CLI `--import <path>` 传入的导入源（取一次即清空）。
+/// 供 KDE Solid 设备动作等外部入口在启动后自动打开导入对话框并预选该挂载点。
+#[tauri::command]
+#[specta::specta]
+fn take_pending_import_path(state: State<'_, Mutex<AppState>>) -> Option<String> {
+    state
+        .lock()
+        .expect("AppState 锁中毒")
+        .pending_import_path
+        .take()
+}
+
 /// 递归扫描导入源（整棵子树，不限 DCIM）：EXIF 拍摄日期优先，回退 mtime。
 /// 返回候选列表（前端据此展示「N 张」并送入 plan_import 干跑）。
 #[tauri::command]
@@ -3838,6 +3854,7 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             get_correction_stats,
             get_frequent_species,
             list_import_drives,
+            take_pending_import_path,
             scan_import_source,
             plan_import,
             execute_import,
@@ -3874,10 +3891,30 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .typ::<QualityDone>()
 }
 
+/// 解析 CLI 参数里的 `--import <path>`（同时支持 `--import=<path>`）；无则 None。
+/// 路径存在性不在此校验：前端扫描失败会给出提示。
+fn parse_pending_import_path(args: impl Iterator<Item = String>) -> Option<String> {
+    let mut it = args;
+    while let Some(a) = it.next() {
+        if a == "--import" {
+            return it.next();
+        }
+        if let Some(rest) = a.strip_prefix("--import=")
+            && !rest.is_empty()
+        {
+            return Some(rest.to_string());
+        }
+    }
+    None
+}
+
 pub fn run() {
     // 先初始化日志：后续配置加载/启动/运行期错误全部进日志文件（WorkerGuard 持有到
     // 应用退出，保证非阻塞 writer 缓冲在退出时落盘）
     let _log_guard = logging::init();
+
+    // 外部入口（KDE Solid 设备动作等）：--import <挂载点> → 启动后自动打开导入对话框
+    let pending_import_path = parse_pending_import_path(std::env::args().skip(1));
 
     // 配置：固定存 ~/.config/pt/config.toml（全平台统一，Windows 为 %USERPROFILE%\.config\pt\config.toml）
     let config_path = photo_config::determine_config_path()
@@ -3895,7 +3932,11 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(builder.invoke_handler())
         .register_asynchronous_uri_scheme_protocol("ptimg", ptimg_handler)
-        .manage(Mutex::new(AppState::new(config, config_path)))
+        .manage(Mutex::new(AppState::new(
+            config,
+            config_path,
+            pending_import_path,
+        )))
         .setup(|app| {
             let app_handle = app.handle().clone();
 

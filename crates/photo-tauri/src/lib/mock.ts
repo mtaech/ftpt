@@ -451,6 +451,10 @@ export const mockCommands = {
   async listImportDrives(): Promise<ImportDrive[]> {
     return [...MOCK_IMPORT_DRIVES]
   },
+  /** 浏览器 mock 无启动参数：恒返回 null（真实后端见 take_pending_import_path） */
+  async takePendingImportPath(): Promise<string | null> {
+    return null
+  },
   async scanImportSource(path: string): Promise<MockResult<ImportCandidate[]>> {
     // 模拟递归扫描耗时
     await sleep(120)

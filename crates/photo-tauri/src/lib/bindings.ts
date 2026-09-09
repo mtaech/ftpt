@@ -87,8 +87,8 @@ export const commands = {
 	cancelRecognition: () => __TAURI_INVOKE<void>("cancel_recognition"),
 	/**
 	 *  批量操作干跑：只计算操作集与目标路径，不碰文件。
-	 *  操作集 = 当前扫描结果全量（Tauri 端筛选在 TS 侧，后端无筛选状态，前端在无筛选
-	 *  条件时自行禁用）；formats 非空时按主文件格式过滤；sync_siblings 时按引擎
+	 *  操作集 = options.paths（前端筛选结果，ADR 0006 筛选驱动；空白名单 = 空操作集，
+	 *  绝不落回全目录）；formats 非空时按主文件格式过滤；sync_siblings 时按引擎
 	 *  expand_with_siblings 把同名兄弟并入（formats 即兄弟格式白名单）。siblingCount = 扩展新增数。
 	 */
 	batchOpPreview: (op: BatchOpType, options: BatchOpOptions) => typedError<BatchOpPreview, string>(__TAURI_INVOKE("batch_op_preview", { op, options })),
@@ -96,7 +96,8 @@ export const commands = {
 	 *  批量操作执行：spawn_blocking 后台执行（engine::batch_ops::execute），逐文件 emit
 	 *  batch:progress，完成 emit batch:done。语义：
 	 *  1. 重扫源目录取完整 Capture（ops 层需要 source_files 全列表操作兄弟文件）
-	 *  2. 操作集 = 全量；formats 非空按主文件格式过滤；sync_siblings 时 expand_with_siblings
+	 *  2. 操作集 = options.paths（前端筛选结果）；formats 非空按主文件格式过滤；
+	 *     sync_siblings 时 expand_with_siblings
 	 *  3. Delete 走 ops::delete_capture（回收站）；Move/Delete 后的重扫由前端负责
 	 *     （前端会重调 scan_directory，本命令不触发）
 	 */
@@ -227,6 +228,11 @@ export const commands = {
 	 *  GetVolumeInformationW；非 Windows 返回空）。SD 卡/U 盘即 DRIVE_REMOVABLE。
 	 */
 	listImportDrives: () => __TAURI_INVOKE<ImportDrive[]>("list_import_drives"),
+	/**
+	 *  取出启动时经 CLI `--import <path>` 传入的导入源（取一次即清空）。
+	 *  供 KDE Solid 设备动作等外部入口在启动后自动打开导入对话框并预选该挂载点。
+	 */
+	takePendingImportPath: () => __TAURI_INVOKE<string | null>("take_pending_import_path"),
 	/**
 	 *  递归扫描导入源（整棵子树，不限 DCIM）：EXIF 拍摄日期优先，回退 mtime。
 	 *  返回候选列表（前端据此展示「N 张」并送入 plan_import 干跑）。
@@ -887,6 +893,7 @@ export type FilterCriteria = {
   lensFilter: string[]
   keywordFilter: string[]
 }
+
 /* Tauri Specta runtime */
 async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {
     try {
