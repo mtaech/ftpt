@@ -87,6 +87,7 @@ export const listFavorites: () => Promise<string[]> = () => api.listFavorites()
 export const addFavorite: (path: string) => Promise<void> = (path) => api.addFavorite(path)
 export const removeFavorite: (path: string) => Promise<void> = (path) => api.removeFavorite(path)
 export const listRecent: () => Promise<string[]> = () => api.listRecent()
+export const removeRecent: (path: string) => Promise<void> = (path) => api.removeRecent(path)
 export const listSubdirs: (path: string) => Promise<SubdirInfo[]> = (path) =>
   unwrap(api.listSubdirs(path))
 export const listBirdSpecies: () => Promise<string[]> = () => unwrap(api.listBirdSpecies())

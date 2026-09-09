@@ -39,6 +39,8 @@ export const commands = {
 	removeFavorite: (path: string) => __TAURI_INVOKE<void>("remove_favorite", { path }),
 	/**  列出最近打开的目录（最新在前，最多 10 个；scan_impl 扫描时维护） */
 	listRecent: () => __TAURI_INVOKE<string[]>("list_recent"),
+	/**  从最近打开列表移除指定目录（该列表由后端维护；set_app_config 不再接受前端快照覆盖） */
+	removeRecent: (path: string) => __TAURI_INVOKE<void>("remove_recent", { path }),
 	/**
 	 *  列出 path 的一层子目录（侧栏目录树数据源；逐层展开逐层调本命令）。
 	 *  photo_count 只统计每个子目录**直接**包含的照片数（单层语义，与扫描一致），

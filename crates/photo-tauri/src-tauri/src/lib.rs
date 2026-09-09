@@ -821,6 +821,15 @@ fn list_recent(state: State<'_, Mutex<AppState>>) -> Vec<String> {
         .clone()
 }
 
+/// 从最近打开列表移除指定目录（该列表由后端维护；set_app_config 不再接受前端快照覆盖）
+#[tauri::command]
+#[specta::specta]
+fn remove_recent(state: State<'_, Mutex<AppState>>, path: String) {
+    let mut st = state.lock().expect("AppState 锁中毒");
+    st.config.recent_directories.retain(|d| d != &path);
+    save_config(&st);
+}
+
 // ============================================================================
 // 子目录树（T1 批次）：侧栏当前目录卡片下的懒加载目录树数据源
 // ============================================================================
@@ -2293,7 +2302,10 @@ fn list_system_fonts() -> Result<Vec<String>, String> {
 #[specta::specta]
 fn set_app_config(state: State<'_, Mutex<AppState>>, config: AppConfig) -> Result<(), String> {
     let mut st = state.lock().expect("AppState 锁中毒");
-    st.config = config.clamped();
+    // 最近打开 / 上次目录 / 收藏由后端命令维护（scan_impl、add_favorite、remove_favorite、
+    // remove_recent）；前端提交的是启动时快照，照单全收会清掉本次启动后新增的目录/收藏。
+    let merged = config.clamped().keep_runtime_state(&st.config);
+    st.config = merged;
     save_config(&st);
     Ok(())
 }
@@ -3969,6 +3981,7 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             add_favorite,
             remove_favorite,
             list_recent,
+            remove_recent,
             list_subdirs,
             list_bird_species,
             get_histogram,

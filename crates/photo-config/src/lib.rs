@@ -196,6 +196,16 @@ impl AppConfig {
             .collect();
         self
     }
+
+    /// 保留 `current` 里的运行时字段（收藏 / 上次目录 / 最近打开）。
+    /// 这三个由后端命令维护（扫描、add/remove_favorite、remove_recent），而设置面板提交的
+    /// 是启动时的快照——照单全收会把「本次启动后新打开的目录 / 新收藏」清掉。
+    pub fn keep_runtime_state(mut self, current: &AppConfig) -> Self {
+        self.favorite_dirs = current.favorite_dirs.clone();
+        self.last_directory = current.last_directory.clone();
+        self.recent_directories = current.recent_directories.clone();
+        self
+    }
 }
 
 pub fn determine_config_path() -> Result<PathBuf, std::io::Error> {
@@ -316,6 +326,31 @@ mod tests {
         save_config(&path, &cfg).unwrap();
         let loaded = load_config(&path).unwrap();
         assert_eq!(loaded.detection_source, DetectionSource::Focus);
+    }
+
+    #[test]
+    fn test_keep_runtime_state_preserves_backend_fields() {
+        // 设置面板提交的是启动时快照：收藏/上次目录/最近打开必须保留后端当前值，
+        // 否则改任意设置都会清掉本次启动后新打开的目录
+        let current = AppConfig {
+            favorite_dirs: vec!["/a".into()],
+            last_directory: Some("/b".into()),
+            recent_directories: vec!["/b".into(), "/a".into()],
+            ..Default::default()
+        };
+        let incoming = AppConfig {
+            favorite_dirs: vec![],
+            last_directory: Some("/old".into()),
+            recent_directories: vec!["/old".into()],
+            thumbnail_size: 320,
+            ..Default::default()
+        };
+        let merged = incoming.keep_runtime_state(&current);
+        assert_eq!(merged.favorite_dirs, vec!["/a".to_string()]);
+        assert_eq!(merged.last_directory.as_deref(), Some("/b"));
+        assert_eq!(merged.recent_directories, vec!["/b".to_string(), "/a".to_string()]);
+        // 用户设置照常生效
+        assert_eq!(merged.thumbnail_size, 320);
     }
 
     #[test]

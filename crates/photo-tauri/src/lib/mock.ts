@@ -217,6 +217,9 @@ export const mockCommands = {
   async listRecent(): Promise<string[]> {
     return [...recent]
   },
+  async removeRecent(path: string): Promise<void> {
+    recent = recent.filter((r) => r !== path)
+  },
   async listSubdirs(path: string): Promise<MockResult<SubdirInfo[]>> {
     return { status: 'ok', data: MOCK_SUBDIRS[path] ?? [] }
   },

@@ -11,12 +11,12 @@ import { useImportDialogStore } from '@/stores/importDialog'
 import type { SubdirInfo } from '@/lib/bindings'
 import {
   addFavorite,
-  getAppConfig,
   listFavorites,
   listRecent,
   listSubdirs,
+  onScanDone,
   removeFavorite,
-  setAppConfig,
+  removeRecent,
 } from '@/lib/ipc'
 
 const captures = useCapturesStore()
@@ -36,6 +36,8 @@ async function loadLists() {
 
 onMounted(() => {
   void loadLists()
+  // 扫描完成（含导入后自动打开、从任意入口打开目录）→ 后端已更新最近列表，重拉显示
+  void onScanDone(() => void loadLists())
 })
 
 /** 目录显示名（路径末段，对齐 App.vue dirName） */
@@ -83,18 +85,13 @@ async function removeFav(dir: string) {
 }
 
 /**
- * 从最近列表移除（右键菜单）。后端无独立 remove_recent 命令（
- * 直接改配置），经 getAppConfig/setAppConfig 持久化；
- * 本地先乐观移除保证列表即时刷新（mock 层 listRecent 不读配置，仅本地生效）。
+ * 从最近列表移除（右键菜单）：后端 remove_recent 维护该列表（设置保存不再覆盖它）。
+ * 本地先乐观移除保证列表即时刷新。
  */
 async function removeRecentDir(dir: string) {
   recents.value = recents.value.filter((r) => r !== dir)
   try {
-    const cfg = await getAppConfig()
-    await setAppConfig({
-      ...cfg,
-      recentDirectories: (cfg.recentDirectories ?? []).filter((r) => r !== dir),
-    })
+    await removeRecent(dir)
   } catch (e) {
     console.error('从最近移除失败，重拉列表', e)
     await loadLists()
