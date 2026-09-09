@@ -3940,6 +3940,21 @@ pub fn run() {
         // 已运行实例后退出；已运行实例发 import:open 事件让前端打开导入对话框。
         // 必须第一个注册（官方要求，先于其它插件）。
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // 先把已有窗口从后台拉到前台：unminimize + show + set_focus。
+            // Wayland/KWin 的焦点防抢占可能忽略 set_focus，稍后复查；若仍未获得焦点
+            // 就发"请求注意"（任务栏闪烁/高亮），保证用户知道应用被唤起了。
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+                let w = window.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    if !w.is_focused().unwrap_or(true) {
+                        let _ = w.request_user_attention(Some(tauri::UserAttentionType::Critical));
+                    }
+                });
+            }
             if let Some(path) = parse_pending_import_path(argv.into_iter().skip(1)) {
                 let _ = app.emit("import:open", ImportOpen { path });
             }
