@@ -3943,14 +3943,21 @@ pub fn run() {
             // 先把已有窗口从后台拉到前台：unminimize + show + set_focus。
             // Wayland/KWin 的焦点防抢占可能忽略 set_focus，稍后复查；若仍未获得焦点
             // 就发"请求注意"（任务栏闪烁/高亮），保证用户知道应用被唤起了。
-            if let Some(window) = app.get_webview_window("main") {
+            let windows = app.webview_windows();
+            tracing::info!("单实例激活：收到第二实例请求（窗口数 {}）", windows.len());
+            for window in windows.values() {
                 let _ = window.unminimize();
                 let _ = window.show();
-                let _ = window.set_focus();
+                match window.set_focus() {
+                    Ok(()) => tracing::info!("单实例激活：已请求置顶窗口 {}", window.label()),
+                    Err(e) => tracing::warn!("单实例激活：置顶请求失败 {}: {e}", window.label()),
+                }
                 let w = window.clone();
                 std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(250));
-                    if !w.is_focused().unwrap_or(true) {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    let focused = w.is_focused().unwrap_or(false);
+                    tracing::info!("单实例激活：300ms 后窗口 {} 焦点={focused}", w.label());
+                    if !focused {
                         let _ = w.request_user_attention(Some(tauri::UserAttentionType::Critical));
                     }
                 });
