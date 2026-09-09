@@ -11,10 +11,10 @@ use photo_domain::BBox;
 
 use crate::RecognizeError;
 
-/// YOLO 模型输入尺寸（pica onnx_detection_service.dart:29）
+/// YOLO 模型输入尺寸
 const YOLO_INPUT_SIZE: usize = 640;
 
-/// 分数阈值（pica onnx_detection_service.dart:30）
+/// 分数阈值
 const YOLO_SCORE_THRESHOLD: f32 = 0.25;
 
 /// 检测结果
@@ -47,7 +47,7 @@ pub(crate) fn run_yolo_detection_resized(
     resized: &DynamicImage,
 ) -> Result<Option<DetectionResult>, RecognizeError> {
     // ---- 预处理 ----
-    // NCHW 布局：RGB/255 归一化（pica onnx_detection_service.dart:78-88）
+    // NCHW 布局：RGB/255 归一化
     let input_data = build_input_data(resized);
 
     // ---- 推理 ----
@@ -56,7 +56,7 @@ pub(crate) fn run_yolo_detection_resized(
         input_data.into_boxed_slice(),
     ))?;
 
-    // 与 pica 行为一致：只取第一个输出（pica onnx_detection_service.dart:92-97）
+    // 只取第一个输出
     // 模型异常防护：无输出时返回系统错误而非裸索引 panic
     let outputs = session.run(ort::inputs![tensor])?;
     // 模型异常防护：无输出时返回系统错误而非裸索引 panic
@@ -67,38 +67,38 @@ pub(crate) fn run_yolo_detection_resized(
     };
 
     // ---- 后处理 ----
-    // 输出格式：[x1, y1, x2, y2, score, classId, ...] 步长 6（pica onnx_detection_service.dart:103-110）
+    // 输出格式：[x1, y1, x2, y2, score, classId, ...] 步长 6
     let (_shape, flat) = output.try_extract_tensor::<f32>()?;
 
     if flat.len() < 6 {
-        // 输出太短，无检测候选（pica onnx_detection_service.dart:103-106）
+        // 输出太短，无检测候选
         return Ok(None);
     }
 
     let mut best: Option<DetectionResult> = None;
 
-    // 每 6 个元素为一个候选（pica onnx_detection_service.dart:110-111）
+    // 每 6 个元素为一个候选
     for offset in (0..flat.len() - 5).step_by(6) {
         let score = flat[offset + 4]; // score
-        let _class_id = flat[offset + 5] as i32; // classId（pica 仅 round 未过滤特定 class）
+        let _class_id = flat[offset + 5] as i32; // classId
 
-        // 分数过滤（pica onnx_detection_service.dart:124）
+        // 分数过滤
         if score < YOLO_SCORE_THRESHOLD {
             continue;
         }
 
-        // 将像素坐标归一化到 0-1（pica onnx_detection_service.dart:133-136）
+        // 将像素坐标归一化到 0-1
         let x1 = (flat[offset] / YOLO_INPUT_SIZE as f32).clamp(0.0, 1.0);
         let y1 = (flat[offset + 1] / YOLO_INPUT_SIZE as f32).clamp(0.0, 1.0);
         let x2 = (flat[offset + 2] / YOLO_INPUT_SIZE as f32).clamp(0.0, 1.0);
         let y2 = (flat[offset + 3] / YOLO_INPUT_SIZE as f32).clamp(0.0, 1.0);
 
-        // 无效框过滤（pica onnx_detection_service.dart:137-144）
+        // 无效框过滤
         if x2 <= x1 || y2 <= y1 {
             continue;
         }
 
-        // 取最高分（pica onnx_detection_service.dart:151-160）
+        // 取最高分
         let is_better = match &best {
             None => true,
             Some(b) => score > b.raw_score,
@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn test_bbox_crop_math_normalized_to_pixel() {
         // 验证归一化坐标换算为像素坐标的逻辑
-        // 与 pica cropNormalizedRegion 对等（bird_classification_service.dart:66-74）
+        // 归一化区域裁切（bbox → 像素窗口）
         let img_width = 800;
         let img_height = 600;
         let bbox = BBox::new(0.1, 0.2, 0.5, 0.6);

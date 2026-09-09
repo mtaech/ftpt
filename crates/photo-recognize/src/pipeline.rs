@@ -1,8 +1,6 @@
 //! 识别管线编排：检测 → 分类 → 名录映射，带进度回调。
 //!
-//! 对应 pica `recognition_pipeline_service.dart`。
-//!
-//! ## 失败阶段 → 状态映射（pica recognition_pipeline_service.dart）
+//! ## 失败阶段 → 状态映射
 //!
 //! | 阶段 | 状态 | 说明 |
 //! |------|------|------|
@@ -67,7 +65,7 @@ fn cap_source_size(img: DynamicImage) -> DynamicImage {
 /// （24MP 全量解码 100-300ms/张；缩略图为 app 侧 `.pt/thumbs` 磁盘缓存或
 /// 预览缓存派生图字节）。解码失败时回落到完整路径。
 ///
-/// 完整路径策略（与 pica `_resolveSourcePath` 对等, recognition_pipeline_service.dart:156-173）：
+/// 完整路径策略：
 /// 1. 取主显示文件路径
 /// 2. JPEG/PNG 等标准格式 → `image::open` 直接解码
 /// 3. RAW 格式 → `photo_engine::thumbnail::decode_raw_preview` 提取内嵌 JPEG 预览
@@ -109,7 +107,7 @@ fn resolve_source_opt(
     }
 
     match &primary.format {
-        // 标准格式直接解码（pica recognition_pipeline_service.dart:167-170）
+        // 标准格式直接解码
         photo_domain::ImageFormat::Jpeg
         | photo_domain::ImageFormat::Png
         | photo_domain::ImageFormat::Tiff
@@ -123,7 +121,7 @@ fn resolve_source_opt(
                 Err((RecognitionFailureStage::Assets, "无法解码图片"))
             }
         },
-        // RAW 格式提取内嵌预览（与 pica 不同：pica 直接用 image 解码失败后退出，这里尝试 RAW 提取）
+        // RAW 格式提取内嵌预览
         photo_domain::ImageFormat::Raw(_) => {
             // 先尝试用 `image` 直接解码（部分 RAW 如 DNG 可能被 image 支持）
             match image::open(path) {
@@ -155,7 +153,6 @@ fn resolve_source_opt(
 
 /// 单张 Capture 全管线识别。
 ///
-/// 对应 pica `recognition_pipeline_service.dart:recognize()` (行 30-154)。
 ///
 /// # 参数
 /// - `detection_session`: YOLO 检测 session
@@ -275,7 +272,7 @@ fn recognize_capture_impl(
         focus_override.is_some()
     );
 
-    // ---- 1. 输入源解析（pica recognition_pipeline_service.dart:41-49） ----
+    // ---- 1. 输入源解析 ----
     let source = match resolve_source_with_thumbnail(capture, thumb_bytes) {
         Ok(s) => s,
         Err((stage, msg)) => {
@@ -325,12 +322,12 @@ fn recognize_capture_impl(
     // 缩放一次同时喂给两者，避免对同一张图做第二次全图缩放 ----
     let shared_640 = detect::resize_to_yolo_input(&img);
 
-    // ---- 2. 检测（pica recognition_pipeline_service.dart:65-77） ----
+    // ---- 2. 检测 ----
     report_progress(on_progress, 0.35, "检测中");
     let detection = match detect::run_yolo_detection_resized(detection_session, &shared_640) {
         Ok(Some(d)) => d,
         Ok(None) => {
-            // 检测无框 → Unrecognized (Detection)（pica recognition_pipeline_service.dart:68-75）
+            // 检测无框 → Unrecognized (Detection)
             tracing::debug!("[识别] {} 未检出鸟体（Unrecognized）", capture.base_name);
             let (status, failure_stage) = stage_to_status(RecognitionFailureStage::Detection, true);
             return Ok(Recognition {
@@ -348,7 +345,7 @@ fn recognize_capture_impl(
         }
         Err(e) => {
             // 检测系统故障 → NeedsReview(Classification) 而不是 Err
-            // （pica 类似：catch → needs_review + classification stage）
+            //
             tracing::error!("[识别] 检测系统错误: {e}");
             let (status, failure_stage) =
                 stage_to_status(RecognitionFailureStage::Classification, false);
@@ -511,12 +508,12 @@ fn classify_and_map(
     on_progress: Option<&ProgressCallback>,
     recognized_at: String,
 ) -> Recognition {
-    // ---- 分类（pica recognition_pipeline_service.dart:80-85） ----
+    // ---- 分类 ----
     let classified: ClassificationOutput =
         match crate::classify::run_classification(classification_session, img, bbox) {
             Ok(c) => c,
             Err(e) => {
-                // 分类失败 → NeedsReview(Classification)（pica recognition_pipeline_service.dart:88-117）
+                // 分类失败 → NeedsReview(Classification)
                 tracing::error!("[识别] 分类错误: {e}");
                 return Recognition {
                     status: RecognitionStatus::NeedsReview,
@@ -534,14 +531,14 @@ fn classify_and_map(
         };
     report_progress(on_progress, 0.85, "名录映射中");
 
-    // ---- 名录映射（pica bird_label_resolver.dart:13-59） ----
+    // ---- 名录映射 ----
     let (bird, map_stage) = catalog.resolve_class(classified.class_index);
 
     // 候选列表：Top-5 跳过 Top-1 自身，至多 4 条（未映射项 bird=None 也保留）
     let candidates =
         catalog.resolve_top_candidates(&classified.top_candidates, classified.class_index);
 
-    // 状态推断（pica recognition_pipeline_service.dart:88-145）
+    // 状态推断
     // 唯一匹配 → Confirmed(None)；映射失败 0/多 → NeedsReview(Mapping)
     // （与测试共用 stage_to_status，避免测试复制一份映射逻辑）
     let (status, failure_stage) = stage_to_status(map_stage, false);
@@ -566,7 +563,7 @@ fn report_progress(on_progress: Option<&ProgressCallback>, value: f32, stage: &'
     }
 }
 
-/// 失败阶段 → (状态, 失败阶段) 推断（pica recognition_pipeline_service.dart:88-145）。
+/// 失败阶段 → (状态, 失败阶段) 推断。
 ///
 /// 与文件顶部「失败阶段 → 状态映射」表保持一致：
 /// - 检测无框 → `Unrecognized(Detection)`
@@ -669,8 +666,8 @@ mod tests {
         assert!(approx(b.y2 - b.y1, 0.18));
     }
 
-    /// 测试失败阶段 → 状态映射的完备性（断言生产函数 stage_to_status，对应
-    /// pica recognition_pipeline_service.dart；生产路径与测试共用同一实现）
+    /// 测试失败阶段 → 状态映射的完备性（断言生产函数 stage_to_status；
+    /// 生产路径与测试共用同一实现）
     #[test]
     fn test_failure_stage_to_status_mapping() {
         // 检测无框 → Unrecognized(Detection)

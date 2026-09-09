@@ -1,7 +1,7 @@
 //! 名录映射：读取 pica_ref.db 只读库，将分类器类别号 (class_index)
 //! 映射到具体鸟种 (BirdMatch)。
 //!
-//! 表结构（pica 裁剪版）：
+//! 表结构：
 //! - `animal_info(id PK, latin_name, cn_name, …)` —— 物种信息
 //! - `sp_cls_map(species PK, cls)` —— 类别号 → 学名映射
 //!
@@ -71,8 +71,7 @@ impl CatalogDb {
 
     /// 解析 Top-N 候选列表为 BirdCandidate 列表。
     ///
-    /// 与 pica `BirdLabelResolver._resolveBirdModelCandidates` 语义对等，
-    /// 但差异：pica 跳过不可映射项（continue），本实现保留未映射项 (bird=None)。
+    /// 未映射项（bird=None）保留在候选里，由调用方/UI 决定是否可用。
     pub(crate) fn resolve_top_candidates(
         &self,
         class_indices: &[(u32, f32)],
@@ -196,8 +195,6 @@ impl CatalogDb {
     /// 名录库损坏/缺失 schema 时 prepare/query 失败：记录警告并返回空 Vec，
     /// 由 [`resolve_class`] 自然映射为 `(None, Mapping)` → NeedsReview 兑底，绝不 panic。
     fn query_animal(&self, cls: u32) -> Vec<BirdMatch> {
-        // sql: 与 pica DbService.getBirdRecordsByClassIndex 对等
-        // Dart 源码: pica/lib/services/bird_label_resolver.dart:18
         let mut stmt = match self.conn.prepare_cached(
             "SELECT a.id, a.cn_name, a.latin_name \
              FROM sp_cls_map m \

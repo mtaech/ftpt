@@ -13,13 +13,13 @@ use photo_domain::BBox;
 use crate::catalog::ClassificationOutput;
 use crate::RecognizeError;
 
-/// 分类模型输入尺寸（pica bird_model_classifier.dart:16）
+/// 分类模型输入尺寸
 const CLASSIFY_INPUT_SIZE: usize = 224;
 
-/// ImageNet 归一化均值（pica bird_model_classifier.dart:126）
+/// ImageNet 归一化均值
 const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 
-/// ImageNet 归一化标准差（pica bird_model_classifier.dart:127）
+/// ImageNet 归一化标准差
 const STD: [f32; 3] = [0.229, 0.224, 0.225];
 
 /// Top-N 数量
@@ -47,7 +47,7 @@ pub fn run_classification(
         )));
     }
 
-    // ---- 1. 裁切归一化区域（pica bird_classification_service.dart:66-74） ----
+    // ---- 1. 裁切归一化区域 ----
     // 先按轴 min/max 归一化再 clamp 到 [0,1]：反向框（x1>x2 等）在像素换算前消除，
     // 避免 u32 相减下溢（debug panic / release 静默裁错）。
     let x1 = bbox.x1.min(bbox.x2).clamp(0.0, 1.0);
@@ -65,19 +65,19 @@ pub fn run_classification(
     let cropped = img.crop_imm(cx1, cy1, crop_w, crop_h);
 
     // ---- 2. 缩放至 224×224（双线性插值） ----
-    // 注：早期注释曾称"平均插值"并引用已废弃的 pica Dart 实现；这里保持既有
-    // 行为（Triangle）不动，识别输出的任何调整另行用真实鸟图 A/B 验证后再改。
+    // 注：早期注释曾称"平均插值"；这里保持既有行为（Triangle）不动，
+    // 识别输出的任何调整另行用真实鸟图 A/B 验证后再改。
     let resized = cropped.resize_exact(
         CLASSIFY_INPUT_SIZE as u32,
         CLASSIFY_INPUT_SIZE as u32,
         image::imageops::FilterType::Triangle,
     );
 
-    // ---- 3. ImageNet 标准化（pica bird_model_classifier.dart:128-141） ----
+    // ---- 3. ImageNet 标准化 ----
     // 单遍遍历 as_raw() 像素按通道分散写（替代三重循环 get_pixel 边界检查）
     let input_data = build_input_data(&resized);
 
-    // ---- 4. 推理（pica bird_model_classifier.dart:51-57） ----
+    // ---- 4. 推理 ----
     let tensor = Tensor::<f32>::from_array((
         [1usize, 3, CLASSIFY_INPUT_SIZE, CLASSIFY_INPUT_SIZE],
         input_data.into_boxed_slice(),
@@ -97,7 +97,7 @@ pub fn run_classification(
         return Err(RecognizeError::ClassificationOutputEmpty);
     }
 
-    // ---- 5. softmax log-sum-exp（pica bird_model_classifier.dart:67-97） ----
+    // ---- 5. softmax log-sum-exp ----
     // 找最大 logit（数值稳定性）
     let mut best_index = 0usize;
     let mut best_logit = flat[0];
@@ -108,7 +108,7 @@ pub fn run_classification(
         }
     }
 
-    // log-sum-exp: sum(exp(logit_i - max_logit)) （pica bird_model_classifier.dart:76-80）
+    // log-sum-exp: sum(exp(logit_i - max_logit))
     let exp_sum: f64 = flat.iter().map(|v| ((*v - best_logit) as f64).exp()).sum();
     let top_confidence = if exp_sum == 0.0 {
         0.0
@@ -116,7 +116,7 @@ pub fn run_classification(
         (100.0 / exp_sum) as f32
     };
 
-    // ---- 6. Top-N（pica bird_model_classifier.dart:82-97） ----
+    // ---- 6. Top-N ----
     let mut indexed: Vec<(usize, f32)> = flat.iter().copied().enumerate().collect();
     indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -124,7 +124,7 @@ pub fn run_classification(
         .iter()
         .take(TOP_N)
         .map(|(idx, logit)| {
-            // 每个候选重新计算 softmax（pica bird_model_classifier.dart:87-96）
+            // 每个候选重新计算 softmax
             let exp_sum: f64 = flat.iter().map(|v| ((*v - logit) as f64).exp()).sum();
             let conf = if exp_sum == 0.0 {
                 0.0
@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn test_top_candidates_are_sorted_descending() {
-        // Top-5 候选必须按原始 logit 降序（pica bird_model_classifier.dart:83-84）
+        // Top-5 候选必须按原始 logit 降序
         let flat = vec![10.0_f32, 5.0, 2.0, 1.0, 0.5, 0.1, 0.01, -1.0, -5.0, -10.0];
         let mut indexed: Vec<(usize, f32)> = flat.iter().copied().enumerate().collect();
         indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn test_bbox_crop_pixel_conversion() {
-        // 验证 bbox→像素裁切（pica bird_classification_service.dart:66-74）
+        // 验证 bbox→像素裁切
         let img_w = 1920u32;
         let img_h = 1080u32;
         let bbox = BBox::new(0.1, 0.2, 0.5, 0.6);

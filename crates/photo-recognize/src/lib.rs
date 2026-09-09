@@ -1,14 +1,14 @@
-//! 鸟类识别：YOLO 检测 → 鸟种分类 → 名录映射（移植自 pica，全同步）。
+//! 鸟类识别：YOLO 检测 → 鸟种分类 → 名录映射（全同步）。
 //!
 //! 管线语义与持久化格式见 `docs/adr/0002-folder-central-db.md`、
 //! `docs/adr/0003-recognition-subsystem.md`；领域类型定义在 `photo-domain`。
 //!
-//! ## 与 pica 的差异
+//! ## 实现说明
 //!
-//! - 候选列表中的未映射项 `bird=None` 也保留（pica 跳过不可映射项）
+//! - 候选列表中的未映射项 `bird=None` 也保留（不跳过）
 //! - 输入源解析：RAW 格式使用 `photo_engine::thumbnail::decode_raw_preview`
-//!   提取内嵌 JPEG（pica 仅 `image` 库解码，不专门处理 RAW）
-//! - 其余预处理/后处理常数与 Dart 源码逐行对应
+//!   提取内嵌 JPEG（通用解码失败时仍尝试 RAW 提取）
+//! - 预处理/后处理常数与模型元数据一致
 //!
 //! ## 识别库表级边界契约
 //!
@@ -178,7 +178,6 @@ impl Recognizer {
     /// 单张全管线识别。
     ///
     /// 业务失败体现在 `Recognition.status`，`Err` 仅用于模型/库不可用等系统性故障。
-    /// 对应 pica `recognition_pipeline_service.dart:recognize()`。
     ///
     /// `focus_override`：相机对焦点（`Some` = 跳过 YOLO 检测，用对焦点 ROI 直接
     /// 分类，对齐 [`Recognizer::recognize_region`] 的框选语义；`None` = 全图 YOLO）。
@@ -280,13 +279,13 @@ impl Recognizer {
 }
 
 /// 名录库全量鸟种（手动修正鸟种下拉数据源）：按中文名排序。
-/// 名录库路径与 [`Recognizer::new`] 的 `catalog_db` 参数相同（exe 同级 `data/pica_ref.db`）。
+/// 名录库路径与 [`Recognizer::new`] 的 `catalog_db` 参数相同。
 pub fn list_all_species(catalog_db: &Path) -> Result<Vec<photo_domain::BirdMatch>, RecognizeError> {
     CatalogDb::open(catalog_db).map(|db| db.all_species())
 }
 
 /// 名录搜索（人工纠错对话框数据源）：按中文名/拼音/拉丁名 LIKE 子串匹配，仅鸟纲。
-/// 名录库路径与 [`list_all_species`] 相同（exe 同级 `data/pica_ref.db`）。
+/// 名录库路径与 [`list_all_species`] 相同。
 pub fn search_catalog(
     catalog_db: &Path,
     query: &str,
@@ -311,7 +310,7 @@ pub fn get_catalog_entry(
 fn load_model(path: &Path) -> Result<(Session, Backend), RecognizeError> {
     #[cfg(target_os = "windows")]
     {
-        // Windows: 先试 DirectML，失败回退 CPU（pica 策略对等）
+        // Windows: 先试 DirectML，失败回退 CPU
         // HighPerformance = DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE：
         // 双显卡机型（核显 + N 卡独显）上让 Windows 把 DirectML 设备绑到独显，
         // 否则默认可能落在核显（如 Radeon 780M）上
