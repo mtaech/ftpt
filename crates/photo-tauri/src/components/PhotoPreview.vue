@@ -39,6 +39,24 @@ const loading = ref(true)
 
 const current = computed(() => selection.selected)
 
+/** 缩略图占位源：RAW 母版要解码数秒，先用网格同款缩略图顶上（同宽高比 → 几何与母版一致） */
+const placeholderSrc = computed(() => {
+  const c = current.value
+  if (!c) return ''
+  return ptimgUrl('thumb', c.primaryPath, captures.thumbVersions[c.primaryPath])
+})
+/** 占位图已就绪（加载成功）；视频等无缩略图时保持 false，回退加载卡片 */
+const placeholderReady = ref(false)
+watch(placeholderSrc, () => {
+  placeholderReady.value = false
+})
+/** 占位图加载完成：母版尚未返回尺寸时先用它撑开布局（同宽高比 → disp 与母版一致，无跳变） */
+function onPlaceholderLoad(e: Event) {
+  const img = e.target as HTMLImageElement
+  placeholderReady.value = true
+  if (natural.value[0] <= 0) natural.value = [img.naturalWidth, img.naturalHeight]
+}
+
 /**
  * 堆叠切换：当前选中成员所在堆叠组（无堆叠/不在组内返回 null）。
  * 组内成员 ≥2 时工具条显示成员分段选择器（点击直达，选中联动）。
@@ -521,10 +539,28 @@ function onImageContextMenu(e: MouseEvent) {
       @pointercancel="onPointerUp"
       @contextmenu.prevent="onImageContextMenu"
     >
-      <!-- 加载中占位框（卡片式：边框 + 阴影 + 居中图标脉冲；加载完成淡出而非硬切） -->
+      <!-- 缩略图占位（母版解码期间的秒级空窗）：与主图同 disp/origin，主图淡入后自然覆盖 -->
+      <img
+        v-if="placeholderSrc"
+        :key="placeholderSrc"
+        :src="placeholderSrc"
+        alt=""
+        draggable="false"
+        class="pointer-events-none absolute top-0 left-0 max-w-none"
+        :style="{
+          width: `${disp[0]}px`,
+          height: `${disp[1]}px`,
+          transform: `translate3d(${origin[0] + PAD}px, ${origin[1] + PAD}px, 0)`,
+          opacity: placeholderReady ? 1 : 0,
+        }"
+        @load="onPlaceholderLoad"
+        @error="placeholderReady = false"
+      />
+
+      <!-- 加载中占位框（无缩略图可用的卡片式占位：边框 + 阴影 + 居中图标脉冲；加载完成淡出） -->
       <Transition name="loading-fade">
         <div
-          v-if="loading"
+          v-if="loading && !placeholderReady"
           class="absolute flex items-center justify-center rounded-md border bg-card shadow-sm"
           :style="{ inset: `${PAD}px` }"
         >
