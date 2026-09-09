@@ -34,12 +34,14 @@ import type {
 } from '@/lib/bindings'
 import { useCapturesStore } from '@/stores/captures'
 import { useImportDialogStore } from '@/stores/importDialog'
+import { useRecognitionStore } from '@/stores/recognition'
 
 /** 弹窗开关（store 驱动：文件树 tab「导入」按钮打开、×/Esc/遮罩关闭） */
 const open = defineModel<boolean>('open', { default: false })
 
 const captures = useCapturesStore()
 const importDialog = useImportDialogStore()
+const recognition = useRecognitionStore()
 
 /** 顶部选项：导入（SD 卡 → 复制/移动）| 添加（选目录直接打开浏览，不动文件） */
 const tab = ref<'import' | 'add'>('import')
@@ -221,14 +223,20 @@ async function generatePlan() {
   }
 }
 
-/** 执行导入：进度事件驱动进度条；完成后结果明细留在面板 */
+/** 执行导入：进度事件驱动进度条；全部成功自动关闭（结果走状态栏提示），有失败留在面板看明细 */
 async function execute() {
   if (!plan.value || !destRoot.value || running.value) return
   running.value = true
   result.value = null
   progress.value = { done: 0, total: planCount.value, current: '' }
   try {
-    result.value = await executeImport(plan.value, destRoot.value, mode.value)
+    const r = await executeImport(plan.value, destRoot.value, mode.value)
+    result.value = r
+    if (r.failed === 0) {
+      const skipped = r.skipped > 0 ? `，跳过 ${r.skipped}` : ''
+      recognition.setNotice(`导入完成：成功 ${r.imported} 张${skipped}`)
+      open.value = false
+    }
   } catch (e) {
     toast.value = `导入执行失败：${String(e)}`
   } finally {
