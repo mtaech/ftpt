@@ -1,4 +1,4 @@
-//! 名录映射：读取 pica_ref.db 只读库，将分类器类别号 (class_index)
+//! 名录映射：读取 bird_catalog.db 只读库，将分类器类别号 (class_index)
 //! 映射到具体鸟种 (BirdMatch)。
 //!
 //! 表结构：
@@ -249,10 +249,10 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// 创建一个内联的 pica_ref 小库供测试用
+    /// 创建一个内联的 bird_catalog 小库供测试用
     fn create_test_db() -> (TempDir, CatalogDb) {
         let dir = TempDir::new().unwrap();
-        let db_path = dir.path().join("pica_ref_test.db");
+        let db_path = dir.path().join("bird_catalog_test.db");
         let conn = Connection::open(&db_path).unwrap();
 
         conn.execute_batch(

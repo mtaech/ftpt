@@ -140,7 +140,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 - **exiftool `-stay_open` 长驻进程不能加 `-q`**：`-q` 同时抑制 `{ready}` 标记，导致 execute 读不到结果边界挂起
 - **Windows 官方 exiftool(-k).exe 内嵌 `-k`（每命令后等 ENTER）**：程序化调用必须用 `perl.exe exiftool.pl`（photo-engine 已自动处理）；开发时残留 perl.exe 进程会让后续 cargo 命令假死，`taskkill //F //IM perl.exe` 清理（cfg(test) 已跳过真实 spawn、photo-tauri 退出走 shutdown_provider，仅手动 example 需注意）
 - **exiftool 定位优先级**：`PHOTO_EXIFTOOL` env → exe 同级 `exiftool/`（打包）→ 仓库 `local-lib/exiftool/`（开发）→ PATH；升级版本见 `docs/exiftool-update.md`
-- **模型/名录库/全局索引库定位（`data_root()`，lib.rs）**：`PHOTO_DATA_DIR` env → exe 同级 `models/`+`data/`（打包便携）→ 仓库根（开发回退，从 CARGO_MANIFEST_DIR/cwd 向上找同时含 `models/` 与 `data/pica_ref.db` 的目录）；cargo run/tauri dev 下模型在仓库根，否则会报「YOLO 模型文件不存在: <target>/debug/models/detect.onnx」
+- **模型/名录库/全局索引库定位（`data_root()`，lib.rs）**：`PHOTO_DATA_DIR` env → exe 同级 `models/`+`data/`（打包便携）→ 仓库根（开发回退，从 CARGO_MANIFEST_DIR/cwd 向上找同时含 `models/` 与 `data/bird_catalog.db` 的目录）；cargo run/tauri dev 下模型在仓库根，否则会报「YOLO 模型文件不存在: <target>/debug/models/detect.onnx」
 - 使用了 let-chains（edition 2024 特性），如 `photo-config/config.rs` 便携路径判断
 - **tauri-specta 生成 bindings.ts 会覆盖手写追加段**：specta 不导出的类型（FilterCriteria/SortBy 等——Rust 侧无 command 引用它们）需在文件尾部手写保留，重新导出后手动恢复
 - **export_bindings 按 cwd 相对路径写文件**：必须 `cd crates/photo-tauri/src-tauri` 再 `cargo run -p photo-tauri --bin export_bindings`；从 workspace 根跑会把 bindings.ts 写到 `crates/src/lib/` 错位置
@@ -155,7 +155,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 
 - Rust：**127 个 `#[test]`**（+ 2 个 `#[ignore]` 真机冒烟）分布在 4 个 crate 的源文件末尾内联 `#[cfg(test)] mod tests`
 - 前端：vitest 55 用例（filter.test.ts 22 + stacks.test.ts 7 堆叠分组/主格式 + burst/nameTemplate 26）
-- 真机识别冒烟：`cargo test -p photo-recognize -- --ignored`（需 worktree/发布根有 `models/` 与 `data/pica_ref.db`）；单文件手动识别工具：`cargo run -p photo-recognize --example recognize_file -- <图片路径>`
+- 真机识别冒烟：`cargo test -p photo-recognize -- --ignored`（需 worktree/发布根有 `models/` 与 `data/bird_catalog.db`）；单文件手动识别工具：`cargo run -p photo-recognize --example recognize_file -- <图片路径>`
 - 浏览器 mock 实测：`npm run dev` + 浏览器（无 Tauri 后端时走 mock 数据流，覆盖网格/预览/筛选/识别/批量/设置/右键全 UI）
 
 ### 测试分布

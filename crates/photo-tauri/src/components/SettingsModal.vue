@@ -271,7 +271,7 @@ const aboutRows = computed(
       ['识别引擎', 'ONNX Runtime (DirectML)'],
       ['检测模型', 'YOLOv8n 0.5'],
       ['分类模型', 'bird_model'],
-      ['名录库', 'pica_ref.db'],
+      ['名录库', 'bird_catalog.db'],
     ] as [string, string][],
 )
 

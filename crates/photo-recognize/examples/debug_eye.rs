@@ -42,7 +42,7 @@ fn main() {
     let (full_w, full_h) = img.dimensions();
     println!("图像尺寸: {full_w}x{full_h}");
 
-    let catalog_db = workspace_root.join("data").join("pica_ref.db");
+    let catalog_db = workspace_root.join("data").join("bird_catalog.db");
     let mut recognizer = Recognizer::new(&workspace_root.join("models"), &catalog_db)
         .expect("识别器初始化失败");
     println!("推理后端: {:?}", recognizer.backend());

@@ -376,7 +376,7 @@ pub struct AppState {
 
 impl AppState {
     fn new(config: AppConfig, config_path: PathBuf) -> Self {
-        // 全局鸟种索引库：数据根目录下 data/global.db（便携约定，与 pica_ref.db 同路径）；
+        // 全局鸟种索引库：数据根目录下 data/global.db（便携约定，与 bird_catalog.db 同路径）；
         // 打开失败降级 None 不阻塞启动（统计视图显示空数据），失败仅记日志
         let global_db = data_root()
             .map(|root| root.join("data"))
@@ -690,9 +690,9 @@ fn build_capture_from_meta(meta: &CaptureMeta) -> photo_domain::Capture {
 ///
 /// 查找顺序（对齐 exiftool 的 dev/打包双路径约定，见 AGENTS.md 已知陷阱）：
 /// 1. PHOTO_DATA_DIR 环境变量显式指定
-/// 2. exe 同级（便携打包约定：exe 旁 models/ + data/pica_ref.db）
+/// 2. exe 同级（便携打包约定：exe 旁 models/ + data/bird_catalog.db）
 /// 3. 仓库根（开发回退：cargo run/tauri dev 的 exe 在 target/debug/，而模型在仓库根
-///    models/ 与 data/pica_ref.db；从 CARGO_MANIFEST_DIR / cwd 向上找同时含两者的目录）
+///    models/ 与 data/bird_catalog.db；从 CARGO_MANIFEST_DIR / cwd 向上找同时含两者的目录）
 ///
 /// 找不到返回 None（调用方各自降级：识别失败 / 名录空 / 统计不可用）。
 fn data_root() -> Option<PathBuf> {
@@ -708,7 +708,7 @@ fn data_root() -> Option<PathBuf> {
     {
         return Some(exe_dir);
     }
-    // 3) 开发回退：从候选起点向上找「同时含 models/ 与 data/pica_ref.db」的目录
+    // 3) 开发回退：从候选起点向上找「同时含 models/ 与 data/bird_catalog.db」的目录
     let mut starts: Vec<PathBuf> = Vec::new();
     if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
         starts.push(PathBuf::from(manifest));
@@ -720,7 +720,7 @@ fn data_root() -> Option<PathBuf> {
         let mut dir = Some(start);
         for _ in 0..6 {
             let Some(d) = dir else { break };
-            if d.join("models").exists() && d.join("data").join("pica_ref.db").exists() {
+            if d.join("models").exists() && d.join("data").join("bird_catalog.db").exists() {
                 return Some(d);
             }
             dir = d.parent().map(|p| p.to_path_buf());
@@ -729,14 +729,14 @@ fn data_root() -> Option<PathBuf> {
     None
 }
 
-/// 构建识别器（模型目录 = 数据根目录下 models/ + data/pica_ref.db）
+/// 构建识别器（模型目录 = 数据根目录下 models/ + data/bird_catalog.db）
 fn build_recognizer() -> Result<photo_recognize::Recognizer, String> {
     let root = data_root().ok_or_else(|| {
         "找不到识别模型/名录库（设置 PHOTO_DATA_DIR，或把 models/ data/ 放到 exe 同级）"
             .to_string()
     })?;
     let models_dir = root.join("models");
-    let catalog_db = root.join("data").join("pica_ref.db");
+    let catalog_db = root.join("data").join("bird_catalog.db");
     photo_recognize::Recognizer::new(&models_dir, &catalog_db)
         .map_err(|e| format!("加载识别模型失败: {e}"))
 }
@@ -882,13 +882,13 @@ async fn list_subdirs(path: String) -> Result<Vec<SubdirInfo>, String> {
 }
 
 /// 名录库全量鸟种（拼音排序，筛选下拉数据源）。
-/// 名录库在数据根目录下 data/pica_ref.db（与 Recognizer 同路径约定）；
+/// 名录库在数据根目录下 data/bird_catalog.db（与 Recognizer 同路径约定）；
 /// photo-recognize 的 list_all_species 已按 cn_name_pinyin 排序（缺失回退中文名）。
 #[tauri::command]
 #[specta::specta]
 fn list_bird_species() -> Result<Vec<String>, String> {
-    let Some(catalog_db) = data_root().map(|root| root.join("data").join("pica_ref.db")) else {
-        return Err("找不到名录库（设置 PHOTO_DATA_DIR，或把 data/pica_ref.db 放到 exe 同级）".to_string());
+    let Some(catalog_db) = data_root().map(|root| root.join("data").join("bird_catalog.db")) else {
+        return Err("找不到名录库（设置 PHOTO_DATA_DIR，或把 data/bird_catalog.db 放到 exe 同级）".to_string());
     };
     let list = photo_recognize::list_all_species(&catalog_db).map_err(|e| format!("加载名录失败: {e}"))?;
     // 保持 photo-recognize 的拼音排序：中文名按 Unicode 码点重排会破坏拼音序
@@ -1925,12 +1925,12 @@ fn get_recognition(
 
 /// 名录搜索（SpeciesCorrectDialog 数据源）：按中文名/拼音/拉丁名子串匹配，
 /// 仅鸟纲，中文名命中优先、拼音次之、拉丁名最后（组内拼音排序）。
-/// 名录库在数据根目录下 data/pica_ref.db（与 list_bird_species 同路径约定）。
+/// 名录库在数据根目录下 data/bird_catalog.db（与 list_bird_species 同路径约定）。
 #[tauri::command]
 #[specta::specta]
 fn search_catalog(query: String, limit: u32) -> Result<Vec<photo_recognize::CatalogEntry>, String> {
-    let Some(catalog_db) = data_root().map(|root| root.join("data").join("pica_ref.db")) else {
-        return Err("找不到名录库（设置 PHOTO_DATA_DIR，或把 data/pica_ref.db 放到 exe 同级）".to_string());
+    let Some(catalog_db) = data_root().map(|root| root.join("data").join("bird_catalog.db")) else {
+        return Err("找不到名录库（设置 PHOTO_DATA_DIR，或把 data/bird_catalog.db 放到 exe 同级）".to_string());
     };
     photo_recognize::search_catalog(&catalog_db, &query, limit as usize)
         .map_err(|e| format!("名录搜索失败: {e}"))
@@ -1956,9 +1956,9 @@ fn correct_recognition(
     cn_name: String,
     sci_name: String,
 ) -> Result<(), String> {
-    // 名录校验（数据根目录下 data/pica_ref.db，与 search_catalog 同路径约定）
-    let Some(catalog_db) = data_root().map(|root| root.join("data").join("pica_ref.db")) else {
-        return Err("找不到名录库（设置 PHOTO_DATA_DIR，或把 data/pica_ref.db 放到 exe 同级）".to_string());
+    // 名录校验（数据根目录下 data/bird_catalog.db，与 search_catalog 同路径约定）
+    let Some(catalog_db) = data_root().map(|root| root.join("data").join("bird_catalog.db")) else {
+        return Err("找不到名录库（设置 PHOTO_DATA_DIR，或把 data/bird_catalog.db 放到 exe 同级）".to_string());
     };
     let entry = photo_recognize::get_catalog_entry(&catalog_db, sp_id)
         .map_err(|e| format!("加载名录失败: {e}"))?
@@ -3278,7 +3278,7 @@ fn export_bird_records(
     // 学名补全：folder_db 只存中文名（bird_name），EbirdRow.species_sci 恒为空；
     // 经名录库 all_species 建 中文名→学名 映射回填（名录库缺失时降级留空，不报错）
     if rows.iter().any(|r| r.species_sci.is_empty())
-        && let Some(catalog_path) = data_root().map(|root| root.join("data").join("pica_ref.db"))
+        && let Some(catalog_path) = data_root().map(|root| root.join("data").join("bird_catalog.db"))
         && let Ok(catalog) = photo_recognize::CatalogDb::open(&catalog_path)
     {
         let latin_by_cn: std::collections::HashMap<String, String> = catalog
@@ -3900,11 +3900,11 @@ pub fn run() {
             let app_handle = app.handle().clone();
 
             // 后台线程预热识别模型（DirectML 初始化 ~2-5s，首次识别不再等待）；
-            // 失败仅记日志不阻塞启动。models/ 与 data/pica_ref.db 按数据根目录解析
+            // 失败仅记日志不阻塞启动。models/ 与 data/bird_catalog.db 按数据根目录解析
             tauri::async_runtime::spawn_blocking(|| {
                 let Some(root) = data_root() else { return; };
                 let models_dir = root.join("models");
-                let catalog_db = root.join("data").join("pica_ref.db");
+                let catalog_db = root.join("data").join("bird_catalog.db");
                 match photo_recognize::Recognizer::new(&models_dir, &catalog_db) {
                     Ok(_) => tracing::info!("识别模型预热完成"),
                     Err(e) => tracing::warn!("识别模型预热失败（不阻塞启动）: {e}"),

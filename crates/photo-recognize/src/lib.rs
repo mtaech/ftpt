@@ -108,7 +108,7 @@ impl std::fmt::Display for Backend {
 ///
 /// let recognizer = Recognizer::new(
 ///     &std::path::Path::new("./models"),
-///     &std::path::Path::new("./data/pica_ref.db"),
+///     &std::path::Path::new("./data/bird_catalog.db"),
 /// ).unwrap();
 /// ```
 pub struct Recognizer {
@@ -124,10 +124,10 @@ impl Recognizer {
     ///
     /// # 参数
     /// - `models_dir`: 包含 `detect.onnx`、`bird_model.onnx` 和 `eye.onnx` 的目录
-    /// - `catalog_db`: 名录库 `pica_ref.db` 路径
+    /// - `catalog_db`: 名录库 `bird_catalog.db` 路径
     ///
     /// # 模型路径约定（便携模式）
-    /// 默认路径相对于 exe 所在目录：`exe_dir/models/` + `exe_dir/data/pica_ref.db`。
+    /// 默认路径相对于 exe 所在目录：`exe_dir/models/` + `exe_dir/data/bird_catalog.db`。
     /// 调用方可通过参数注入任意路径（测试用临时目录等）。
     ///
     /// # 执行提供程序
@@ -557,7 +557,7 @@ mod tests {
         std::fs::write(models_dir.join("bird_model.onnx"), dummy).unwrap();
 
         // 也需要有效名录库——用空文件模拟创建
-        let db_path = dir.path().join("pica_ref.db");
+        let db_path = dir.path().join("bird_catalog.db");
         // CatalogDb::open 会尝试打开 SQLite，可能失败；我们用临时 db
         // 但本测试只验证 ModelLoad 错误，不会走到 CatalogDb
         let result = Recognizer::new(&models_dir, &db_path);
@@ -583,7 +583,7 @@ mod tests {
         let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
 
         let models_dir = workspace_root.join("models");
-        let catalog_db = workspace_root.join("data").join("pica_ref.db");
+        let catalog_db = workspace_root.join("data").join("bird_catalog.db");
 
         if !models_dir.join("detect.onnx").exists()
             || !models_dir.join("eye.onnx").exists()

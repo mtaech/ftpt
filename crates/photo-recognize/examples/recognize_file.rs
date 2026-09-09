@@ -1,6 +1,6 @@
 //! 单文件识别冒烟工具：cargo run -p photo-recognize --example recognize_file -- <图片路径>
 //!
-//! 模型与名录库默认取 worktree 根的 models/ 与 data/pica_ref.db，
+//! 模型与名录库默认取 worktree 根的 models/ 与 data/bird_catalog.db，
 //! 可用第二、三参数覆盖：<图片> [models_dir] [catalog_db]
 
 use std::path::{Path, PathBuf};
@@ -23,7 +23,7 @@ fn main() {
     let catalog_db = args
         .next()
         .map(PathBuf::from)
-        .unwrap_or_else(|| workspace_root.join("data").join("pica_ref.db"));
+        .unwrap_or_else(|| workspace_root.join("data").join("bird_catalog.db"));
 
     let image_path = PathBuf::from(&image);
     let ext = image_path

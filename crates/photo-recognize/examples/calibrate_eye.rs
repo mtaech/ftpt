@@ -18,7 +18,7 @@ fn main() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
     let models_dir = workspace_root.join("models");
-    let catalog_db = workspace_root.join("data").join("pica_ref.db");
+    let catalog_db = workspace_root.join("data").join("bird_catalog.db");
 
     let mut recognizer = Recognizer::new(&models_dir, &catalog_db).unwrap();
 

@@ -2,7 +2,7 @@
 //! cargo run -p photo-recognize --example recognize_region -- <图片> <x1> <y1> <x2> <y2> [models_dir] [catalog_db]
 //!
 //! bbox 为归一化 0-1 坐标（相对原图宽高）。跳过 YOLO 检测，直接对框选区域分类。
-//! 模型与名录库默认取 worktree 根的 models/ 与 data/pica_ref.db。
+//! 模型与名录库默认取 worktree 根的 models/ 与 data/bird_catalog.db。
 
 use std::path::{Path, PathBuf};
 
@@ -41,7 +41,7 @@ fn main() {
     let catalog_db = args
         .next()
         .map(PathBuf::from)
-        .unwrap_or_else(|| workspace_root.join("data").join("pica_ref.db"));
+        .unwrap_or_else(|| workspace_root.join("data").join("bird_catalog.db"));
 
     let image_path = PathBuf::from(&image);
     let ext = image_path

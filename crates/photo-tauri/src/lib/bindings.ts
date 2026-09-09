@@ -48,7 +48,7 @@ export const commands = {
 	listSubdirs: (path: string) => typedError<SubdirInfo[], string>(__TAURI_INVOKE("list_subdirs", { path })),
 	/**
 	 *  名录库全量鸟种（拼音排序，筛选下拉数据源）。
-	 *  名录库在数据根目录下 data/pica_ref.db（与 Recognizer 同路径约定）；
+	 *  名录库在数据根目录下 data/bird_catalog.db（与 Recognizer 同路径约定）；
 	 *  photo-recognize 的 list_all_species 已按 cn_name_pinyin 排序（缺失回退中文名）。
 	 */
 	listBirdSpecies: () => typedError<string[], string>(__TAURI_INVOKE("list_bird_species")),
@@ -149,7 +149,7 @@ export const commands = {
 	/**
 	 *  名录搜索（SpeciesCorrectDialog 数据源）：按中文名/拼音/拉丁名子串匹配，
 	 *  仅鸟纲，中文名命中优先、拼音次之、拉丁名最后（组内拼音排序）。
-	 *  名录库在数据根目录下 data/pica_ref.db（与 list_bird_species 同路径约定）。
+	 *  名录库在数据根目录下 data/bird_catalog.db（与 list_bird_species 同路径约定）。
 	 */
 	searchCatalog: (query: string, limit: number) => typedError<CatalogEntry[], string>(__TAURI_INVOKE("search_catalog", { query, limit })),
 	/**
