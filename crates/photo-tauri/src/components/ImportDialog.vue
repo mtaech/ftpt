@@ -335,7 +335,8 @@ watch(toast, (t) => {
             </Button>
           </div>
           <div v-else class="flex items-center gap-1.5 rounded-md border bg-muted/40 px-2 py-1.5">
-            <span class="text-xs text-muted-foreground">未检测到可移动驱动器</span>
+            <!-- 已选定源（如外部入口预选）时不再提示「未检测到可移动驱动器」，避免自相矛盾 -->
+            <span v-if="!source" class="text-xs text-muted-foreground">未检测到可移动驱动器</span>
             <Button size="xs" variant="outline" :disabled="scanning || running" @click="browseSource">
               <FolderOpenIcon data-icon="inline-start" />
               浏览目录…

@@ -513,19 +513,38 @@ fn block_disk_name(dev_name: &str) -> &str {
     dev_name
 }
 
+/// sysfs 路径是否位于 USB 总线下（组件名以 "usb" 开头，如 usb8）。
+/// 部分读卡器/移动硬盘把 removable 报成 0，但 sysfs 路径仍带 usbN 组件。
+#[cfg(any(target_os = "linux", test))]
+fn is_usb_sysfs_path(path: &Path) -> bool {
+    path.components()
+        .any(|c| c.as_os_str().to_string_lossy().starts_with("usb"))
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use super::{
-        DriveInfo, block_device_name, block_disk_name, is_removable_mount_point, parse_proc_mounts,
+        DriveInfo, block_device_name, block_disk_name, is_removable_mount_point,
+        is_usb_sysfs_path, parse_proc_mounts,
     };
     use std::path::Path;
 
-    /// 判定块设备是否可移动介质：/sys/class/block/<name>/removable == "1"；
-    /// 分区节点无该属性时回退磁盘名（sdb1→sdb、mmcblk0p1→mmcblk0）
+    /// 判定块设备是否可移动介质：
+    /// 1. /sys/class/block/<name>/removable == "1"；
+    /// 2. 否则看设备是否挂在 USB 总线下（读卡器常把 removable 报成 0，
+    ///    如 sda removable=0 但 sysfs 路径含 usb8）；
+    /// 分区节点无该属性时回退磁盘名（sdb1→sdb、mmcblk0p1→mmcblk0）。
     fn is_removable_device(dev_name: &str) -> bool {
         for name in [dev_name, block_disk_name(dev_name)] {
-            if let Ok(v) = std::fs::read_to_string(format!("/sys/class/block/{name}/removable")) {
-                return v.trim() == "1";
+            if let Ok(v) = std::fs::read_to_string(format!("/sys/class/block/{name}/removable"))
+                && v.trim() == "1"
+            {
+                return true;
+            }
+            if let Ok(real) = std::fs::canonicalize(format!("/sys/class/block/{name}"))
+                && is_usb_sysfs_path(&real)
+            {
+                return true;
             }
         }
         false
@@ -671,6 +690,18 @@ mod tests {
             assert_eq!(c.date, expect, "mtime 回退日期不匹配: {:?}", c.path);
             assert_eq!(c.size, meta.len());
         }
+    }
+
+    #[test]
+    fn test_is_usb_sysfs_path() {
+        // 真实读卡器：sda removable=0，但 sysfs 路径含 usb8
+        assert!(is_usb_sysfs_path(Path::new(
+            "/sys/devices/pci0000:00/0000:00:08.3/0000:09:00.4/usb8/8-1/8-1.4/8-1.4:1.0/host0/target0:0:0/0:0:0:0/block/sda"
+        )));
+        // 内置 NVMe：无 usb 组件
+        assert!(!is_usb_sysfs_path(Path::new(
+            "/sys/devices/pci0000:00/0000:00:01.2/0000:02:00.0/nvme/nvme1/nvme1n1"
+        )));
     }
 
     #[test]
