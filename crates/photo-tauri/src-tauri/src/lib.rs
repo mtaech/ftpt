@@ -3957,6 +3957,24 @@ fn take_activation_token() -> Option<String> {
     (!token.is_empty()).then(|| token.to_string())
 }
 
+#[cfg(windows)]
+#[link(name = "user32")]
+unsafe extern "system" {
+    /// 允许指定进程（ASFW_ANY = u32::MAX 表示任意进程）设置前台窗口
+    fn AllowSetForegroundWindow(dw_process_id: u32) -> i32;
+}
+
+/// Windows：解除前台锁。第二实例由用户在「自动播放」里启动，持有前台权限；
+/// 放开给任意进程后，已运行实例的 set_focus（SetForegroundWindow）才能置顶。
+#[cfg(windows)]
+fn allow_foreground_activation() {
+    const ASFW_ANY: u32 = u32::MAX;
+    // 无前台权限时调用失败：静默，置顶回退普通 set_focus
+    unsafe {
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+    }
+}
+
 /// 把窗口拉到前台：Wayland 下把 xdg-activation token 交给 GTK（KWin 焦点防抢占会
 /// 忽略无 token 的激活请求）；无 token/非 Linux 回退 set_focus。
 fn raise_window(window: &tauri::WebviewWindow, token: Option<&str>) {
@@ -3985,6 +4003,9 @@ pub fn run() {
 
     // 第二实例若由 KDE 菜单启动，环境里带 xdg-activation token：先暂存，供已运行实例置顶
     stash_activation_token();
+    // Windows：第二实例持有前台权限时放开，保证已运行实例的 set_focus 能置顶
+    #[cfg(windows)]
+    allow_foreground_activation();
 
     // 外部入口（KDE Solid 设备动作等）：--import <挂载点> → 启动后自动打开导入对话框
     let pending_import_path = parse_pending_import_path(std::env::args().skip(1));
