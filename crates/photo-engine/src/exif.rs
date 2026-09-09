@@ -125,6 +125,8 @@ struct ExifToolSession {
     child: Child,
     stdin: BufWriter<ChildStdin>,
     stdout: BufReader<ChildStdout>,
+    /// 协议错位标记：任一次执行失败后置位，下次使用前重建子进程
+    poisoned: bool,
 }
 
 impl Drop for ExifToolSession {
@@ -140,8 +142,17 @@ impl Drop for ExifToolSession {
 }
 
 impl ExifToolSession {
-    /// 执行一次参数列表：写 stdin + `-execute`，读 stdout 直到 `{ready}` 标记
+    /// 执行一次参数列表：写 stdin + `-execute`，读 stdout 直到 `{ready}` 标记。
+    /// 任一步失败都置 poisoned——会话可能残留未读完的输出，下一条命令会错位。
     fn execute(&mut self, args: &[String]) -> Result<String, ExifError> {
+        let result = self.execute_inner(args);
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    fn execute_inner(&mut self, args: &[String]) -> Result<String, ExifError> {
         for a in args {
             writeln!(self.stdin, "{a}").map_err(|e| ExifError::Provider(format!("写 exiftool stdin 失败: {e}")))?;
         }
@@ -313,8 +324,28 @@ impl ExifToolProvider {
                 child,
                 stdin,
                 stdout,
+                poisoned: false,
             }),
         })
+    }
+
+    /// 取得可用会话锁：上次执行失败（poisoned）时先重建子进程再返回。
+    /// 持锁重建——其他线程阻塞在 lock 上，不会拿到已错位的旧会话。
+    fn lock_healthy(&self) -> Result<std::sync::MutexGuard<'_, ExifToolSession>, ExifError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| ExifError::Provider(format!("exiftool 会话锁中毒: {e}")))?;
+        if guard.poisoned {
+            let fresh = Self::spawn()?;
+            let new_session = fresh
+                .inner
+                .into_inner()
+                .map_err(|_| ExifError::Provider("exiftool 新会话不可用".into()))?;
+            *guard = new_session;
+            tracing::warn!("exiftool 会话已重建（上次执行失败导致协议错位）");
+        }
+        Ok(guard)
     }
 
     /// 终止长驻进程（应用退出时调用；session Drop 也会 kill，这里主动触发）
@@ -351,10 +382,7 @@ impl ExifProvider for ExifToolProvider {
     }
 
     fn extract(&self, path: &Path, _format: &ImageFormat) -> Result<ExifMetadata, ExifError> {
-        let mut session = self
-            .inner
-            .lock()
-            .map_err(|e| ExifError::Provider(format!("exiftool 会话锁中毒: {e}")))?;
+        let mut session = self.lock_healthy()?;
         let args = Self::command_args(std::slice::from_ref(&path));
         let out = session.execute(&args)?;
         let arr: Vec<JsonValue> = serde_json::from_str(&out)
@@ -370,12 +398,17 @@ impl ExifProvider for ExifToolProvider {
         files: &[(PathBuf, ImageFormat)],
     ) -> Vec<(PathBuf, Result<ExifMetadata, ExifError>)> {
         // 一次命令处理全部文件（-stay_open 单次 execute 多路径），大幅降低进程往返
-        let mut session = match self.inner.lock() {
+        let mut session = match self.lock_healthy() {
             Ok(s) => s,
-            Err(_) => {
+            Err(e) => {
                 return files
                     .iter()
-                    .map(|(p, _)| (p.clone(), Err(ExifError::Provider("exiftool 会话锁中毒".into()))))
+                    .map(|(p, _)| {
+                        (
+                            p.clone(),
+                            Err(ExifError::Provider(format!("exiftool 会话不可用: {e}"))),
+                        )
+                    })
                     .collect()
             }
         };
@@ -400,7 +433,8 @@ impl ExifProvider for ExifToolProvider {
         let mut map = std::collections::HashMap::new();
         for v in arr {
             if let Some(sf) = v.get("SourceFile").and_then(|x| x.as_str()) {
-                map.insert(sf.to_string(), v);
+                // 与下方查找键同一归一化（Windows 回显可能是反斜杠）
+                map.insert(sf.replace('\\', "/"), v);
             }
         }
         files
@@ -784,7 +818,6 @@ fn parse_af_info(af: &rawlib::AfInfoData) -> Option<FocusPoint> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use tempfile::TempDir;
 
     /// 创建一个包含基本 EXIF 的测试 JPEG 文件

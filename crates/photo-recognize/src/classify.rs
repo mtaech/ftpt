@@ -64,12 +64,11 @@ pub fn run_classification(
 
     let cropped = img.crop_imm(cx1, cy1, crop_w, crop_h);
 
-    // ---- 2. 缩放至 224×224 平均插值（pica bird_model_classifier.dart:120-125） ----
-    let resized = cropped.resize_exact(
-        CLASSIFY_INPUT_SIZE as u32,
-        CLASSIFY_INPUT_SIZE as u32,
-        image::imageops::FilterType::Triangle,
-    );
+    // ---- 2. 缩放至 224×224 区域平均插值（pica bird_model_classifier.dart:120-125
+    // 的 Interpolation.average） ----
+    // thumbnail_exact 走 imageops::thumbnail 的 box（面积平均）采样；此前用
+    // FilterType::Triangle 是双线性近似，与参考实现不一致，会改变 logits/Top-5。
+    let resized = cropped.thumbnail_exact(CLASSIFY_INPUT_SIZE as u32, CLASSIFY_INPUT_SIZE as u32);
 
     // ---- 3. ImageNet 标准化（pica bird_model_classifier.dart:128-141） ----
     // 单遍遍历 as_raw() 像素按通道分散写（替代三重循环 get_pixel 边界检查）

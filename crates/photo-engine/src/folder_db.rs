@@ -130,24 +130,17 @@ impl FolderDb {
         std::fs::create_dir_all(&pt_dir)?;
         let db_path = pt_dir.join("data.db");
 
-        // 检测遗留 .pt-cache.db，迁移到新位置
+        // 检测遗留 .pt-cache.db，迁移到新位置。
+        // 只在「新库不存在」时迁移；若 data.db 已存在而遗留文件仍在（部分迁移/
+        // 旧版残留），一律保留——无条件删除可能丢掉尚未合并的 -wal 已提交事务。
         let legacy_path = dir.join(".pt-cache.db");
         if legacy_path.exists() && !db_path.exists() {
-            // 遗留文件存在且新库不存在：执行迁移
             for legacy_ext in &["", "-wal", "-shm"] {
                 let legacy_file = dir.join(format!(".pt-cache.db{}", legacy_ext));
                 if legacy_file.exists() {
                     let new_file = pt_dir.join(format!("data.db{}", legacy_ext));
                     std::fs::rename(&legacy_file, &new_file)?;
                 }
-            }
-        }
-
-        // 迁移完成后删除遗留文件（可能因为 -wal/-shm 残留）
-        for legacy_ext in &["", "-wal", "-shm"] {
-            let legacy_file = dir.join(format!(".pt-cache.db{}", legacy_ext));
-            if legacy_file.exists() {
-                std::fs::remove_file(&legacy_file).ok();
             }
         }
 
@@ -1303,6 +1296,28 @@ mod tests {
         // 数据可读（沿用旧数据）
         let exif = db.get_exif(&tmp.path().join("test.jpg")).unwrap();
         assert!(exif.is_none()); // 被旧的 file_fingerprint 跳过（文件不存在，返回 None）
+    }
+
+    #[test]
+    fn test_legacy_cache_kept_when_new_db_exists() {
+        let tmp = TempDir::new().unwrap();
+        let pt = tmp.path().join(".pt");
+        std::fs::create_dir_all(&pt).unwrap();
+        // 有效的新库（上次迁移已成功）
+        drop(rusqlite::Connection::open(pt.join("data.db")).unwrap());
+        // 遗留文件（部分迁移残留）：不能被无条件删除（可能含未合并的已提交事务）
+        std::fs::write(tmp.path().join(".pt-cache.db"), b"legacy").unwrap();
+        std::fs::write(tmp.path().join(".pt-cache.db-wal"), b"wal").unwrap();
+
+        let _db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        assert!(
+            tmp.path().join(".pt-cache.db").exists(),
+            "新库已存在时不得删遗留库"
+        );
+        assert!(
+            tmp.path().join(".pt-cache.db-wal").exists(),
+            "新库已存在时不得删遗留 WAL"
+        );
     }
 
     #[test]

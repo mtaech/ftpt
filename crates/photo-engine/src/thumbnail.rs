@@ -24,6 +24,27 @@ pub struct ThumbnailCache {
     cache_dir: PathBuf,
 }
 
+/// 原子写缓存文件：先写同目录唯一临时文件再 rename 覆盖，避免并发读方
+/// （enrich 预生成线程 / ptimg 请求线程）读到只写了一半的 JPEG。
+fn write_cache_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("cache");
+    let tmp = path.with_file_name(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&tmp, bytes)?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
 impl ThumbnailCache {
     /// 创建缓存管理器
     pub fn new(cache_dir: PathBuf) -> Self {
@@ -70,7 +91,7 @@ impl ThumbnailCache {
                 std::fs::read(&master_path)?
             } else {
                 let bytes = decode_raw_impl(&source.path, u32::MAX, cancel)?;
-                std::fs::write(&master_path, &bytes)?;
+                write_cache_atomic(&master_path, &bytes)?;
                 bytes
             };
             if size == u32::MAX {
@@ -84,7 +105,7 @@ impl ThumbnailCache {
             let thumb_key = self.cache_key(source, size, "std");
             let thumb_path = self.cache_dir.join(&thumb_key);
             let bytes = resize_jpeg(&master, size)?;
-            std::fs::write(&thumb_path, &bytes)?;
+            write_cache_atomic(&thumb_path, &bytes)?;
             return Ok(bytes);
         }
 
@@ -101,7 +122,7 @@ impl ThumbnailCache {
         }
 
         let thumb_bytes = self.generate_thumbnail(source, size, cancel)?;
-        std::fs::write(&cache_path, &thumb_bytes)?;
+        write_cache_atomic(&cache_path, &thumb_bytes)?;
         Ok(thumb_bytes)
     }
 
@@ -147,7 +168,7 @@ impl ThumbnailCache {
         let master = std::fs::read(&master_path)?;
         let bytes = resize_jpeg(&master, size)?;
         let thumb_key = self.cache_key(source, size, "std");
-        std::fs::write(self.cache_dir.join(&thumb_key), &bytes)?;
+        write_cache_atomic(&self.cache_dir.join(&thumb_key), &bytes)?;
         Ok(Some(bytes))
     }
 
@@ -682,6 +703,25 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_cache_write_atomic_no_tmp_left() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("x.jpg");
+        write_cache_atomic(&p, b"abc").unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"abc");
+        let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "不应残留临时文件: {leftovers:?}");
+
+        // 覆盖写：rename 原子替换旧内容
+        write_cache_atomic(&p, b"defg").unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"defg");
     }
 
     #[test]

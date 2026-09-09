@@ -245,12 +245,13 @@ export const mockCommands = {
   },
   async cancelRecognition(): Promise<void> {},
   async batchOpPreview(op: BatchOpType, options: BatchOpOptions): Promise<MockResult<BatchOpPreview>> {
-    const items = mockBatchPreviewItems(op, options)
-    const siblingCount = options.syncSiblings ? items.length : 0
+    const { items, baseCount } = mockBatchPreviewItems(op, options)
+    // 与后端一致：siblingCount = 同步额外拉入的兄弟文件数（不含操作集本身）
+    const siblingCount = items.length - baseCount
     return { status: 'ok', data: { op, count: items.length, items, siblingCount } }
   },
   async batchOpExecute(op: BatchOpType, options: BatchOpOptions): Promise<MockResult<BatchOpResult>> {
-    const items = mockBatchPreviewItems(op, options)
+    const { items } = mockBatchPreviewItems(op, options)
     const count = items.length
     for (let done = 1; done <= count; done++) {
       await sleep(50)
@@ -814,7 +815,10 @@ function sleep(ms: number): Promise<void> {
  * ImageFormat 为大写枚举；真实后端 Display 为大写，前端归一后语义等价）。
  * syncSiblings=true 时额外带出同 stem 兄弟文件（模拟 expand_with_siblings）。
  */
-function mockBatchPreviewItems(op: BatchOpType, options: BatchOpOptions): BatchOpItem[] {
+function mockBatchPreviewItems(
+  op: BatchOpType,
+  options: BatchOpOptions,
+): { items: BatchOpItem[]; baseCount: number } {
   const fmtOk = (c: CaptureMeta) =>
     options.formats.length === 0 ||
     options.formats.some((f) => formatToString(f).toLowerCase() === c.primaryFormat.toLowerCase())
@@ -823,7 +827,12 @@ function mockBatchPreviewItems(op: BatchOpType, options: BatchOpOptions): BatchO
   const base = captures.filter((c) => allowed.has(c.primaryPath) && fmtOk(c)).slice(0, 3)
   let items = base.map((c) => ({
     path: c.primaryPath,
-    targetPath: op === 'Delete' ? null : options.targetDir ? `${options.targetDir}/${c.baseName}` : null,
+    targetPath:
+      op === 'Delete'
+        ? null
+        : options.targetDir
+          ? `${options.targetDir}/${c.primaryPath.split(/[\\/]/).pop() ?? c.baseName}`
+          : null,
   }))
   if (options.syncSiblings && base.length > 0) {
     const stem = base[0].baseName.replace(/\.[^.]+$/, '')
@@ -832,9 +841,14 @@ function mockBatchPreviewItems(op: BatchOpType, options: BatchOpOptions): BatchO
       .slice(0, 2)
       .map((c) => ({
         path: c.primaryPath,
-        targetPath: op === 'Delete' ? null : options.targetDir ? `${options.targetDir}/${c.baseName}` : null,
+        targetPath:
+      op === 'Delete'
+        ? null
+        : options.targetDir
+          ? `${options.targetDir}/${c.primaryPath.split(/[\\/]/).pop() ?? c.baseName}`
+          : null,
       }))
     items = [...items, ...siblings]
   }
-  return items
+  return { items, baseCount: base.length }
 }

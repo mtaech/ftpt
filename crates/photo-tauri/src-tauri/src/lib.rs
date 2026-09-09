@@ -1234,7 +1234,12 @@ fn batch_op_preview(
                 (true, Some(dir)) => Some(format!(
                     "{}/{}",
                     dir.trim_end_matches(['/', '\\']),
-                    cap.base_name
+                    // 目标文件名带扩展名：base_name 只是 stem，展示/核对都要对齐真实落点
+                    primary
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| cap.base_name.clone())
                 )),
                 _ => None,
             };

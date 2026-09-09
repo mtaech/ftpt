@@ -31,6 +31,7 @@ mod sharpness;
 
 use std::path::Path;
 
+#[cfg(target_os = "windows")]
 use ort::ep;
 use ort::session::Session;
 
