@@ -5,6 +5,6 @@ X-KDE-Solid-Predicate=[ StorageVolume.ignored == false AND StorageVolume.usage =
 
 [Desktop Action open]
 Exec=ftpt --import "%f"
-Icon=camera-photo
+Icon=ftpt
 Name=Import Photos with Photo Tool
 Name[zh_CN]=用 Photo Tool 导入照片
