@@ -136,6 +136,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 
 ### 已知陷阱
 
+- **dev 构建必须给像素密集的 crate 开 `opt-level = 3`**：根 `Cargo.toml` 的 `[profile.dev.package.*]` 除 `image`/`rawlib`/`rusqlite` 外，还要有 `photo-engine`/`jpeg-decoder`/`zune-jpeg`/`zune-core`。实测生成一张 39MP JPEG 的 2560 预览母版：**debug 7.45s vs release 0.55s**——漏开就是"点开一张图卡 7 秒"
 - `quick-xml` 在根 `Cargo.toml` 的 `[workspace.dependencies]` 中声明但各 crate src 无引用
 - **exiftool `-stay_open` 长驻进程不能加 `-q`**：`-q` 同时抑制 `{ready}` 标记，导致 execute 读不到结果边界挂起
 - **Windows 官方 exiftool(-k).exe 内嵌 `-k`（每命令后等 ENTER）**：程序化调用必须用 `perl.exe exiftool.pl`（photo-engine 已自动处理）；开发时残留 perl.exe 进程会让后续 cargo 命令假死，`taskkill //F //IM perl.exe` 清理（cfg(test) 已跳过真实 spawn、photo-tauri 退出走 shutdown_provider，仅手动 example 需注意）
@@ -233,6 +234,10 @@ kimi_cu 的 UIA 树看不到 WebView2 DOM；无 vision 模型时用 CDP：
 ---
 
 ## 近期修复记录
+
+- **2026-09-18 feat(photo-ui 预览)：1:1 接上全分辨率图源（修「预览糊」）**：现象「单张预览发糊」经实测定位为**图源选择**而非解码质量——统一缩到 812px 显示尺寸下，派生 2560 母版 lapVar 165.6 与 AHD 全尺寸 171.3 基本无差（fit 视图不糊），但 1:1 时 `one_to_one = zoom==0 && !is_raw` 对 RAW 恒 false，显示框按 EXIF 自然尺寸（8152×5432）排布、画的却是 2560 母版 → **放大 3.18 倍**，lapVar 4.3 vs 真 1:1 的 48.7（糊 11 倍）；母版未就绪时显示的 440px 网格缩略图占位 lapVar 35.0 是另一个糊源。photo-tauri 的 `ptimg://full` 早有全分辨率路径（`ThumbnailCache::get_or_generate_full`：AHD 全尺寸 + `full` 变体落盘缓存），photo-ui 未接线。本次补上：`ImageManager::load_full_image`（内存只留最后一张，44MP 全尺寸 RGBA ≈177MB）+ `engine_ops::load_preview_full` + AppState `preview_full/preview_full_request`；判据抽成纯函数 `preview_math::exceeds_master_res`（显示长边 > 母版 2560 → 换真原图，1:1 与高倍放大同一条路）。实测 P1082800.RW2：全尺寸冷启 1.97s / 内存命中 9µs（8152×5432）。验证：`cargo test -p photo-ui`（38，含边界用例）、`lease_smoke` 15 项、新增无头冒烟 `preview_full_smoke` 5 项（fit 不加载 / 1:1 加载 / 路径不串 / 字节量级）、`master_bench` 增加 1:1 档计时
+- **2026-09-18 fix(RAW 预览偏暗)：显示母版重新开启自动亮度 + 内嵌快路径修复**：事故现象「RAW 预览比机内 JPEG 明显偏暗」根因不在白平衡——`rawlib::DecodeOptions::preview()` 为省一趟直方图扫描把 `no_auto_bright` 置 true，而 `full()`/`preview16()` 均为 false，导致 fit 母版与 1:1/调整页曝光不一致。实测 P1082800.RW2（Lumix 47MP RW2）：机内 JPG luma 76.6 / 内嵌 JPEG 75.9 / 应用母版 **48.1** / full() 93.9；白平衡 R/G=1.17 B/G=0.966 与内嵌 JPEG 1.21/0.969 基本一致（关相机 WB 则 B/G=0.65 明显偏黄），故只改曝光口径：新增 `display_preview_options()`（half_size+bilinear+sRGB+相机 WB+**自动亮度**），`decode_raw_impl` 改用它 → 母版 luma 93.8≈full() 93.9。另修死代码快路径：LibRaw 的 `libraw_processed_image_t` 对 JPEG 类型**不填 width/height（恒 0）**，原判据 `thumb.width.max(thumb.height) >= 2048` 永不成立，「大内嵌直接当母版」从未生效（每张 RAW 预览都白付完整解码），改由 `embedded_long_edge()` 解 JPEG 头取真实长边；`CACHE_VERSION` 4→5 让陈旧偏暗母版失效。手动诊断工具 `cargo run --release -p photo-engine --example raw_brightness_check -- <RAW>`
+- **2026-09-18 photo-ui：左右边栏改 Dock + 导入流程补齐**：`crates/photo-ui` 工作区从自绘三栏改为 gpui-kit Dock（`DockArea` + `DockSkin`，新增 `views/dock_panels.rs`）——左停靠区（文件树/批量操作）、右停靠区（信息/调整）、中央主视图；边缘可拖宽、Ctrl+[ / Ctrl+] 折叠、宽度 350ms 去抖写回 `AppConfig.leftPanelWidth/rightPanelWidth`，`set_locked(true)` 锁重排不锁拖宽。导入弹窗从占位实现补齐（新增 `state/import.rs`）：可移动盘/浏览选源 → 扫描 → 目标根目录 + 4 种子目录模式 + 重命名模板 → 复制/移动 → 干跑计划预览 → 进度 → 全成功自动关闭并重扫结果目录。无头冒烟 `XDG_CONFIG_HOME=/tmp/ptlease-config xvfb-run -a cargo run -p photo-ui --example lease_smoke` 15 项全过；修复 7 个弹窗的滚动穿透（遮罩缺 id + occlude，滚轮会落到主视图）
 
 - **2026-08-12 堆叠显示改造（A+E）**：网格堆叠从「×N 徽标循环点击」改为 cell 底部成员缩略图带（点击直达激活+选中，长连拍横向滚动），新增语义徽标区分同画面多格式（Copy 蓝）/连拍多帧（Layers 橙），连拍徽标仅在单成员组显示避免重复；新增 Q/E 组内切换激活成员（网格态）；修复 `openPath` 同目录早退导致目录为空（mock 无后端自动扫描/启动自愈后扫描失败）时无法重扫的死路
 - **2026-08-10 迁移 wave 1-3**：Tauri v2 迁移（计划见 git 历史 `docs/tauri-migration-plan.md`）；specta 真实绑定导出（bin 绕开 harness 0xc0000139）；启动自愈（自动恢复目录事件早于挂载）；主题默认 Light；mock 层 batchOpExecute detached `this` 修复
