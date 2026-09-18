@@ -191,10 +191,10 @@ impl ThumbnailCache {
     }
 
     /// 缓存键（`{:016x}.jpg`）：供 phash 近重复检测按同键直接读磁盘缓存（零解码）
-    pub(crate) fn cache_key(&self, source: &SourceFile, size: u32, variant: &str) -> String {
+    pub fn cache_key(&self, source: &SourceFile, size: u32, variant: &str) -> String {
         use std::hash::{Hash, Hasher};
         // 缓存格式版本：解码逻辑修复（如行宽错位）时递增，旧缓存自动失效
-        const CACHE_VERSION: u8 = 4;
+        const CACHE_VERSION: u8 = 5;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         CACHE_VERSION.hash(&mut hasher);
         // 变体：std（half_size 母版/常规图）与 full（全尺寸母版）分开，键互不冲突
@@ -253,8 +253,9 @@ impl ThumbnailCache {
 /// 从 RAW 解码用于预览的图像，返回 JPEG 字节，长边缩放到 `max_size` 以内（`u32::MAX` 表示不缩放）。
 /// 在 worker 线程中调用。
 ///
-/// 策略：内嵌 JPEG 足够大（长边 ≥ 2048，如 Panasonic RW2 / 部分 DNG）时直接使用（快）；
-/// 小内嵌（多数相机 160-640px）不再使用——放大会糊，直接完整解码（half_size 预览选项，约 4x 加速）。
+/// 策略：内嵌 JPEG 足够大（长边 ≥ 2048，如 Panasonic RW2 / 部分 DNG）时直接使用（快，
+/// 且颜色即相机机内口径）；小内嵌（多数相机 160-640px）不再使用——放大会糊，
+/// 直接完整解码（half_size + 自动亮度 + 相机白平衡，见 `display_preview_options`）。
 pub fn decode_raw_preview(path: &Path, max_size: u32) -> Result<Vec<u8>, ThumbnailError> {
     decode_raw_impl(path, max_size, None)
 }
@@ -319,18 +320,45 @@ pub fn decode_raw16_with_options(
     })
 }
 
+/// 内嵌 JPEG 长边达到此值才允许直接当母版（避免把小内嵌放大到预览/全分辨率）。
+const EMBEDDED_MASTER_MIN_EDGE: u32 = 2048;
+
+/// 显示/分析用 8-bit RAW 预览选项：half_size + bilinear + sRGB + 相机白平衡，
+/// **自动亮度保持开启**——与 `full()`/`preview16()` 同曝光口径。
+///
+/// rawlib 的 `preview()` 预设为省一趟全图直方图扫描而关闭自动亮度（`no_auto_bright`），
+/// 结果 RAW 母版比机内 JPEG 明显偏暗（实测 P1082800.RW2：luma 48 vs 机内 JPEG 76，
+/// 约 -0.6EV），且与 1:1 全尺寸解码亮度对不上（fit↔1:1 会跳亮）。显示口径统一用本函数。
+fn display_preview_options() -> rawlib::DecodeOptions {
+    rawlib::DecodeOptions {
+        no_auto_bright: false,
+        ..rawlib::DecodeOptions::preview()
+    }
+}
+
+/// 内嵌缩略图长边。LibRaw 的 `libraw_processed_image_t` 对 JPEG 类型**不填宽度/高度**
+/// （恒为 0），只有位图缩略图才有尺寸——所以必须自己解 JPEG 头，
+/// 否则「大内嵌直接当母版」的快路径永远不触发，每张 RAW 预览都要付完整解码代价。
+fn embedded_long_edge(thumb: &rawlib::ThumbnailData) -> u32 {
+    if let Some((w, h)) = jpeg_dimensions(&thumb.data) {
+        return w.max(h);
+    }
+    u32::from(thumb.width).max(u32::from(thumb.height))
+}
+
 /// RAW 解码共用实现。`cancel` 为合作式取消令牌：完整解码（慢操作）前检查一次。
 fn decode_raw_impl(path: &Path, size: u32, cancel: Option<&AtomicBool>) -> Result<Vec<u8>, ThumbnailError> {
     let path_str = path.to_string_lossy();
     // 快路径：内嵌 JPEG 长边 ≥ 2048（大内嵌，如 RW2/DNG 全尺寸预览）直接用，省完整解码。
     // 小内嵌不再返回：160×120 放大到预览/全分辨率会糊，统一走完整解码。
     if let Ok(thumb) = rawlib::extract_thumbnail_with_info(path_str.as_ref()) {
-        if thumb.format == rawlib::ImageFormat::Jpeg && thumb.width.max(thumb.height) >= 2048 {
+        let long_edge = embedded_long_edge(&thumb);
+        if thumb.format == rawlib::ImageFormat::Jpeg && long_edge >= EMBEDDED_MASTER_MIN_EDGE {
             return resize_jpeg(&thumb.data, size);
         }
         tracing::debug!(
-            "内嵌缩略图过小（{}×{}），走完整解码: {}",
-            thumb.width, thumb.height, path.display()
+            "内嵌缩略图过小（长边 {long_edge}px），走完整解码: {}",
+            path.display()
         );
     } else {
         tracing::debug!("无内嵌缩略图，走完整解码: {}", path.display());
@@ -341,7 +369,7 @@ fn decode_raw_impl(path: &Path, size: u32, cancel: Option<&AtomicBool>) -> Resul
     }
     let img = rawlib::extract_image_with_options(
         path_str.as_ref(),
-        &rawlib::DecodeOptions::preview(),
+        &display_preview_options(),
     )
     .map_err(|e| {
         tracing::error!("完整解码失败: {} — {e}", path.display());
@@ -592,6 +620,36 @@ mod tests {
         });
         img.save(path)?;
         Ok(())
+    }
+
+    /// LibRaw 对 JPEG 内嵌图不填 width/height（恒 0）：长边必须从 JPEG 头解析，
+    /// 否则「内嵌 ≥2048 直接当母版」的快路径永远不触发（回归：显示母版偏暗 + 白解码）。
+    #[test]
+    fn test_embedded_long_edge_reads_jpeg_header_when_libraw_dims_are_zero() {
+        let mut buf = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(64, 40))
+            .write_to(&mut buf, image::ImageFormat::Jpeg)
+            .unwrap();
+        let thumb = rawlib::ThumbnailData {
+            format: rawlib::ImageFormat::Jpeg,
+            width: 0,
+            height: 0,
+            colors: 0,
+            bits: 0,
+            data: buf.into_inner(),
+        };
+        assert_eq!(embedded_long_edge(&thumb), 64);
+    }
+
+    /// 显示母版必须保留自动亮度：rawlib preview 预设默认关闭它，会让 RAW 预览
+    /// 比机内 JPEG 暗约 0.6EV（实测 luma 48 vs 76），且与 1:1 全尺寸解码亮度不一致。
+    #[test]
+    fn test_display_preview_options_keep_auto_bright() {
+        let opts = display_preview_options();
+        assert!(!opts.no_auto_bright, "RAW 显示母版不得关闭自动亮度");
+        assert!(opts.half_size, "显示母版走 half_size（约 4x 加速）");
+        assert!(opts.use_camera_wb, "必须使用相机白平衡");
+        assert_eq!(opts.output_bps, 8);
     }
 
     #[test]
