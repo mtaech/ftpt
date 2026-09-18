@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use photo_config::AppConfig;
-use photo_domain::{CaptureMeta, SortBy, SortDirection};
+use photo_domain::{CaptureMeta, ImageFormat, SortBy, SortDirection};
 use photo_engine::folder_db::FolderDb;
 use photo_engine::global_db::GlobalDb;
 use photo_engine::undo::OpJournal;
@@ -17,7 +17,7 @@ use gpui_kit::component::input::InputState;
 use gpui_kit::{App, Context, Entity, Subscription, Window};
 
 use super::import::ImportState;
-use crate::image::ImageManager;
+use crate::image::{ImageManager, source_file_of};
 use crate::model::best_frame::pick_best_frame;
 use crate::model::burst::{BurstGroupMap, compute_burst_groups};
 use crate::model::filter::{FilterCriteria, default_filter_criteria};
@@ -696,5 +696,33 @@ impl AppState {
     /// 设置状态提示消息（4秒后自动消失）
     pub fn set_status_message(&mut self, msg: impl Into<String>) {
         self.status_message = Some((msg.into(), Instant::now()));
+    }
+
+    /// 复制当前照片到系统剪贴板（全尺寸 RGBA）。
+    ///
+    /// 作用对象与标记键一致：预览/对比/幻灯片取当前那张，网格取主选中项。
+    /// 对应已删除的 Tauri 版 `copy_image_to_clipboard` command。
+    pub fn copy_current_image_to_clipboard(&mut self, cx: &mut Context<Self>) {
+        if self.primary_selected_meta().is_none() {
+            self.set_status_message("未选中照片");
+            cx.notify();
+            return;
+        }
+        let Some(source) = self.primary_selected_meta().and_then(source_file_of) else {
+            self.set_status_message("无法识别该文件的图片格式，未复制");
+            cx.notify();
+            return;
+        };
+        if matches!(source.format, ImageFormat::Other) {
+            self.set_status_message("视频等非图片格式不支持复制到剪贴板");
+            cx.notify();
+            return;
+        }
+        // image_manager 在这里取出后传进去：本函数运行在 listener 里，AppState 正被租借，
+        // 引擎侧再 read 同一实体会 panic（与 load_preview_image 的调用口径一致）。
+        let manager = self.image_manager.clone();
+        self.set_status_message("正在解码全尺寸图片…");
+        super::engine_ops::copy_image_to_clipboard(cx.entity().clone(), manager, source, cx);
+        cx.notify();
     }
 }

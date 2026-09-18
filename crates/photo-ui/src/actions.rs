@@ -49,6 +49,8 @@ actions!(
         SelectAll,
         DeselectAll,
         Undo,
+        // 剪贴板（Ctrl+C：复制当前照片的全尺寸 RGBA 到系统剪贴板）
+        CopyImage,
         ToggleLeftPanel,
         ToggleRightPanel,
         Rescan,

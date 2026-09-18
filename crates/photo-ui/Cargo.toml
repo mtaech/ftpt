@@ -29,3 +29,7 @@ tracing-appender = { workspace = true }
 tracing-log = { workspace = true }
 trash = { workspace = true }
 open = "5"
+# 系统剪贴板（复制图片）。GPUI 自带的剪贴板在 Linux（X11/Wayland）只写文本、
+# 图片项会被静默丢弃，所以图片复制直接走 arboard；
+# wayland-data-control：Wayland 会话下用 wl-clipboard-rs 的 data-control 协议。
+arboard = { version = "3", features = ["wayland-data-control"] }

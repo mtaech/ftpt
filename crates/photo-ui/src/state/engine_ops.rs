@@ -759,3 +759,161 @@ pub fn start_recognition(
     })
     .detach();
 }
+
+/// 复制图片到系统剪贴板（全尺寸 RGBA）。
+///
+/// 对齐已删除的 Tauri 版 `copy_image_to_clipboard`：
+/// - 常规格式（JPEG/PNG/WebP/BMP/GIF/TIFF）：直接读原文件全尺寸解码，不缩放、不重编码；
+/// - RAW：走 `ThumbnailCache::get_or_generate_full`（AHD 全尺寸 JPEG）再解码；
+/// - 原文件解不开（DNG/TIFF/HEIF 等）同样回退到 full 母版。
+///
+/// 用 `arboard` 而不是 GPUI 自带的剪贴板：gpui-pre 的 Linux 后端（X11/Wayland）
+/// 只写文本，图片项会被静默丢弃。解码放后台 executor（39MP RGBA ≈157MB，不能冻 UI），
+/// 写剪贴板回主线程。
+pub fn copy_image_to_clipboard(
+    state_entity: Entity<AppState>,
+    manager: ImageManager,
+    source: SourceFile,
+    cx: &mut App,
+) {
+    // 注意：不能在这里 state_entity.read(cx)——本函数是从 AppState 的 listener 里
+    // 调进来的，实体正被租借；manager 由调用方传入（与 load_preview_image 同口径）。
+    let name = source
+        .path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| source.path.to_string_lossy().to_string());
+
+    cx.spawn(async move |async_cx| {
+        let decoded = async_cx
+            .background_executor()
+            .spawn(async move { decode_full_rgba(&manager, &source) })
+            .await;
+
+        let _ = async_cx.update(|cx| {
+            let _ = state_entity.update(cx, |state, cx| {
+                match decoded {
+                    Ok((w, h, rgba)) => {
+                        let mb = rgba.len() as f64 / (1024.0 * 1024.0);
+                        match write_image_to_system_clipboard(w, h, rgba) {
+                            Ok(()) => state.set_status_message(format!(
+                                "已复制图片到剪贴板：{name}（{w}×{h}，RGBA {mb:.1} MB）"
+                            )),
+                            Err(e) => state.set_status_message(format!("复制图片失败：{e}")),
+                        }
+                    }
+                    Err(e) => state.set_status_message(format!("复制图片失败：{e}")),
+                }
+                cx.notify();
+            });
+        });
+    })
+    .detach();
+}
+
+/// 把 RGBA8 像素写进系统剪贴板（独立成函数，便于单测打桩 / 将来换后端）。
+fn write_image_to_system_clipboard(width: u32, height: u32, rgba: Vec<u8>) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard
+        .set_image(arboard::ImageData {
+            width: width as usize,
+            height: height as usize,
+            bytes: std::borrow::Cow::Owned(rgba),
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// 取全尺寸 RGBA：返回（宽、高、RGBA8 字节）。
+fn decode_full_rgba(
+    manager: &ImageManager,
+    source: &SourceFile,
+) -> Result<(u32, u32, Vec<u8>), String> {
+    let is_raw = matches!(source.format, ImageFormat::Raw(_));
+    let mut errors: Vec<String> = Vec::new();
+
+    if !is_raw {
+        match std::fs::read(&source.path) {
+            Ok(bytes) => match decode_rgba(&bytes) {
+                Ok(v) => return Ok(v),
+                Err(e) => errors.push(format!("原文件解码失败：{e}")),
+            },
+            Err(e) => errors.push(format!("读取原文件失败：{e}")),
+        }
+    }
+
+    // RAW，或原文件解不开（DNG/TIFF/HEIF 等）：用 full 变体（AHD 全尺寸 JPEG）
+    match manager.load_full_image(source, None) {
+        Ok(img) => match decode_rgba(&img.bytes) {
+            Ok(v) => return Ok(v),
+            Err(e) => errors.push(format!("全尺寸母版解码失败：{e}")),
+        },
+        Err(e) => errors.push(format!("全尺寸母版生成失败：{e}")),
+    }
+
+    Err(errors.join("；"))
+}
+
+fn decode_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    let img = image::load_from_memory(bytes)
+        .map_err(|e| e.to_string())?
+        .to_rgba8();
+    Ok((img.width(), img.height(), img.into_raw()))
+}
+
+#[cfg(test)]
+mod clipboard_tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ftpt-clip-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        dir
+    }
+
+    /// 常规格式：全尺寸解码走「读原文件」这条路，且完全不需要缩略图缓存。
+    #[test]
+    fn decode_full_rgba_reads_original_file_for_regular_formats() {
+        let dir = temp_dir("png");
+        let path = dir.join("clip.png");
+        image::RgbaImage::from_fn(3, 2, |x, y| image::Rgba([x as u8, y as u8, 0, 255]))
+            .save(&path)
+            .expect("写测试 PNG");
+
+        let manager = ImageManager::new(None);
+        let source = SourceFile {
+            path: path.clone(),
+            format: ImageFormat::Png,
+            file_size: std::fs::metadata(&path).ok().map(|m| m.len()),
+        };
+
+        let (w, h, rgba) = decode_full_rgba(&manager, &source).expect("应从原文件解码");
+        assert_eq!((w, h), (3, 2));
+        assert_eq!(rgba.len(), 3 * 2 * 4);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 原文件坏 + 无缓存目录：两条路都失败时必须报错，而不是 panic 或返回空图。
+    #[test]
+    fn decode_full_rgba_reports_error_when_nothing_decodes() {
+        let dir = temp_dir("broken");
+        let path = dir.join("broken.jpg");
+        std::fs::write(&path, b"not an image").expect("写坏文件");
+
+        let manager = ImageManager::new(None);
+        let source = SourceFile {
+            path: path.clone(),
+            format: ImageFormat::Jpeg,
+            file_size: Some(12),
+        };
+
+        let err = decode_full_rgba(&manager, &source).expect_err("应报错");
+        assert!(
+            err.contains("解码失败") || err.contains("读取原文件失败"),
+            "错误信息应说明失败原因：{err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+

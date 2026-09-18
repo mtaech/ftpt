@@ -27,7 +27,9 @@ use gpui_kit::{
 };
 use photo_domain::FocusShape;
 
-use crate::actions::{ToggleBbox, ToggleClipping, ToggleFocus, ToggleView, ZoomIn, ZoomOut};
+use crate::actions::{
+    CopyImage, ToggleBbox, ToggleClipping, ToggleFocus, ToggleView, ZoomIn, ZoomOut,
+};
 use crate::image::{MASTER_SIZE, THUMB_SIZE_GRID, source_file_of};
 use crate::model::preview_math::{
     clamp_pan_axis, exceeds_master_res, fit_scale, preview_center_offset,
@@ -458,6 +460,17 @@ pub fn render_photo_preview(
                                     state.preview_pan = (0.0, 0.0);
                                     cx.notify();
                                 })),
+                        )
+                        // 复制到系统剪贴板（全尺寸）
+                        .child(
+                            Button::new("copy-image")
+                                .ghost()
+                                .xsmall()
+                                .label("复制")
+                                .tooltip("复制图片到系统剪贴板（全尺寸，Ctrl+C）")
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(CopyImage), cx);
+                                }),
                         )
                         .child(Separator::vertical().h(px(16.)))
                         // 检测框开关 (V)

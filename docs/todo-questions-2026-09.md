@@ -16,7 +16,7 @@
 ## 已做的变更
 
 ### 1. 预览页复制图片（全尺寸）
-- 后端命令 copy_image_to_clipboard（Tauri 版 `crates/photo-tauri/src-tauri/src/lib.rs`，该 crate 已删除；GPUI 版**尚未实现剪贴板复制**）：全尺寸 RGBA 写入系统剪贴板。
+- 后端命令 copy_image_to_clipboard（Tauri 版 `crates/photo-tauri/src-tauri/src/lib.rs`，该 crate 已删除；**GPUI 版已补齐**：`crates/photo-ui/src/state/engine_ops.rs`，Ctrl+C / 预览工具条「复制」）：全尺寸 RGBA 写入系统剪贴板。
   - 常规可解码格式（JPG/PNG/WebP/BMP/GIF）：直接读原文件字节，image crate 全尺寸解码（不缩放）。
   - RAW/TIFF/HEIF：走缩略图缓存 get_or_generate_full（全分辨率母版）再解码。
 - 新增 copy_text_to_clipboard（复制文件绝对路径用），ipc 封装 copyTextToClipboard。

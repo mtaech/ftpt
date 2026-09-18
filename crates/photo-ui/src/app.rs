@@ -102,6 +102,8 @@ impl AppState {
             KeyBinding::new("ctrl-a", SelectAll, None),
             KeyBinding::new("ctrl-d", DeselectAll, None),
             KeyBinding::new("ctrl-z", Undo, None),
+            // 剪贴板：复制当前照片（文本框内的 Ctrl+C 由 Input 自己处理，优先于本绑定）
+            KeyBinding::new("ctrl-c", CopyImage, None),
             KeyBinding::new("ctrl-[", ToggleLeftPanel, None),
             KeyBinding::new("ctrl-]", ToggleRightPanel, None),
             KeyBinding::new("f5", Rescan, None),
@@ -476,6 +478,9 @@ impl Render for AppState {
                     this.set_status_message("没有可撤销的批量操作");
                 }
                 cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &CopyImage, _window, cx| {
+                this.copy_current_image_to_clipboard(cx);
             }))
             .on_action(cx.listener(|_this, _: &OpenDirectory, _window, cx| {
                 cx.spawn(

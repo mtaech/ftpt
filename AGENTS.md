@@ -68,7 +68,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 |`crates/photo-engine/src/folder_db.rs`|文件夹级 SQLite（`.pt/data.db`）：exif_cache / xmp_meta / recognition / adjustments 四表，rusqlite_migration 版本化|
 |`crates/photo-recognize/src/`|识别管线：lib.rs(Recognizer 门面), detect(YOLO), classify(bird_model), catalog(名录映射), pipeline, eye, sharpness|
 |`crates/photo-config/src/lib.rs`|配置读写（TOML + SQLite 持久化）；AppConfig 含 favorite_dirs/recent_directories/theme(默认 Light)/leftPanelWidth/rightPanelWidth/thumbnailSize/recognitionThreadCount/stackMode(默认 None 不堆叠) 等|
-|`crates/photo-ui/src/app.rs`|GPUI 应用装配：窗口、键位表（46 个 `KeyBinding`）、action 分发、Dock 工作区创建|
+|`crates/photo-ui/src/app.rs`|GPUI 应用装配：窗口、键位表（47 个 `KeyBinding`）、action 分发、Dock 工作区创建|
 |`crates/photo-ui/src/views/dock_panels.rs`|gpui-kit Dock 工作区：左右停靠区 + 中央主视图；`DockPanel` 的 `panel_name`/`closable`/`zoomable`/`zoom_control` 语义在这里|
 |`crates/photo-ui/src/views/`|grid / preview / compare / slideshow / stats / filmstrip / info_panel / left_panel / filter_bar / header / status_bar / dialogs/|
 |`crates/photo-ui/src/state/`|`AppState`（单实体）/ `import.rs`（导入状态机）/ `engine_ops.rs`（调同步引擎的唯一桥）|
@@ -167,8 +167,8 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 - **工作区**：`views/dock_panels.rs` 用 gpui-kit Dock 组装左右停靠区与中央主视图；面板靠 `panel_name` 持久化，`set_locked(true)` 锁重排不锁拖宽；边缘宽度写回 `AppConfig.leftPanelWidth/rightPanelWidth`
 - **主视图**：`ViewMode` 驱动 grid / preview / compare / slideshow / stats；`views/` 下另有 filmstrip、filter_bar、info_panel、left_panel、header、status_bar、dialogs/
 - **纯逻辑**：`model/`（filter / sort / stacks / burst / preview_math / best_frame）不依赖 GPUI，内联单测——筛选/排序/堆叠/连拍/预览数学都在这里
-- **图片**：`image/`（`ImageManager` 进程内解码 + 缓存：缩略图 → 2560 显示母版 → 1:1 全分辨率）
-- **交互**：`actions.rs` 定义 action，`app.rs` 注册 46 条 `KeyBinding` 并分发（评分/旗标/色标/识别/视图切换/对比/幻灯片/缩放等）
+- **图片**：`image/`（`ImageManager` 进程内解码 + 缓存：缩略图 → 2560 显示母版 → 1:1 全分辨率）；**复制到剪贴板**（Ctrl+C / 预览工具条「复制」）在 `state/engine_ops.rs` 解码全尺寸 RGBA 后走 `arboard`——GPUI 自带的剪贴板在 Linux 只写文本，图片项会被静默丢弃
+- **交互**：`actions.rs` 定义 action，`app.rs` 注册 47 条 `KeyBinding` 并分发（评分/旗标/色标/识别/视图切换/对比/幻灯片/缩放/剪贴板复制等）
 - **主题**：`theme/`（Material You HCT 动态取色，seed 来自配置；`theme_config` → GPUI `ThemeConfig`）
 
 ### 日志（tracing 统一管道）
@@ -181,6 +181,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 
 ## 近期修复记录
 
+- **2026-09-18 feat(photo-ui)：复制图片到系统剪贴板（Ctrl+C / 预览「复制」）**：补齐删除 Tauri 版后缺的 `copy_image_to_clipboard`。解码口径与原版一致——常规格式读原文件全尺寸解码，RAW 走 `ThumbnailCache::get_or_generate_full`（AHD 全尺寸 JPEG），原文件解不开（DNG/TIFF/HEIF）回退 full 母版——再转 RGBA8 交给 `arboard::set_image`。没用 GPUI 自带剪贴板：gpui-pre 的 X11/Wayland 后端只写文本，图片项会被静默丢弃（Windows/macOS 才认）。新增依赖 `arboard`（features `wayland-data-control`，Wayland 下走 wl-clipboard-rs）。解码放后台 executor（39MP RGBA ≈157MB，不冻 UI），写剪贴板回主线程，结果落状态栏。验证：`cargo test -p photo-ui` 41 passed（新增 2 个解码用例：常规格式走原文件路径、全失败时正确报错）；Xvfb 下 arboard 图片写→读回环 4×3 字节一致
 - **2026-09-18 chore：删除 Tauri v2 版前端（crates/photo-tauri）**：GPUI 版（crates/photo-ui）已是唯一前端，删除 Tauri v2 + Vue 3 的前后端目录（167 个跟踪文件，含 node_modules 共 171MB）——根 `Cargo.toml` 移除只被它使用的 workspace 依赖（tauri / tauri-build / tauri-plugin-dialog·opener·clipboard-manager·single-instance / tauri-specta / specta-typescript / embed-resource / font-kit / rust-embed），domain/config/recognize 上可选的 `specta` feature 保留（默认不启用、无消费方）；`.gitignore` 去掉 tauri target 项；README / AGENTS / CONTEXT 改为描述 GPUI 版。photo-tauri 此前已不在 workspace members 里，删除不影响 `cargo build`。验证：`cargo metadata` 成员 6 个、`cargo check -p photo-ui` 通过、`Cargo.lock` 无变化
 - **2026-09-18 feat(photo-ui 预览)：1:1 接上全分辨率图源（修「预览糊」）**：现象「单张预览发糊」经实测定位为**图源选择**而非解码质量——统一缩到 812px 显示尺寸下，派生 2560 母版 lapVar 165.6 与 AHD 全尺寸 171.3 基本无差（fit 视图不糊），但 1:1 时 `one_to_one = zoom==0 && !is_raw` 对 RAW 恒 false，显示框按 EXIF 自然尺寸（8152×5432）排布、画的却是 2560 母版 → **放大 3.18 倍**，lapVar 4.3 vs 真 1:1 的 48.7（糊 11 倍）；母版未就绪时显示的 440px 网格缩略图占位 lapVar 35.0 是另一个糊源。photo-tauri 的 `ptimg://full` 早有全分辨率路径（`ThumbnailCache::get_or_generate_full`：AHD 全尺寸 + `full` 变体落盘缓存），photo-ui 未接线。本次补上：`ImageManager::load_full_image`（内存只留最后一张，44MP 全尺寸 RGBA ≈177MB）+ `engine_ops::load_preview_full` + AppState `preview_full/preview_full_request`；判据抽成纯函数 `preview_math::exceeds_master_res`（显示长边 > 母版 2560 → 换真原图，1:1 与高倍放大同一条路）。实测 P1082800.RW2：全尺寸冷启 1.97s / 内存命中 9µs（8152×5432）。验证：`cargo test -p photo-ui`（38，含边界用例）、`lease_smoke` 15 项、新增无头冒烟 `preview_full_smoke` 5 项（fit 不加载 / 1:1 加载 / 路径不串 / 字节量级）、`master_bench` 增加 1:1 档计时
 - **2026-09-18 fix(RAW 预览偏暗)：显示母版重新开启自动亮度 + 内嵌快路径修复**：事故现象「RAW 预览比机内 JPEG 明显偏暗」根因不在白平衡——`rawlib::DecodeOptions::preview()` 为省一趟直方图扫描把 `no_auto_bright` 置 true，而 `full()`/`preview16()` 均为 false，导致 fit 母版与 1:1/调整页曝光不一致。实测 P1082800.RW2（Lumix 47MP RW2）：机内 JPG luma 76.6 / 内嵌 JPEG 75.9 / 应用母版 **48.1** / full() 93.9；白平衡 R/G=1.17 B/G=0.966 与内嵌 JPEG 1.21/0.969 基本一致（关相机 WB 则 B/G=0.65 明显偏黄），故只改曝光口径：新增 `display_preview_options()`（half_size+bilinear+sRGB+相机 WB+**自动亮度**），`decode_raw_impl` 改用它 → 母版 luma 93.8≈full() 93.9。另修死代码快路径：LibRaw 的 `libraw_processed_image_t` 对 JPEG 类型**不填 width/height（恒 0）**，原判据 `thumb.width.max(thumb.height) >= 2048` 永不成立，「大内嵌直接当母版」从未生效（每张 RAW 预览都白付完整解码），改由 `embedded_long_edge()` 解 JPEG 头取真实长边；`CACHE_VERSION` 4→5 让陈旧偏暗母版失效。手动诊断工具 `cargo run --release -p photo-engine --example raw_brightness_check -- <RAW>`
