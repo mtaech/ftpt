@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -62,7 +62,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub recent_directories: Vec<String>,
     pub theme: Theme,
-    /// Material You 主题 seed 色（`#RRGGBB`）。None = 前端用默认蓝 seed `#3b82f6`。
+    /// Material You 主题 seed 色（`#RRGGBB`）。None = 用默认墨黑 seed `#111111`。
+    /// 读入/保存时统一归一为小写带 `#` 的六位十六进制；非法值归一为 None。
     #[serde(default)]
     pub accent_color: Option<String>,
     pub left_panel_width: u32,
@@ -189,6 +190,7 @@ impl AppConfig {
         self.recognition_thread_count = self.recognition_thread_count.clamp(1, 4);
         self.grid_columns = self.grid_columns.clamp(2, 5);
         self.ui_scale = self.ui_scale.clamp(70, 200);
+        self.accent_color = self.accent_color.as_deref().and_then(normalize_accent_hex);
         self.export_presets = self
             .export_presets
             .into_iter()
@@ -208,10 +210,24 @@ impl AppConfig {
     }
 }
 
+/// 归一化 Material You seed 色：接受 `#RRGGBB` / `RRGGBB`（大小写不限），
+/// 统一输出小写带 `#`。三位缩写、带 alpha 的八位、含非法字符一律判为 None
+/// （由调用方回退默认 seed），避免把坏值喂给 HCT 生成器。
+pub fn normalize_accent_hex(input: &str) -> Option<String> {
+    let s = input.trim();
+    let body = s.strip_prefix('#').unwrap_or(s);
+    if body.len() != 6 || !body.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("#{}", body.to_ascii_lowercase()))
+}
+
+/// 默认 seed：近黑。色相无关、chroma ≈ 0，生成"墨白"单色 accent。
+pub const DEFAULT_ACCENT_HEX: &str = "#111111";
+
 pub fn determine_config_path() -> Result<PathBuf, std::io::Error> {
     // 全平台统一 ~/.config/pt/config.toml（Windows 为 %USERPROFILE%\.config\pt\config.toml）
-    let home = dirs::home_dir()
-        .ok_or_else(|| std::io::Error::other("无法定位用户主目录"))?;
+    let home = dirs::home_dir().ok_or_else(|| std::io::Error::other("无法定位用户主目录"))?;
     let dir = home.join(".config").join("pt");
     std::fs::create_dir_all(&dir)?;
     Ok(dir.join("config.toml"))
@@ -348,7 +364,10 @@ mod tests {
         let merged = incoming.keep_runtime_state(&current);
         assert_eq!(merged.favorite_dirs, vec!["/a".to_string()]);
         assert_eq!(merged.last_directory.as_deref(), Some("/b"));
-        assert_eq!(merged.recent_directories, vec!["/b".to_string(), "/a".to_string()]);
+        assert_eq!(
+            merged.recent_directories,
+            vec!["/b".to_string(), "/a".to_string()]
+        );
         // 用户设置照常生效
         assert_eq!(merged.thumbnail_size, 320);
     }
@@ -389,6 +408,39 @@ mod tests {
         // 缺 accent_color 键的 TOML → serde(default) 回退 None
         let legacy: AppConfig = toml::from_str("theme = \"Light\"\nthumbnailSize = 220\n").unwrap();
         assert_eq!(legacy.accent_color, None);
+    }
+
+    #[test]
+    fn test_normalize_accent_hex() {
+        // 合法：带/不带 #、大小写 → 统一小写带 #
+        assert_eq!(normalize_accent_hex("#3B82F6").as_deref(), Some("#3b82f6"));
+        assert_eq!(normalize_accent_hex("3b82f6").as_deref(), Some("#3b82f6"));
+        assert_eq!(
+            normalize_accent_hex("  #FFFfff  ").as_deref(),
+            Some("#ffffff")
+        );
+        // 非法：三位缩写、八位带 alpha、非法字符、空串 → None
+        assert_eq!(normalize_accent_hex("#abc"), None);
+        assert_eq!(normalize_accent_hex("#3b82f6ff"), None);
+        assert_eq!(normalize_accent_hex("#gggggg"), None);
+        assert_eq!(normalize_accent_hex(""), None);
+    }
+
+    #[test]
+    fn test_clamped_normalizes_accent_color() {
+        let bad = AppConfig {
+            accent_color: Some("3B82F6".into()),
+            ..Default::default()
+        }
+        .clamped();
+        assert_eq!(bad.accent_color.as_deref(), Some("#3b82f6"));
+
+        let worse = AppConfig {
+            accent_color: Some("not-a-color".into()),
+            ..Default::default()
+        }
+        .clamped();
+        assert_eq!(worse.accent_color, None);
     }
 
     #[test]
