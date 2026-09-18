@@ -12,6 +12,7 @@ cp scripts/linux/photo-tool-import.desktop ~/.local/share/solid/actions/
 ```
 
 - **发布包**：`Exec=ftpt --import "%f"` 假定 `ftpt` 在 PATH 中（或改成绝对路径）。
+  ⚠️ **GPUI 版尚未接线 `--import`**（见文末「现状」）：目前点这个菜单项只会以普通方式启动应用。
 - **开发运行**：把 `Exec` 改成实际二进制绝对路径，并用 `PHOTO_DATA_DIR` 指向仓库根
   （否则 `data_root()` 在设备动作的启动 cwd 下找不到 `models/` 与 `data/bird_catalog.db`）：
 
@@ -29,8 +30,15 @@ kquitapp6 plasmashell && kstart plasmashell
 
 - 谓词沿用 Gwenview 导入器的写法（`StorageVolume.usage == 'FileSystem'`），因此对所有已挂载
   文件系统生效；Device Notifier 默认只展示可移动/热插拔设备。
-- 已接入 `tauri-plugin-single-instance`：应用已在运行时，再次点击菜单项会把
-  `--import <挂载点>` 转发给已运行实例（发 `import:open` 事件让前端打开导入对话框），
-  不会开出第二个窗口。
-- 开发运行（`pnpm run tauri dev`）时 debug 二进制从 vite（1420）加载前端，所以设备动作
-  需要 dev 进程在跑；要独立可启动就用 `pnpm run tauri build` 的 release 产物（前端已内嵌）。
+## 现状：`--import` 与单实例转发尚未接线（2026-09-18）
+
+原 Tauri 版由 `crates/photo-tauri/src-tauri/src/lib.rs` 解析 `--import <挂载点>`，并靠
+`tauri-plugin-single-instance` 把重复启动转发给已运行实例（发 `import:open` 事件打开导入对话框）。
+该 crate 已删除，而 GPUI 版 `crates/photo-ui/src/main.rs` **还没有解析命令行参数、也没有单实例通道**，所以：
+
+- 这个 Solid 动作**不会**自动打开导入对话框，只是把应用启动起来；应用已在运行时还会开出第二个实例。
+- 先把它当占位留着：等 `photo-ui` 补上 `--import`（解析后把挂载点塞进
+  `crates/photo-ui/src/state/import.rs` 的导入源）再启用。
+
+开发运行直接 `cargo run -p photo-ui`（二进制 `target/debug/ftpt`；本机 target 目录可能被
+`~/.cargo/config.toml` 改到仓库外，用 `cargo metadata` 查）。

@@ -6,7 +6,7 @@
 //! - 复制 A→B 的逆 = 删除副本 B（仅当副本仍存在且源文件也仍在，否则跳过并报告）
 //!
 //! 全同步；错误处理复用 [`crate::ops::OpError`]（thiserror）。
-//! 日志仅存内存（重启失效可接受），由 Tauri 端 AppState 持有。
+//! 日志仅存内存（重启失效可接受），由 `photo-ui` 的 `AppState` 持有。
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};

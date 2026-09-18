@@ -74,8 +74,8 @@ fn init_into(dir: &PathBuf) -> WorkerGuard {
     //
     // **第三方噪声必须默认压制**——GPUI 直接跑在 wgpu 上，底下这层在 DEBUG 级是刷屏级的：
     // 实测 14 秒 **88,348 行 / 5.6 MB**（cosmic_text 字体枚举、wgpu_hal Vulkan loader
-    // 逐调用打印、naga 校验），照这个速率一天能写数 GB。Tauri 版没这个问题（WebView 挡在外面），
-    // 所以从它搬过来的过滤器必须补这一课。
+    // 逐调用打印、naga 校验），照这个速率一天能写数 GB。原 Tauri 版用 WebView，没这个问题；
+    // GPUI 直接跑在 wgpu 上，所以过滤器必须补这一课。
     // 需要查渲染/输入问题时按目标显式打开：PHOTO_LOG_LEVEL=debug,wgpu_hal=debug
     const NOISY: &str = "ort=warn,wgpu=warn,wgpu_core=warn,wgpu_hal=warn,wgpu_types=warn,\
 naga=warn,cosmic_text=warn,swash=warn,fontdb=warn,ash=warn,\

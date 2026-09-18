@@ -4,6 +4,9 @@
 
 已实施
 
+> crate 清单随演进更新：后加入 `photo-recognize`（识别管线）；前端由 `photo-tauri`
+> （Tauri v2 + Vue 3）换成 `photo-ui`（GPUI），前者已于 2026-09-18 删除。
+
 ## 背景
 
 photo_tool 最初是 2-crate workspace（`photo-tool-core` + `photo-tool-app`）。随着功能增长，core 内部出现 10 个模块平铺，其中 `domain ↔ exif/xmp` 存在跨模块依赖。按 Zed 的惯例（239 个 crate，一 crate 一关注点）重构的提议被提出。
@@ -15,9 +18,10 @@ photo_tool 最初是 2-crate workspace（`photo-tool-core` + `photo-tool-app`）
 ```
 crates/
 ├── photo-domain/      ← 类型叶子（Capture, ExifMetadata, XmpMetadata…）
-├── photo-engine/      ← 文件机械（scanner, exif 提取, xmp 读写, thumbnail…）
+├── photo-engine/      ← 文件机械（scanner, exif 提取, thumbnail, folder_db, ops, import…）
+├── photo-recognize/   ← 鸟类识别管线（YOLO → 分类 → 名录 → 眼锐度）
 ├── photo-config/      ← 配置（TOML 读写 + SQLite 持久化）
-└── photo-tauri/       ← Tauri v2 前端（Vue 3 + Rust 后端）
+└── photo-ui/          ← GPUI 前端（原 photo-tauri，2026-09-18 删除）
 ```
 
 依赖方向：`app → engine → domain`，`app → config`。

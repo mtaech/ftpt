@@ -1,5 +1,0 @@
-allowBuilds:
-  esbuild: false
-  vue-demi: false
-minimumReleaseAgeExclude:
-  - reka-ui@2.10.3

@@ -115,7 +115,7 @@ pub fn compute_scores(
 
 /// 批量技术质量评分（带直方图缓存覆盖）。
 ///
-/// `clip_override`：完整路径 → (高光剪切占比, 死黑剪切占比)，调用方（Tauri 层
+/// `clip_override`：完整路径 → (高光剪切占比, 死黑剪切占比)，调用方（`photo-ui`
 /// AppState.hist_cache）已算好的直方图命中项注入，免重复解码；未命中的路径现场
 /// 调 `histogram::compute_histogram_from_file`，解码失败该分量缺失（权重重归一化）。
 /// 眼锐度/置信度读 `dir/.pt/data.db` 的 recognition 表（rel 键）。返回与入参

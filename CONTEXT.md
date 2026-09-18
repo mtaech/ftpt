@@ -16,7 +16,7 @@
 - `None`（默认）：不堆叠，每文件一项（2026-09 起改为默认，旧配置显式存了 ByTime 的仍按其生效）
 
 堆叠卡片显示主格式缩略图 + ×N 徽标（点击循环切换激活成员，预览工具条「格式 n/m」），
-分组纯逻辑见 `photo-tauri/src/lib/stacks.ts`。
+分组纯逻辑见 `crates/photo-ui/src/model/stacks.rs`。
 
 - 示例：`DSC_0001.jpg` → 一个 Capture；`DSC_0001.NEF` → 另一个 Capture；ByFileName 模式下两者合并为一个堆叠项（默认显示 JPG）
 

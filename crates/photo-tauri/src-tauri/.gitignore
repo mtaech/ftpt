@@ -1,3 +1,0 @@
-# Tauri 构建产物与自动生成文件（tauri v2 惯例）
-/target/
-/gen/schemas

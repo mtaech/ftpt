@@ -12,11 +12,9 @@
 > | `CONTEXT.md` | 领域术语（Capture / 堆叠 / 画面 …） |
 > | `docs/adr/` | 架构决策 |
 > | **本文** | **界面与交互的可移植规格** |
-> | `docs/ui-interaction-design.md` | 当前 Vue 实现视角的同名文档（实现参考，非契约） |
 >
-> 基线：`crates/photo-tauri/`（`App.vue`、`keymap.ts`、`style.css`、`components/`、`stores/`、`lib/*.ts`）
-> 与 `crates/photo-tauri/src-tauri/src/lib.rs`（command / 事件 / `ptimg` 协议）。
-> 代码与本文冲突时以代码为准，并顺手改本文。
+> 基线：本手册成文时的参考实现是 Tauri v2 版（`crates/photo-tauri/`，**已于 2026-09-18 删除**）；
+> 当前实现是 GPUI 版 `crates/photo-ui/`。行为契约以本文为准，实现与本文冲突时改实现，或顺手改本文。
 
 ---
 
@@ -1265,14 +1263,12 @@ renderNameTemplate: 未知占位符原样保留；非法字符被清洗；空结
 
 ---
 
-## 附：快速核对（当前 Vue 实现）
+## 附：快速核对（当前 GPUI 实现）
 
 ```bash
-cd crates/photo-tauri
-npx vue-tsc -b --noEmit      # 前端类型检查（必须带 -b）
-npx vitest run               # filter/stacks/burst/nameTemplate 单测
-npm run tauri dev            # 真机逐项目检（网格/预览/对比/幻灯片/统计/弹窗/快捷键）
-npm run dev                  # 浏览器 mock 模式（无后端全 UI 可点）
+cargo test -p photo-ui       # model 纯逻辑（筛选/排序/堆叠/连拍/预览数学）+ 主题色彩单测
+cargo run -p photo-ui        # 真机逐项目检（网格/预览/对比/幻灯片/统计/弹窗/快捷键）
+XDG_CONFIG_HOME=/tmp/ptlease-config xvfb-run -a cargo run -p photo-ui --example lease_smoke  # 无头冒烟
 ```
 
 目检重点：窗口拖拽与八向缩放、`Esc` 优先级链、`markPaths` 在对比/幻灯片下的作用域、

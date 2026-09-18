@@ -25,7 +25,7 @@ pub enum ExifError {
 // ============================================================================
 // EXIF 后端抽象（2026-08 重构：kamadak-exif 移除，exiftool 为主后端）
 //
-// 统一接口：photo-tauri 启动时经 [`init_provider`] 注入后端（默认 exiftool，
+// 统一接口：前端（`photo-ui`）启动时经 [`init_provider`] 注入后端（默认 exiftool，
 // 找不到二进制时回退 rawlib）；调用方永远走 [`extract_exif`] 模块函数，
 // 不感知具体后端。对焦点等厂商私有字段由各后端自行解析（exiftool 输出
 // SubjectArea/AFPointPosition/AFAreaX*，rawlib 输出 FocusPixel/AFInfo blob）。
@@ -51,7 +51,7 @@ pub trait ExifProvider: Send + Sync {
     }
 }
 
-/// 全局 EXIF provider（photo-tauri 启动时设置；未设置时惰性取默认）
+/// 全局 EXIF provider（`photo-ui` 启动时设置；未设置时惰性取默认）
 static PROVIDER: OnceLock<Arc<dyn ExifProvider>> = OnceLock::new();
 
 /// 注入全局 provider（幂等：重复调用返回 Err 表示已被占用）
@@ -85,7 +85,7 @@ fn provider() -> &'static dyn ExifProvider {
         .as_ref()
 }
 
-/// 关闭全局 exiftool 长驻进程（photo-tauri 退出时调用；无 exiftool 时 no-op）
+/// 关闭全局 exiftool 长驻进程（`photo-ui` 退出时调用；无 exiftool 时 no-op）
 pub fn shutdown_provider() {
     if let Some(p) = PROVIDER.get() {
         if let Some(t) = p.as_ref().as_any().downcast_ref::<ExifToolProvider>() {
@@ -239,7 +239,7 @@ impl ExifToolProvider {
             }
         }
         // 开发/测试布局：从 CARGO_MANIFEST_DIR / cwd / exe 向上找仓库 local-lib/exiftool/
-        // （CARGO_TARGET_DIR 在仓库外时，只从 exe 向上找不到仓库根——cargo run/tauri dev 常见）
+        // （CARGO_TARGET_DIR 在仓库外时，只从 exe 向上找不到仓库根——cargo run -p photo-ui 常见）
         let mut starts: Vec<PathBuf> = Vec::new();
         if let Ok(m) = std::env::var("CARGO_MANIFEST_DIR") {
             starts.push(PathBuf::from(m));

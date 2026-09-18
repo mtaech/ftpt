@@ -366,7 +366,7 @@ impl FolderDb {
     ///
     /// 「人工来源」用现有字段表达（不加列/表）：status=confirmed + confidence=100
     /// （人工指定即权威结论，恒 100；模型置信恒 <100）+ recognized_at 刷新为当前时间；
-    /// 持久审计在 global_db 的 correction_log（old→new + 时间，photo-tauri 侧写入）。
+    /// 持久审计在 global_db 的 correction_log（old→new + 时间，`photo-ui` 侧写入）。
     /// 保留原 class_index/bbox/眼数据；清空 Top-5 候选（模型备选对人工结论无意义，
     /// 对齐 correct_bird 语义）。行不存在时插入一条全新 Confirmed 行（从未识别
     /// 直接人工指定，对齐 correct_bird「无预测记录直接人工指定」）。

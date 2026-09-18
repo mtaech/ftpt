@@ -2,10 +2,10 @@
 //!
 //! 与文件夹级 `folder_db.rs`（每目录 `.pt/data.db`）不同，本库聚合所有扫描过的
 //! 文件夹的鸟类识别结果，供统计视图（鸟种列表 / 单鸟种照片网格）做全库查询。
-//! 便携路径由调用方传入数据目录（photo-tauri 侧为 exe 同级 `data/`），
+//! 便携路径由调用方传入数据目录（`photo-ui` 侧为 exe 同级 `data/`），
 //! 打开失败不阻塞主流程（调用方降级为 None）。
 //!
-//! 同步策略（photo-tauri 侧接线，见 lib.rs）：
+//! 同步策略（`photo-ui` 侧接线，见 `crates/photo-ui/src/state/engine_ops.rs`）：
 //! - 扫描完成 → `replace_folder`（当前目录识别行全量替换，幂等；空目录即清空该文件夹行）
 //! - 单张识别完成 / 人工修正 → `upsert_rows`
 //! - 文件删除 / 移出 → `delete_rows`（或整文件夹 `delete_folder_rows`）

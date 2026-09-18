@@ -23,8 +23,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::RecognizeError;
 
-/// 名录搜索/纠正条目（与 animal_info 行一一对应；跨边界 serde + specta 导出，
-/// 供 photo-tauri `search_catalog` command 返回——前端 SpeciesCorrectDialog 数据源）。
+/// 名录搜索/纠正条目（与 animal_info 行一一对应；serde + specta 门控派生，
+/// 原由 Tauri command 返回，现由 `photo-ui` 的鸟种纠正弹窗直接调用）。
 /// 字段与 domain::BirdMatch 同构，独立命名承载「名录检索结果」语义。
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

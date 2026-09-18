@@ -1,6 +1,6 @@
 # Photo Tool
 
-一款基于 **Tauri v2** 的桌面照片管理和筛选（Culling）应用。
+一款基于 **GPUI**（[gpui-kit](https://gpui-kit.com) 0.6.1）的桌面照片管理和筛选（Culling）应用。
 
 ![截图](screenshot.png)
 
@@ -26,8 +26,7 @@
 ### 前置条件
 
 - Rust **nightly** 频道（edition 2024 需要）
-- Node.js + pnpm（前端构建）
-- Linux：需安装 `libraw`（`libraw-dev` 或同目录 `local-lib/`）
+- Linux：需安装 `libraw`（`libraw-dev` 或同目录 `local-lib/`）；运行 GPUI 需要 X11/Wayland（无头环境用 `xvfb-run`）
 - Windows/Linux：需 ExifTool 运行时（`local-lib/exiftool/`，见 `docs/exiftool-update.md`）
 
 ### 命令
@@ -36,38 +35,29 @@
 # Rust 全量构建
 cargo build
 
-# Tauri 后端检查
-cargo check -p photo-tauri
+# 前端检查 / 单测（GPUI 版，crates/photo-ui）
+cargo check -p photo-ui
+cargo test -p photo-ui
 
 # 核心测试
 cargo test -p photo-engine -p photo-recognize -p photo-domain -p photo-config
 
-# 开发运行（tauri dev，vite 1420 端口 + WebView2）
-cd crates/photo-tauri && npm run tauri dev
+# 开发运行（GPUI 桌面窗口）
+cargo run -p photo-ui
 
-# 浏览器 mock 模式（无 Tauri 后端）
-cd crates/photo-tauri && npm run dev  # 浏览器开 localhost:1420
-
-# 前端类型检查（必须带 -b）
-cd crates/photo-tauri && npx vue-tsc -b --noEmit
-
-# 前端单测
-cd crates/photo-tauri && npx vitest run
-
-# 前端生产构建
-cd crates/photo-tauri && npm run build
+# 无头冒烟（无需真实显示器）
+XDG_CONFIG_HOME=/tmp/ptlease-config xvfb-run -a cargo run -p photo-ui --example lease_smoke
 ```
 
 ## 技术栈
 
 | 层 | 技术 |
 |---|---|
-| 前端 | [Tauri v2](https://tauri.app/) + Vue 3 + Pinia + Tailwind v4 + shadcn-vue |
+| 前端 | [GPUI](https://gpui.rs/)（经 [gpui-kit](https://gpui-kit.com) 0.6.1；`crates/photo-ui`，Dock 三栏 + Material You 主题） |
 | 后端 | Rust（`photo-engine` / `photo-recognize` / `photo-config` / `photo-domain`） |
-| 类型共享 | specta + tauri-specta（Rust serde 类型 → TS 绑定） |
 | RAW 解码 | [rawlib](https://crates.io/crates/rawlib)（封装 LibRaw） |
 | EXIF | exiftool 主后端 + rawlib 回退后端 |
-| 图片协议 | `ptimg://` 自定义协议流式 serve（缩略图/预览/全尺寸） |
+| 图片管线 | 进程内解码：缩略图 / 2560 母版 / 1:1 全分辨率（`ImageManager`，无 IPC） |
 | 缩略图 | 磁盘缓存 + Lanczos3 缩放 |
 | 配置 | TOML + 便携模式优先 |
 | 许可 | MIT |

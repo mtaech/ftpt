@@ -23,18 +23,20 @@
     (默认) = "<exe>" --import "%1"
 ```
 
-`%1` 由系统替换为设备根路径。应用侧的 `--import` 解析与单实例转发见
-`crates/photo-tauri/src-tauri/src/lib.rs`（与 Linux 共用同一套逻辑）。
+`%1` 由系统替换为设备根路径。⚠️ **GPUI 版尚未实现 `--import` 解析与单实例转发**（原 Tauri 版在
+`crates/photo-tauri/src-tauri/src/lib.rs`，该 crate 已于 2026-09-18 删除）：注册后「自动播放」菜单项
+会在，但点击只会普通启动应用、不会自动打开导入对话框；已在运行时还会开出第二个实例。
+机制与 Linux 侧同源，见 `scripts/linux/README.md` 文末「现状」。
 
-## 开发环境（`pnpm run tauri dev`）
+## 注册 / 测试（开发环境）
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\windows\register-autoplay.ps1 `
     -ExePath .\target\debug\ftpt.exe
 ```
 
-注册后插入卡即可测试；应用已在运行时会转发到已有窗口并置顶（Windows 侧靠
-`AllowSetForegroundWindow(ASFW_ANY)` 解除前台锁）。
+注册后插入卡即可测试。原 Tauri 版靠 `AllowSetForegroundWindow(ASFW_ANY)` 把重复启动转发到已有窗口并置顶；
+GPUI 版尚无单实例通道（见上）——重复启动会开新窗口。
 
 注销：
 
@@ -44,8 +46,9 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\unregister-autoplay.ps1
 
 ## 打包安装
 
-NSIS 安装包已通过 `src-tauri/windows/installer-hooks.nsh` 自动注册/注销
-（Tauri `bundle.windows.nsis.installerHooks`），安装后无需手动执行脚本。
+GPUI 版没有安装包构建流程：发布产物是 `scripts/package.ps1` 打出的便携 zip（解压即用），
+自动播放注册需要手动跑 `register-autoplay.ps1`（注销用 `unregister-autoplay.ps1`）。
+原 Tauri 版的 NSIS installer-hooks 已随 `crates/photo-tauri` 一起删除。
 
 ## 注意
 

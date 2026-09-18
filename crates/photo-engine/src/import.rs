@@ -6,7 +6,7 @@
 //!   3. `plan_import`            —— 按 YYYY-MM-DD 分组 + 目标去重（同名同大小跳过）
 //!   4. `execute_import`         —— 逐文件委托 ops 复制/移动，进度回调
 //!
-//! 驱动器检测说明：批次约束只允许 photo-tauri 新增 `windows` crate，本模块
+//! 驱动器检测说明：本模块不引入 `windows` crate，
 //! Windows 用等价的 kernel32 原生 FFI（GetLogicalDrives / GetDriveTypeW /
 //! GetVolumeInformationW）；Linux 零依赖解析 /proc/mounts + 查
 //! /sys/class/block/<dev>/removable；其余平台返回空（前端退化手动选源）。
