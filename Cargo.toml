@@ -6,7 +6,7 @@ members = [
     "crates/photo-config",
     "crates/photo-recognize",
     "crates/rawlib",
-    "crates/photo-tauri/src-tauri",
+    "crates/photo-ui",
 ]
 
 [workspace.package]
@@ -65,4 +65,19 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.rusqlite]
+opt-level = 3
+
+# 预览母版实测：39MP JPEG 生成 2560 母版，debug 7.45s vs release 0.55s（13.5x）。
+# 瓶颈在像素循环所在的 crate——photo-engine 自己的缓冲处理，以及底层 JPEG 解码器。
+# 这两个是"点开一张图就卡 7 秒"的直接原因，dev 下必须开优化。
+[profile.dev.package.photo-engine]
+opt-level = 3
+
+[profile.dev.package.jpeg-decoder]
+opt-level = 3
+
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+
+[profile.dev.package.zune-core]
 opt-level = 3
