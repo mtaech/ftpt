@@ -12,12 +12,16 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use gpui_kit::{Image, ImageFormat};
-use photo_domain::{CaptureMeta, ImageFormat as DomainFormat, SourceFile};
+use photo_domain::{AdjustParams, CaptureMeta, ImageFormat as DomainFormat, SourceFile};
+use photo_engine::adjustments::{ToneParams, apply_tone8};
 use photo_engine::thumbnail::ThumbnailCache;
 
 pub const THUMB_SIZE_GRID: u32 = 440;
 pub const THUMB_SIZE_FILMSTRIP: u32 = 180;
 pub const MASTER_SIZE: u32 = 2560;
+
+/// 调整预览重编码的 JPEG 质量：母版本身已是 JPEG，二次编码留足质量余量（ADR 0007 §预览）。
+const ADJUST_JPEG_QUALITY: u8 = 90;
 
 #[derive(Clone)]
 pub struct ImageManager {
@@ -25,6 +29,9 @@ pub struct ImageManager {
     master_cache: Arc<RwLock<HashMap<(String, u64), Arc<Image>>>>,
     /// 1:1 全分辨率图源缓存（只留 1 张）
     full_cache: Arc<RwLock<HashMap<(String, u64), Arc<Image>>>>,
+    /// 调整预览用的母版 8-bit 像素缓存（键 = 路径 + 文件大小，只留最近 2 张）。
+    /// 拖动滑杆时只需"重算色调 + 重编码"，不必重新解码母版——这是实时预览的前提。
+    base_cache: Arc<RwLock<HashMap<(String, u64), Arc<image::RgbImage>>>>,
 }
 
 /// 从 CaptureMeta 构造引擎侧 SourceFile。
@@ -47,6 +54,7 @@ impl ImageManager {
             thumbnail_cache,
             master_cache: Arc::new(RwLock::new(HashMap::new())),
             full_cache: Arc::new(RwLock::new(HashMap::new())),
+            base_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -54,6 +62,7 @@ impl ImageManager {
         self.thumbnail_cache = cache_dir.map(ThumbnailCache::new);
         self.master_cache.write().clear();
         self.full_cache.write().clear();
+        self.base_cache.write().clear();
     }
 
     pub fn thumbnail_cache(&self) -> Option<&ThumbnailCache> {
@@ -198,6 +207,72 @@ impl ImageManager {
             started.elapsed(),
             full_bytes / 1024
         );
+        Ok(img)
+    }
+
+    /// 渲染「带调整参数」的预览母版（ADR 0007）：母版像素 → 色调变换 → JPEG 字节 → Image。
+    ///
+    /// - 参数中性 → 直接返回未调整母版（短路到旧路径，零回归）
+    /// - 像素源是**已裁到 2560 的母版**（8-bit 语义，RAW/JPEG 同口径）：拖动滑杆只重算色调
+    ///   + 重编码，不重新解码原图（RAW half_size 16-bit 解码 ≤2s，做不了实时交互）
+    /// - 主线程零像素工作：调用方负责放进后台 executor
+    pub fn render_adjusted_master(
+        &self,
+        source: &SourceFile,
+        params: &AdjustParams,
+    ) -> Result<Arc<Image>, String> {
+        if params.is_neutral() {
+            return self.load_master_image(source, None);
+        }
+        let base = self.master_rgb8(source)?;
+        let toned = apply_tone8(&base, &ToneParams::from(params));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut encoder =
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, ADJUST_JPEG_QUALITY);
+        encoder
+            .encode(
+                toned.as_raw(),
+                toned.width(),
+                toned.height(),
+                image::ExtendedColorType::Rgb8,
+            )
+            .map_err(|e| format!("调整预览编码失败: {e}"))?;
+        Ok(Arc::new(Image::from_bytes(
+            ImageFormat::Jpeg,
+            buf.into_inner(),
+        )))
+    }
+
+    /// 取母版的 8-bit RGB 像素（带内存缓存）：同一张图连续拖滑杆只解码一次母版。
+    fn master_rgb8(&self, source: &SourceFile) -> Result<Arc<image::RgbImage>, String> {
+        let file_size = std::fs::metadata(&source.path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let cache_key = (source.path.to_string_lossy().to_string(), file_size);
+
+        if let Some(img) = self.base_cache.read().get(&cache_key).cloned() {
+            return Ok(img);
+        }
+
+        let cache = self
+            .thumbnail_cache
+            .as_ref()
+            .ok_or_else(|| "缓存未初始化".to_string())?;
+        let bytes = cache
+            .get_or_generate(source, MASTER_SIZE, None)
+            .map_err(|e| e.to_string())?;
+        let decoded = image::load_from_memory(&bytes)
+            .map_err(|e| format!("母版解码失败: {e}"))?
+            .to_rgb8();
+        let img = Arc::new(decoded);
+        {
+            let mut map = self.base_cache.write();
+            // 2560 母版 RGB 约 13MB/张；两张足够覆盖"上一张来回切"。
+            if map.len() >= 2 {
+                map.clear();
+            }
+            map.insert(cache_key, img.clone());
+        }
         Ok(img)
     }
 }

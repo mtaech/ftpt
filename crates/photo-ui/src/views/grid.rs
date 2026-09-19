@@ -13,6 +13,7 @@ use gpui_kit::component::{
     rating::Rating as ComponentRating,
     v_flex,
 };
+use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::{Context, IntoElement, MouseButton, Window, div, img, prelude::*, px, uniform_list};
 use photo_domain::{ColorLabel, Flag, Rating};
 
@@ -44,44 +45,55 @@ pub fn render_photo_grid(
     let total_groups = state.stack_groups.len();
     let row_count = (total_groups + cols - 1) / cols;
 
+    // 滚动条：GPUI 的溢出滚动容器只负责滚、不负责画——必须把 uniform_list 绑到
+    // AppState 的句柄上（跨帧保留滚动位置），再把 Scrollbar 叠在同一个视口里。
+    let scroll_handle = state.grid_scroll.clone();
+
     div()
         .w_full()
         .h_full()
         .bg(cx.theme().background)
         .p(px(8.))
         .child(
-            uniform_list(
-                "grid-rows",
-                row_count,
-                cx.processor(move |state, range, _window, cx| {
-                    let mut rows = Vec::new();
-                    for row_idx in range {
-                        let start: usize = (row_idx as usize) * cols;
-                        let end: usize = (start + cols).min(total_groups);
-                        let groups_in_row = &state.stack_groups[start..end];
+            div()
+                .relative()
+                .size_full()
+                .child(
+                    uniform_list(
+                        "grid-rows",
+                        row_count,
+                        cx.processor(move |state, range, _window, cx| {
+                            let mut rows = Vec::new();
+                            for row_idx in range {
+                                let start: usize = (row_idx as usize) * cols;
+                                let end: usize = (start + cols).min(total_groups);
+                                let groups_in_row = &state.stack_groups[start..end];
 
-                        rows.push(
-                            div().w_full().pb(px(8.)).child(
-                                h_flex()
-                                    .w_full()
-                                    .gap(px(8.))
-                                    .children(groups_in_row.iter().enumerate().map(
-                                        |(c_idx, group)| {
-                                            let global_group_idx = start + c_idx;
-                                            render_grid_cell(state, group, global_group_idx, cx)
-                                        },
-                                    ))
-                                    .when(groups_in_row.len() < cols, |this| {
-                                        let filler_count = cols - groups_in_row.len();
-                                        this.children((0..filler_count).map(|_| div().flex_1()))
-                                    }),
-                            ),
-                        );
-                    }
-                    rows
-                }),
-            )
-            .h_full(),
+                                rows.push(
+                                    div().w_full().pb(px(8.)).child(
+                                        h_flex()
+                                            .w_full()
+                                            .gap(px(8.))
+                                            .children(groups_in_row.iter().enumerate().map(
+                                                |(c_idx, group)| {
+                                                    let global_group_idx = start + c_idx;
+                                                    render_grid_cell(state, group, global_group_idx, cx)
+                                                },
+                                            ))
+                                            .when(groups_in_row.len() < cols, |this| {
+                                                let filler_count = cols - groups_in_row.len();
+                                                this.children((0..filler_count).map(|_| div().flex_1()))
+                                            }),
+                                    ),
+                                );
+                            }
+                            rows
+                        }),
+                    )
+                    .h_full()
+                    .track_scroll(&scroll_handle),
+                )
+                .child(Scrollbar::vertical(&scroll_handle)),
         )
         .into_any_element()
 }

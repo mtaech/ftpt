@@ -45,15 +45,26 @@ async fn pump(async_cx: &mut gpui_kit::AsyncApp, ms: u64) {
 }
 
 fn main() {
+    // 无头冒烟固定走 Xvfb 的 X11 后端：Wayland 会话下窗口会落到真实桌面，渲染帧不可控
+    photo_ui::app::prepare_headless_smoke();
     let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
     app.run(|cx| {
         gpui_kit::component::init(cx);
-        photo_ui::theme::apply(None, false, None, cx);
+        photo_ui::theme::apply(None, false, None, None, cx);
         AppState::register_keybindings(cx);
 
         // 空目录：扫描立即结束，不会碰到真实照片
         let dir = std::env::temp_dir().join("pt_lease_smoke");
         let _ = std::fs::create_dir_all(&dir);
+
+        // 「左停靠区宽度来自配置」的期望值直接读配置文件，不硬编码默认 200——
+        // 开发机上左栏被拖宽过（配置里就不是 200）时，硬编码会让冒烟假失败。
+        // 配置目录现在认 XDG_CONFIG_HOME / PHOTO_CONFIG_DIR，所以隔离跑法拿到的是默认值。
+        let expected_left = photo_config::determine_config_path()
+            .ok()
+            .and_then(|path| photo_config::load_config(&path).ok())
+            .map(|cfg| cfg.left_panel_width.clamp(200, 480) as f32)
+            .unwrap_or(200.0);
 
         let window_options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
@@ -139,16 +150,16 @@ fn main() {
                     }) != right
                 );
 
-                // 左停靠区宽度来自配置（默认 200），拖宽走同一条 set_dock_size 通路
+                // 左停靠区宽度来自配置（期望值见 main 里的 expected_left），拖宽走同一条 set_dock_size 通路
                 check!(
-                    "左停靠区宽度来自配置",
+                    format!("左停靠区宽度来自配置 ({}px)", expected_left),
                     async_cx.update(|cx| {
                         task_state
                             .read(cx)
                             .dock_area
                             .as_ref()
                             .and_then(|area| area.read(cx).dock_size(DockPlacement::Left))
-                            == Some(px(200.))
+                            == Some(px(expected_left))
                     })
                 );
 

@@ -94,23 +94,42 @@ fn render_status_right(state: &AppState, cx: &mut Context<AppState>) -> impl Int
             .into_any_element();
     }
 
-    // 优先级 2: 识别中
+    // 优先级 2: 识别中（进度条 + n/m + 当前文件名 + 取消）
     if state.is_recognizing {
+        /// 细进度条宽度（状态栏只有 24px 高，用 4px 高的小条）
+        const BAR_W: f32 = 72.0;
         let cancel = state.recognize_cancel.clone();
+        let total = state.recognize_total.max(1);
+        let done = state.recognize_done.min(total);
+        let ratio = done as f32 / total as f32;
         return h_flex()
             .items_center()
-            .gap_1()
+            .gap_2()
             .text_color(cx.theme().warning)
             .child(Icon::new(IconName::Asterisk).size(px(12.)))
-            .child(format!(
-                "识别中: {}/{} {}",
-                state.recognize_done, state.recognize_total, state.recognize_current
-            ))
+            .child(format!("识别中 {done}/{total}"))
+            .child(
+                div()
+                    .w(px(BAR_W))
+                    .h(px(4.))
+                    .rounded_full()
+                    .bg(cx.theme().muted)
+                    .overflow_hidden()
+                    .child(div().h_full().rounded_full().bg(cx.theme().warning).w(px(BAR_W * ratio))),
+            )
+            .child(
+                div()
+                    .max_w(px(180.))
+                    .truncate()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(state.recognize_current.clone()),
+            )
             .child(
                 Button::new("cancel-recognize")
                     .ghost()
                     .xsmall()
                     .icon(IconName::Close)
+                    .tooltip("取消识别")
                     .on_click(move |_, _window, _cx| {
                         cancel.store(true, Ordering::Relaxed);
                     }),

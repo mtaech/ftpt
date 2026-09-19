@@ -13,7 +13,6 @@ actions!(
         PrevMember,
         NextMember,
         ToggleView,
-        Compare,
         Slideshow,
         TogglePlay,
         Stats,

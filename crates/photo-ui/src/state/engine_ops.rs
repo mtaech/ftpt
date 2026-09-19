@@ -10,10 +10,11 @@ use std::time::Duration;
 
 use gpui_kit::{App, Entity};
 use photo_domain::{
-    CaptureMeta, ColorLabel, FilterCriteria, Flag, ImageFormat, Rating, SourceFile,
+    AdjustParams, CaptureMeta, ColorLabel, FilterCriteria, Flag, ImageFormat, Rating, SourceFile,
 };
 
 use crate::image::{ImageManager, THUMB_SIZE_GRID, source_file_of};
+use crate::model::adjust::rel_path_of;
 use photo_engine::folder_db::{ExifCacheRow, FileEntry, FolderDb};
 use photo_engine::scanner;
 
@@ -41,6 +42,12 @@ pub fn defer_entity_action(
 /// 启动目录扫描任务
 pub fn start_scan(state_entity: Entity<AppState>, dir: PathBuf, recursive: bool, cx: &mut App) {
     let (generation, cancel_token) = state_entity.update(cx, |state, cx| {
+        // 换目录前先把上一张未落盘的调整参数写回：flush 用的是旧的 current_dir + folder_db，
+        // 一旦 current_dir 先改了，相对路径就会算到新目录上（写错库或干脆写不进去）。
+        state.flush_adjustments();
+        state.adjust_path = None;
+        state.adjust = AdjustParams::default();
+        state.adjust_preview_toned = false;
         state.scan_generation = state.scan_generation.wrapping_add(1);
         state.scan_cancel.store(true, Ordering::Relaxed);
         let new_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -266,7 +273,10 @@ pub fn load_preview_image(
                 match result {
                     Ok(img) => {
                         // 只有「当前请求的仍是这张」才替换显示；否则留在内存缓存里（回头再点即秒开）
-                        if state.preview_request.as_deref() == Some(path.as_str()) {
+                        // 且这张已有烘焙好的调整预览时不能用未调整母版覆盖（两者可能并发完成）
+                        let toned_active = state.adjust_preview_toned
+                            && state.adjust_path.as_deref() == Some(path.as_str());
+                        if state.preview_request.as_deref() == Some(path.as_str()) && !toned_active {
                             state.preview_image = Some((path.clone(), img));
                         }
                     }
@@ -307,6 +317,83 @@ pub fn load_preview_full(
                         }
                     }
                     Err(e) => tracing::warn!("1:1 全分辨率加载失败 {path}: {e}"),
+                }
+                cx.notify();
+            });
+        });
+    })
+    .detach();
+}
+
+// ── 调整参数（ADR 0007）：读取 / 落盘 / 预览渲染 ──
+
+/// 读取某张图持久化的调整参数。
+///
+/// 无 folder_db、路径不在当前目录下、无记录三种情况都返回中性参数
+/// （与「从未识别」同构：无行 = 无调整）。
+pub fn load_adjustments(state: &AppState, path: &str) -> AdjustParams {
+    let (Some(db), Some(dir)) = (&state.folder_db, &state.current_dir) else {
+        return AdjustParams::default();
+    };
+    let Some(rel) = rel_path_of(dir, Path::new(path)) else {
+        return AdjustParams::default();
+    };
+    match db.get_adjustments(&rel) {
+        Ok(Some(params)) => params,
+        Ok(None) => AdjustParams::default(),
+        Err(e) => {
+            tracing::warn!("读取调整参数失败 {rel}: {e}");
+            AdjustParams::default()
+        }
+    }
+}
+
+/// 写入某张图的调整参数。全零参数也写（显式记录「已复位」，读取侧与无行同义）。
+pub fn persist_adjustments(state: &AppState, path: &str, params: &AdjustParams) {
+    let (Some(db), Some(dir)) = (&state.folder_db, &state.current_dir) else {
+        return;
+    };
+    let Some(rel) = rel_path_of(dir, Path::new(path)) else {
+        return;
+    };
+    if let Err(e) = db.put_adjustments(&rel, params) {
+        tracing::warn!("保存调整参数失败 {rel}: {e}");
+    }
+}
+
+/// 后台渲染「带调整参数」的预览母版，完成后回主线程替换 `preview_image`。
+///
+/// 拖动滑杆会连续发起多次渲染，只有 `seq` 仍是最新的那次允许写回（旧帧丢弃，
+/// 画面不回跳）；切图后 `adjust_path` 变了，过期结果同样被丢弃。
+/// 与 `load_preview_image` 同口径——manager 由调用方传入（渲染期实体已被可变借用）。
+pub fn render_adjust_preview(
+    state_entity: Entity<AppState>,
+    manager: ImageManager,
+    path: String,
+    source: SourceFile,
+    params: AdjustParams,
+    seq: u64,
+    cx: &mut App,
+) {
+    cx.spawn(async move |async_cx| {
+        let result = async_cx
+            .background_executor()
+            .spawn(async move { manager.render_adjusted_master(&source, &params) })
+            .await;
+
+        let _ = async_cx.update(|cx| {
+            let _ = state_entity.update(cx, |state, cx| {
+                if state.adjust_render_seq != seq
+                    || state.adjust_path.as_deref() != Some(path.as_str())
+                {
+                    return;
+                }
+                match result {
+                    Ok(img) => {
+                        state.preview_image = Some((path, img));
+                        state.adjust_preview_toned = !params.is_neutral();
+                    }
+                    Err(e) => tracing::warn!("调整预览渲染失败: {e}"),
                 }
                 cx.notify();
             });
@@ -615,13 +702,63 @@ pub fn delete_selected_to_trash(state_entity: Entity<AppState>, cx: &mut App) {
     delete_paths(state_entity, paths, cx);
 }
 
+/// 后台识别线程回传给前台的进度事件。
+///
+/// 识别是同步 CPU 推理，只能放后台线程跑；但结果必须回到前台才能写 `AppState` 与
+/// `folder_db`（SQLite 连接随实体走），所以用 std channel 传事件、前台按节拍收。
+enum RecognizeOutcome {
+    /// 单张完成（Err 表示这张系统性失败；业务失败体现在 Recognition.status 里）
+    Done {
+        idx: usize,
+        path: PathBuf,
+        filename: String,
+        result: Result<photo_domain::Recognition, photo_recognize::RecognizeError>,
+    },
+    /// 模型/名录库不可用：整批中止
+    Fatal(String),
+    /// 后台 worker 退出（跑完或被取消）——前台据此收尾并停掉轮询
+    Finished,
+}
+
+/// 单张识别结果落内存 + 落 folder_db（**只在前台线程调用**）。
+fn apply_recognition(
+    state: &mut AppState,
+    idx: usize,
+    path: &Path,
+    result: &Result<photo_domain::Recognition, photo_recognize::RecognizeError>,
+) {
+    let Ok(recognition) = result else {
+        return;
+    };
+    if let Some(meta) = state.items.get_mut(idx) {
+        meta.enrich_with_recognition(recognition);
+    }
+    // 识别结果写回文件夹级 data.db（连接不能跨线程，所以在前台写）
+    if let (Some(db), Some(dir)) = (&state.folder_db, &state.current_dir) {
+        if let Ok(rel) = path.strip_prefix(dir) {
+            let rel_str = rel.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+            let _ = db.upsert_recognition(&rel_str, recognition);
+        }
+    }
+}
+
 /// 启动鸟类识别管线（§5.6）
+///
+/// **推理必须留在后台线程**：`Recognizer::recognize` 是 CPU 密集的同步调用（单张
+/// 几百 ms）。此前它直接写在 `cx.spawn` 的循环里，而该循环没有任何 `.await`——GPUI 的
+/// 前台执行器（渲染 + 事件循环）被整批识别占住：状态栏的「识别中 n/m」要等全部跑完
+/// 才闪一下（用户报的「全部识别没有进度」），「取消识别」也点不动。
+/// 现在与缩略图管线同构：后台 worker 推理 → channel 回传 → 前台每 TICK_MS 收一次结果，
+/// 更新 items / folder_db / 进度字段并 `cx.notify()`，所以进度条真的会走。
 pub fn start_recognition(
     state_entity: Entity<AppState>,
     only_unrecognized: bool,
     force_all: bool,
     cx: &mut App,
 ) {
+    /// 前台收结果的节拍：状态栏进度条按这个频率刷新（与缩略图管线同量级）
+    const TICK_MS: u64 = 250;
+
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_flag = cancel.clone();
 
@@ -632,6 +769,8 @@ pub fn start_recognition(
         state.is_recognizing = true;
         state.recognize_cancel = cancel.clone();
         state.recognize_done = 0;
+        // 进度条上别残留上一批的文件名
+        state.recognize_current.clear();
 
         let targets: Vec<usize> = if force_all {
             (0..state.items.len()).collect()
@@ -681,81 +820,141 @@ pub fn start_recognition(
     let models_dir = data_root.join("models");
     let catalog_db = data_root.join("data/bird_catalog.db");
 
-    cx.spawn(async move |async_cx| {
-        let recognizer = photo_recognize::Recognizer::new(&models_dir, &catalog_db);
-        let Ok(mut recognizer) = recognizer else {
-            let _ = async_cx.update(|cx| {
+    // 后台 worker -> 前台的结果队列（前台 try_recv 非阻塞，节拍到了就收）
+    let (tx, rx) = std::sync::mpsc::channel::<RecognizeOutcome>();
+
+    cx.spawn(async move |async_cx: &mut gpui_kit::AsyncApp| {
+        // ── 1. 后台线程：模型加载 + 逐张推理（CPU 密集，绝不放前台执行器） ──
+        async_cx
+            .background_executor()
+            .spawn(async move {
+                let recognizer = photo_recognize::Recognizer::new(&models_dir, &catalog_db);
+                let mut recognizer = match recognizer {
+                    Ok(recognizer) => recognizer,
+                    Err(e) => {
+                        tracing::warn!("初始化识别模型失败: {e}");
+                        let _ = tx.send(RecognizeOutcome::Fatal("初始化识别模型失败".to_string()));
+                        let _ = tx.send(RecognizeOutcome::Finished);
+                        return;
+                    }
+                };
+
+                for (idx, path) in items_to_recognize {
+                    if cancel_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+
+                    let format = photo_domain::ImageFormat::from_extension(
+                        path.extension()
+                            .unwrap_or_default()
+                            .to_str()
+                            .unwrap_or_default(),
+                    )
+                    .unwrap_or(photo_domain::ImageFormat::Jpeg);
+                    let capture = photo_domain::Capture {
+                        base_name: path
+                            .file_stem()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string(),
+                        source_files: vec![photo_domain::SourceFile {
+                            path: path.clone(),
+                            format,
+                            file_size: None,
+                        }],
+                        primary_index: 0,
+                    };
+                    let result = recognizer.recognize(&capture, None, None);
+                    let filename = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+
+                    // 前台已经走了（实体回收）→ 直接收工
+                    if tx
+                        .send(RecognizeOutcome::Done {
+                            idx,
+                            path,
+                            filename,
+                            result,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+
+                // 跑完/被取消都要送结束哨兵，否则前台轮询等不到收尾条件
+                let _ = tx.send(RecognizeOutcome::Finished);
+            })
+            .detach();
+
+        // ── 2. 前台：按节拍收结果、更新进度并重绘（状态栏「识别中 n/m」靠这里刷新） ──
+        loop {
+            async_cx
+                .background_executor()
+                .timer(Duration::from_millis(TICK_MS))
+                .await;
+
+            let keep_running = async_cx.update(|cx| {
                 state_entity.update(cx, |state, cx| {
-                    state.is_recognizing = false;
-                    state.set_status_message("初始化识别模型失败");
-                    cx.notify();
-                });
-            });
-            return;
-        };
+                    use RecognizeOutcome as Out;
 
-        for (idx, path) in items_to_recognize {
-            if cancel_flag.load(Ordering::Relaxed) {
-                break;
-            }
+                    let mut applied = 0usize;
+                    let mut finished = false;
+                    let mut fatal = None;
 
-            let format = photo_domain::ImageFormat::from_extension(
-                path.extension()
-                    .unwrap_or_default()
-                    .to_str()
-                    .unwrap_or_default(),
-            )
-            .unwrap_or(photo_domain::ImageFormat::Jpeg);
-            let capture = photo_domain::Capture {
-                base_name: path
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string(),
-                source_files: vec![photo_domain::SourceFile {
-                    path: path.clone(),
-                    format,
-                    file_size: None,
-                }],
-                primary_index: 0,
-            };
-
-            let result = recognizer.recognize(&capture, None, None);
-            let filename = path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-
-            let _ = async_cx.update(|cx| {
-                state_entity.update(cx, |state, cx| {
-                    state.recognize_done += 1;
-                    state.recognize_current = filename;
-
-                    if let Ok(rec) = result {
-                        if let Some(meta) = state.items.get_mut(idx) {
-                            meta.enrich_with_recognition(&rec);
-                        }
-                        if let (Some(db), Some(dir)) = (&state.folder_db, &state.current_dir) {
-                            if let Ok(rel) = path.strip_prefix(dir) {
-                                let rel_str = rel.to_string_lossy().replace('\\', "/");
-                                let _ = db.upsert_recognition(&rel_str, &rec);
+                    while let Ok(outcome) = rx.try_recv() {
+                        match outcome {
+                            Out::Done {
+                                idx,
+                                path,
+                                filename,
+                                result,
+                            } => {
+                                apply_recognition(state, idx, &path, &result);
+                                state.recognize_done += 1;
+                                state.recognize_current = filename;
+                                applied += 1;
                             }
+                            Out::Fatal(msg) => fatal = Some(msg),
+                            Out::Finished => finished = true,
                         }
                     }
-                    cx.notify();
-                });
-            });
-        }
 
-        let _ = async_cx.update(|cx| {
-            state_entity.update(cx, |state, cx| {
-                state.is_recognizing = false;
-                state.recompute_pipeline();
-                state.set_status_message("识别已完成");
-                cx.notify();
+                    if let Some(msg) = fatal {
+                        state.is_recognizing = false;
+                        state.set_status_message(msg);
+                        cx.notify();
+                        return false;
+                    }
+
+                    // 跑完、被取消（状态栏 ✕ 置的 cancel 标志让 worker 提前退出）都走这里收尾
+                    if finished || !state.is_recognizing {
+                        let (done, total) = (state.recognize_done, state.recognize_total);
+                        state.is_recognizing = false;
+                        state.recompute_pipeline();
+                        state.set_status_message(if done < total {
+                            format!("识别已取消：完成 {done}/{total}")
+                        } else {
+                            format!("识别完成：{done} 张")
+                        });
+                        cx.notify();
+                        return false;
+                    }
+
+                    if applied > 0 {
+                        cx.notify();
+                    }
+                    true
+                })
             });
-        });
+
+            if !keep_running {
+                break;
+            }
+        }
     })
     .detach();
 }
@@ -811,9 +1010,23 @@ pub fn copy_image_to_clipboard(
     .detach();
 }
 
+/// 常驻的剪贴板持有者。
+///
+/// **X11 的剪贴板内容由进程持有**：`arboard::Clipboard` 一 drop，选择所有权就没了
+/// （那份数据是应答 X 请求时才提供的），于是「复制」会静默变成什么都没复制。
+/// 所以这里把实例留在静态里让它的服务线程活到进程退出——与多数 X11 应用的行为一致。
+/// Wayland 的 data-control 由合成器接管，不受影响（但同一个静态复用即可）。
+static CLIPBOARD_OWNER: std::sync::OnceLock<std::sync::Mutex<Option<arboard::Clipboard>>> =
+    std::sync::OnceLock::new();
+
 /// 把 RGBA8 像素写进系统剪贴板（独立成函数，便于单测打桩 / 将来换后端）。
 fn write_image_to_system_clipboard(width: u32, height: u32, rgba: Vec<u8>) -> Result<(), String> {
-    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    let slot = CLIPBOARD_OWNER.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = slot.lock().map_err(|_| "剪贴板状态锁失效".to_string())?;
+    if guard.is_none() {
+        *guard = Some(arboard::Clipboard::new().map_err(|e| e.to_string())?);
+    }
+    let clipboard = guard.as_mut().ok_or_else(|| "剪贴板初始化失败".to_string())?;
     clipboard
         .set_image(arboard::ImageData {
             width: width as usize,

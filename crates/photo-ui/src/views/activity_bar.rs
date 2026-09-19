@@ -1,13 +1,13 @@
+use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, Selectable as _, Sizable as _,
+    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     v_flex,
 };
 use gpui_kit::{Context, IntoElement, Window, div, prelude::*, px};
 
 use crate::actions::{
-    OpenDirectory, RecognizeSelected, ToggleLeftPanel, ToggleRightPanel, ToggleThemeMode,
-    ToggleView,
+    OpenDirectory, ToggleLeftPanel, ToggleRightPanel, ToggleThemeMode, ToggleView,
 };
 use crate::state::{AppState, ViewMode};
 
@@ -54,7 +54,8 @@ pub fn render_left_activity_bar(
             if is_preview {
                 IconName::LayoutDashboard
             } else {
-                IconName::Frame
+                // 🖼（Lucide image）：只有图标时 frame（#）跟"网格"分不清，换成语义直白的图片图标
+                IconName::Image
             },
             if is_preview {
                 "返回网格 (G / Esc)"
@@ -65,17 +66,6 @@ pub fn render_left_activity_bar(
             false,
             |_, window, cx| {
                 window.dispatch_action(Box::new(ToggleView), cx);
-            },
-            cx,
-        ))
-        .child(render_rail_item(
-            "rail-recognize",
-            IconName::Asterisk,
-            "智能识别所选照片 (B)",
-            false,
-            state.is_recognizing || state.selected_indices.is_empty(),
-            |_, window, cx| {
-                window.dispatch_action(Box::new(RecognizeSelected), cx);
             },
             cx,
         ))

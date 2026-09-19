@@ -73,6 +73,16 @@ pub fn resolve_seed(seed_hex: Option<&str>) -> String {
         .unwrap_or_else(|| DEFAULT_ACCENT.to_string())
 }
 
+/// 解析字体家族：非法 / 缺失回退系统默认 UI 字体（.SystemUIFont）。
+pub fn resolve_font(font: Option<&str>) -> SharedString {
+    match font.map(str::trim) {
+        Some(f) if !f.is_empty() && f != "System" && f != "默认" && f != ".SystemUIFont" => {
+            SharedString::from(f.to_string())
+        }
+        _ => SharedString::from(".SystemUIFont"),
+    }
+}
+
 // ── 令牌映射 ──
 
 /// 少写一百多遍 Some(SharedString::from(..))；字段名由编译器校验。
@@ -86,10 +96,16 @@ macro_rules! theme_colors {
 }
 
 /// 由 seed + 明暗模式构建一份 gpui-component 主题配置。
-///
-/// 未在表内出现的字段会回落到 gpui-component 内置的 light/dark 配色，
-/// 所以手册 §6.3 映射表里的令牌都要显式给出，否则会混进默认蓝紫。
 pub fn theme_config(seed_hex: &str, dark: bool) -> ThemeConfig {
+    theme_config_with_font(seed_hex, dark, None)
+}
+
+/// 由 seed + 明暗模式 + 可选全局字体构建一份 gpui-component 主题配置。
+pub fn theme_config_with_font(
+    seed_hex: &str,
+    dark: bool,
+    font_family: Option<&str>,
+) -> ThemeConfig {
     let seed = material::argb_from_hex(seed_hex)
         .unwrap_or_else(|| material::argb_from_hex(DEFAULT_ACCENT).expect("默认 seed 必须合法"));
     let s = Scheme::from_seed(seed, dark);
@@ -260,6 +276,8 @@ pub fn theme_config(seed_hex: &str, dark: bool) -> ThemeConfig {
         chart_bearish: danger,
     };
 
+    let font_val = resolve_font(font_family);
+
     ThemeConfig {
         is_default: false,
         name: SharedString::from(if dark {
@@ -272,6 +290,7 @@ pub fn theme_config(seed_hex: &str, dark: bool) -> ThemeConfig {
         } else {
             ThemeMode::Light
         },
+        font_family: Some(font_val),
         font_size: Some(14.0),
         // 现代 Material 3 圆角：标准组件基础圆角 8px，大组件/卡片 16px
         radius: Some(8),
@@ -283,17 +302,25 @@ pub fn theme_config(seed_hex: &str, dark: bool) -> ThemeConfig {
     }
 }
 
-/// 应用主题：重建亮 / 暗两套配置并切到指定模式。
+/// 应用主题：重建亮 / 暗两套配置并切到指定模式，应用全局主题色与字体。
 ///
 /// window 为 None 时（启动早期）仍会 refresh_windows，保证无窗口路径也能生效。
-pub fn apply(seed_hex: Option<&str>, dark: bool, window: Option<&mut Window>, cx: &mut App) {
+pub fn apply(
+    seed_hex: Option<&str>,
+    dark: bool,
+    font_family: Option<&str>,
+    window: Option<&mut Window>,
+    cx: &mut App,
+) {
     let seed = resolve_seed(seed_hex);
-    let light = theme_config(&seed, false);
-    let dark_config = theme_config(&seed, true);
+    let light = theme_config_with_font(&seed, false, font_family);
+    let dark_config = theme_config_with_font(&seed, true, font_family);
+    let font_val = resolve_font(font_family);
     {
         let theme = Theme::global_mut(cx);
         theme.light_theme = Rc::new(light);
         theme.dark_theme = Rc::new(dark_config);
+        theme.font_family = font_val;
     }
     let mode = if dark {
         ThemeMode::Dark
@@ -499,5 +526,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_resolve_font_and_theme_config() {
+        assert_eq!(resolve_font(None).as_ref(), ".SystemUIFont");
+        assert_eq!(resolve_font(Some("")).as_ref(), ".SystemUIFont");
+        assert_eq!(resolve_font(Some("   ")).as_ref(), ".SystemUIFont");
+        assert_eq!(resolve_font(Some("System")).as_ref(), ".SystemUIFont");
+        assert_eq!(resolve_font(Some("默认")).as_ref(), ".SystemUIFont");
+        assert_eq!(resolve_font(Some(".SystemUIFont")).as_ref(), ".SystemUIFont");
+        assert_eq!(resolve_font(Some("Microsoft YaHei UI")).as_ref(), "Microsoft YaHei UI");
+        assert_eq!(resolve_font(Some("  PingFang SC  ")).as_ref(), "PingFang SC");
+
+        let cfg = theme_config_with_font("#3B82F6", false, Some("Noto Sans CJK SC"));
+        assert_eq!(cfg.font_family.as_deref().map(|s| s.as_ref()), Some("Noto Sans CJK SC"));
+
+        let cfg_default = theme_config_with_font("#3B82F6", false, None);
+        assert_eq!(cfg_default.font_family.as_deref().map(|s| s.as_ref()), Some(".SystemUIFont"));
     }
 }

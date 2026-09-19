@@ -7,17 +7,25 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use photo_config::AppConfig;
-use photo_domain::{CaptureMeta, ImageFormat, SortBy, SortDirection};
+use photo_domain::{AdjustParams, CaptureMeta, ImageFormat, SortBy, SortDirection};
 use photo_engine::folder_db::FolderDb;
 use photo_engine::global_db::GlobalDb;
 use photo_engine::undo::OpJournal;
 
 use gpui_kit::component::dock::{DockArea, DockEvent, DockPlacement};
 use gpui_kit::component::input::InputState;
-use gpui_kit::{App, Context, Entity, Subscription, Window};
+use gpui_kit::component::slider::{SliderEvent, SliderState};
+use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
+use gpui_kit::component::select::SelectState;
+use gpui_kit::{
+    App, AppContext as _, Context, Entity, SharedString, Subscription, UniformListScrollHandle, Window,
+};
 
 use super::import::ImportState;
 use crate::image::{ImageManager, source_file_of};
+use crate::model::adjust::{
+    EXPOSURE_MAX, EXPOSURE_MIN, EXPOSURE_STEP, TONE_MAX, TONE_MIN, TONE_STEP, AdjustField,
+};
 use crate::model::best_frame::pick_best_frame;
 use crate::model::burst::{BurstGroupMap, compute_burst_groups};
 use crate::model::filter::{FilterCriteria, default_filter_criteria};
@@ -32,7 +40,6 @@ pub enum ViewMode {
     #[default]
     Grid,
     Preview,
-    Compare,
     Slideshow,
     Stats,
 }
@@ -54,8 +61,97 @@ pub enum ActiveDialog {
 pub enum SettingsTab {
     #[default]
     General,
+    Typography,
+    Recognition,
     Shortcuts,
     About,
+}
+
+/// 字体下拉候选项模型（支持中英文双向实时搜索过滤）
+#[derive(Clone, Debug, PartialEq)]
+pub struct FontOption {
+    pub value: SharedString,
+    pub label: SharedString,
+}
+
+impl SearchableListItem for FontOption {
+    type Value = SharedString;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.value
+    }
+
+    fn matches(&self, query: &str) -> bool {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return true;
+        }
+        self.label.to_lowercase().contains(&q) || self.value.to_lowercase().contains(&q)
+    }
+}
+
+pub type FontSelectState = SelectState<SearchableVec<FontOption>>;
+
+/// 构建包含常用推荐预设与本机所有已安装字体的搜索集合（跨平台全字体枚举）
+pub fn build_font_options(current_font: &str, cx: &App) -> SearchableVec<FontOption> {
+    let presets: &[(&str, &str)] = &[
+        (".SystemUIFont", "系统默认 UI 字体 (.SystemUIFont)"),
+        ("Microsoft YaHei UI", "微软雅黑 (Microsoft YaHei UI)"),
+        ("PingFang SC", "苹方 (PingFang SC)"),
+        ("Noto Sans CJK SC", "思源黑体 (Noto Sans CJK SC)"),
+        ("Segoe UI", "Segoe UI (Windows 现代无衬线)"),
+        ("Arial", "Arial (标准西文无衬线)"),
+        ("Inter", "Inter (现代高易读无衬线)"),
+        ("Roboto", "Roboto (Google 规范无衬线)"),
+        ("LXGW WenKai", "霞鹜文楷 (LXGW WenKai 开源书体)"),
+        ("Fira Code", "Fira Code (等宽编程字体)"),
+        ("Cascadia Code", "Cascadia Code (微软等宽字体)"),
+        ("JetBrains Mono", "JetBrains Mono (开发者推荐等宽字体)"),
+        ("Maple Mono", "Maple Mono (圆角等宽字体)"),
+    ];
+
+    let mut options = Vec::new();
+    let mut seen = HashSet::new();
+
+    // 1. 常用推荐预设
+    for &(val, label) in presets {
+        options.push(FontOption {
+            value: val.into(),
+            label: label.into(),
+        });
+        seen.insert(val.to_string());
+    }
+
+    // 2. 当前已配置字体（若不在预设列表中，插在最前）
+    let current_trimmed = current_font.trim();
+    if !current_trimmed.is_empty() && !seen.contains(current_trimmed) {
+        options.insert(
+            0,
+            FontOption {
+                value: current_trimmed.to_string().into(),
+                label: format!("{current_trimmed} (当前配置)").into(),
+            },
+        );
+        seen.insert(current_trimmed.to_string());
+    }
+
+    // 3. 从 GPUI TextSystem 枚举当前操作系统中已安装的全部字体（跨 Linux / Windows / macOS）
+    let sys_fonts = cx.text_system().all_font_names();
+    for font in sys_fonts {
+        if !seen.contains(&font) && !font.starts_with('.') {
+            options.push(FontOption {
+                value: font.clone().into(),
+                label: font.clone().into(),
+            });
+            seen.insert(font);
+        }
+    }
+
+    SearchableVec::new(options)
 }
 
 /// 应用核心权威与派生状态
@@ -86,7 +182,6 @@ pub struct AppState {
 
     // ── 视图状态机 ──
     pub view_mode: ViewMode,
-    pub view_before_compare: ViewMode,
     pub view_before_slideshow: ViewMode,
     pub map_overlay: bool,
 
@@ -109,9 +204,21 @@ pub struct AppState {
     /// 预览图片拖拽平移的鼠标起点 (x, y)
     pub preview_drag_start: Option<(gpui_kit::Pixels, gpui_kit::Pixels)>,
 
-    // ── 对比状态（2-4 张） ──
-    pub compare_indices: Vec<usize>,
-    pub compare_focused_slot: usize,
+    // ── 调整状态（ADR 0007：右栏「调整」tab，参数随图入库） ──
+    /// 焦点图的调整参数（全零 = 无调整，走未调整母版）
+    pub adjust: AdjustParams,
+    /// `adjust` 当前所属图片路径；None = 尚未装载
+    pub adjust_path: Option<String>,
+    /// 有未落盘的改动（350ms 去抖后写库）
+    pub adjust_dirty: bool,
+    /// 去抖世代：350ms 内又有改动则本世代作废，只保存最后一次
+    pub adjust_persist_seq: u64,
+    /// 预览渲染世代：只有最新一次结果允许写回 `preview_image`
+    pub adjust_render_seq: u64,
+    /// 当前 `preview_image` 是否为调整后的图（中性参数时避免无谓重算）
+    pub adjust_preview_toned: bool,
+    /// 三条滑杆实体（首次渲染调整 tab 时懒创建）
+    pub adjust_sliders: Option<AdjustSliders>,
 
     // ── 幻灯片状态 ──
     pub slideshow_pos: usize,
@@ -123,6 +230,9 @@ pub struct AppState {
     pub right_panel_width: f32,
     pub filter_bar_expanded: bool,
     pub grid_columns: usize,
+    /// 网格滚动句柄：每帧交给 `uniform_list.track_scroll`，并给 `Scrollbar` 当数据源
+    /// （GPUI 的溢出滚动容器不会自动画滚动条，必须显式绑定）。
+    pub grid_scroll: UniformListScrollHandle,
     /// 拖宽去抖保存的世代号（350ms 内多次变更只落盘一次）
     layout_save_generation: u64,
     /// Dock 布局事件订阅（drop 即取消，必须持有）
@@ -156,6 +266,12 @@ pub struct AppState {
     pub focus_handle: Option<gpui_kit::FocusHandle>,
     /// 设置页「自定义主题色」输入框（创建需要 Window，故在 AppState::build 里初始化）。
     pub accent_input: Option<Entity<InputState>>,
+    /// 设置页「自定义全局字体」输入框（创建需要 Window，故在 AppState::build 里初始化）。
+    pub font_input: Option<Entity<InputState>>,
+    /// 设置页「全局界面字体」可搜索选择器（创建需要 Window，故在 AppState::build 里初始化）。
+    pub font_select: Option<Entity<FontSelectState>>,
+    /// 字体选择器确认事件订阅（持有 Subscription 保证事件持续接收）
+    pub _font_select_sub: Option<Subscription>,
 
     // ── 导入弹窗（SD 卡 / 目录）──
     pub import: ImportState,
@@ -163,6 +279,235 @@ pub struct AppState {
     pub import_dest_input: Option<Entity<InputState>>,
     /// 重命名模板输入框（创建需要 Window）
     pub import_rename_input: Option<Entity<InputState>>,
+}
+
+/// 调整 tab 的三条滑杆实体 + 事件订阅。
+///
+/// 懒创建：`SliderState` 需要 `Context` 才建得出来，而 `AppState::new` 里没有；
+/// 首次渲染调整 tab 时构造，之后随 AppState 生命周期持有（drop 即自动退订）。
+pub struct AdjustSliders {
+    pub exposure: Entity<SliderState>,
+    pub contrast: Entity<SliderState>,
+    pub saturation: Entity<SliderState>,
+    /// 三条滑杆的 Change 事件订阅；drop 即取消，必须持有
+    _subscriptions: Vec<Subscription>,
+}
+
+impl AdjustSliders {
+    fn entity(&self, field: AdjustField) -> &Entity<SliderState> {
+        match field {
+            AdjustField::Exposure => &self.exposure,
+            AdjustField::Contrast => &self.contrast,
+            AdjustField::Saturation => &self.saturation,
+        }
+    }
+}
+
+impl AppState {
+    // ── 调整 tab（ADR 0007）：装载 / 修改 / 去抖落盘 / 预览重算 ──
+
+    /// 确保焦点图的调整参数已装载。面板与预览两处渲染都调用（幂等），
+    /// 所以无论从哪条路径切图都不会漏；切图时先把上一张未落盘的一笔写回。
+    pub fn ensure_adjustments_loaded(
+        &mut self,
+        primary_path: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.adjust_path.as_deref() == Some(primary_path) {
+            return;
+        }
+        self.flush_adjustments();
+        self.adjust = super::engine_ops::load_adjustments(self, primary_path);
+        self.adjust_path = Some(primary_path.to_string());
+        self.adjust_dirty = false;
+        self.sync_sliders(window, cx);
+        self.request_adjust_preview(cx);
+    }
+
+    /// 懒创建三条滑杆并接上 Change 事件（首次渲染调整 tab 时）。
+    pub fn ensure_adjust_sliders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.adjust_sliders.is_some() {
+            return;
+        }
+        let exposure = cx.new(|_| {
+            SliderState::new()
+                .min(EXPOSURE_MIN)
+                .max(EXPOSURE_MAX)
+                .step(EXPOSURE_STEP)
+        });
+        let contrast = cx.new(|_| {
+            SliderState::new()
+                .min(TONE_MIN)
+                .max(TONE_MAX)
+                .step(TONE_STEP)
+        });
+        let saturation = cx.new(|_| {
+            SliderState::new()
+                .min(TONE_MIN)
+                .max(TONE_MAX)
+                .step(TONE_STEP)
+        });
+
+        let subscriptions = vec![
+            cx.subscribe(&exposure, |state, _, event, cx| {
+                if let SliderEvent::Change(value) = event {
+                    state.set_adjust_field(AdjustField::Exposure, value.start(), cx);
+                }
+            }),
+            cx.subscribe(&contrast, |state, _, event, cx| {
+                if let SliderEvent::Change(value) = event {
+                    state.set_adjust_field(AdjustField::Contrast, value.start(), cx);
+                }
+            }),
+            cx.subscribe(&saturation, |state, _, event, cx| {
+                if let SliderEvent::Change(value) = event {
+                    state.set_adjust_field(AdjustField::Saturation, value.start(), cx);
+                }
+            }),
+        ];
+
+        self.adjust_sliders = Some(AdjustSliders {
+            exposure,
+            contrast,
+            saturation,
+            _subscriptions: subscriptions,
+        });
+        self.sync_sliders(window, cx);
+    }
+
+    /// 滑杆改动 → 更新参数（值没变则不做任何事）并触发落盘 + 预览重算
+    pub fn set_adjust_field(&mut self, field: AdjustField, raw: f32, cx: &mut Context<Self>) {
+        let mut next = self.adjust;
+        field.apply(&mut next, raw);
+        if next == self.adjust {
+            return;
+        }
+        self.adjust = next;
+        self.on_adjust_changed(cx);
+    }
+
+    /// 单项重置（数值 chip 旁的「重置」）
+    pub fn reset_adjust_field(
+        &mut self,
+        field: AdjustField,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if field.is_neutral(&self.adjust) {
+            return;
+        }
+        field.reset(&mut self.adjust);
+        self.sync_one_slider(field, window, cx);
+        self.on_adjust_changed(cx);
+    }
+
+    /// 全部重置
+    pub fn reset_all_adjustments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.adjust.is_neutral() {
+            return;
+        }
+        self.adjust = AdjustParams::default();
+        self.sync_sliders(window, cx);
+        self.on_adjust_changed(cx);
+    }
+
+    /// 参数变化后的统一收尾：立即重绘（数值 chip 跟手）+ 标脏去抖落盘 + 预览重算
+    fn on_adjust_changed(&mut self, cx: &mut Context<Self>) {
+        self.adjust_dirty = true;
+        cx.notify();
+        self.schedule_adjust_persist(cx);
+        self.request_adjust_preview(cx);
+    }
+
+    /// 350ms 去抖后写库（拖动期间每帧都改内存，但不每帧写盘）
+    fn schedule_adjust_persist(&mut self, cx: &mut Context<Self>) {
+        self.adjust_persist_seq = self.adjust_persist_seq.wrapping_add(1);
+        let seq = self.adjust_persist_seq;
+        let entity = cx.entity();
+        cx.spawn(
+            async move |_weak: gpui_kit::WeakEntity<AppState>,
+                        async_cx: &mut gpui_kit::AsyncApp| {
+                async_cx
+                    .background_executor()
+                    .timer(Duration::from_millis(350))
+                    .await;
+                async_cx.update(|cx| {
+                    entity.update(cx, |state, _cx| {
+                        if state.adjust_persist_seq == seq {
+                            state.flush_adjustments();
+                        }
+                    });
+                });
+            },
+        )
+        .detach();
+    }
+
+    /// 立即把未落盘的调整参数写进 folder_db（切图 / 去抖到期时调用）
+    pub fn flush_adjustments(&mut self) {
+        if !self.adjust_dirty {
+            return;
+        }
+        let Some(path) = self.adjust_path.clone() else {
+            return;
+        };
+        let params = self.adjust;
+        super::engine_ops::persist_adjustments(self, &path, &params);
+        self.adjust_dirty = false;
+    }
+
+    /// 重新渲染当前焦点图的调整预览。
+    /// 中性参数 + 当前预览本来就是原图 → 无谓的重算直接跳过。
+    fn request_adjust_preview(&mut self, cx: &mut Context<Self>) {
+        if self.adjust.is_neutral() && !self.adjust_preview_toned {
+            return;
+        }
+        let Some(path) = self.adjust_path.clone() else {
+            return;
+        };
+        let Some(meta) = self.items.iter().find(|m| m.primary_path == path) else {
+            return;
+        };
+        let Some(source) = source_file_of(meta) else {
+            return;
+        };
+        self.adjust_render_seq = self.adjust_render_seq.wrapping_add(1);
+        let seq = self.adjust_render_seq;
+        let params = self.adjust;
+        super::engine_ops::render_adjust_preview(
+            cx.entity(),
+            self.image_manager.clone(),
+            path,
+            source,
+            params,
+            seq,
+            cx,
+        );
+    }
+
+    /// 把内存参数写回滑杆（装载/重置后用，避免滑杆显示与参数不一致）
+    fn sync_sliders(&self, window: &mut Window, cx: &mut Context<Self>) {
+        for field in AdjustField::ALL {
+            self.sync_one_slider(field, window, cx);
+        }
+    }
+
+    fn sync_one_slider(&self, field: AdjustField, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sliders) = &self.adjust_sliders else {
+            return;
+        };
+        let entity = sliders.entity(field).clone();
+        let value = field.slider_value(&self.adjust);
+        entity.update(cx, |slider, cx| slider.set_value(value, window, cx));
+    }
+}
+
+impl Drop for AppState {
+    /// 退出前兜底：350ms 去抖还没到期就关窗时，未落盘的一笔在这里写回。
+    fn drop(&mut self) {
+        self.flush_adjustments();
+    }
 }
 
 /// 读取便携配置（缺失/损坏回退默认）。启动与 AppState 共用同一份加载逻辑。
@@ -244,7 +589,6 @@ impl AppState {
             anchor_index: None,
 
             view_mode: ViewMode::Grid,
-            view_before_compare: ViewMode::Grid,
             view_before_slideshow: ViewMode::Grid,
             map_overlay: false,
 
@@ -260,8 +604,13 @@ impl AppState {
             preview_viewport_size: None,
             preview_drag_start: None,
 
-            compare_indices: Vec::new(),
-            compare_focused_slot: 0,
+            adjust: AdjustParams::default(),
+            adjust_path: None,
+            adjust_dirty: false,
+            adjust_persist_seq: 0,
+            adjust_render_seq: 0,
+            adjust_preview_toned: false,
+            adjust_sliders: None,
 
             slideshow_pos: 0,
             slideshow_paused: false,
@@ -271,6 +620,7 @@ impl AppState {
             right_panel_width,
             filter_bar_expanded: false,
             grid_columns: 4,
+            grid_scroll: UniformListScrollHandle::new(),
             layout_save_generation: 0,
             _dock_subscription: None,
 
@@ -298,6 +648,9 @@ impl AppState {
             subdirs: Vec::new(),
             focus_handle: None,
             accent_input: None,
+            font_input: None,
+            font_select: None,
+            _font_select_sub: None,
             import: ImportState::default(),
             import_dest_input: None,
             import_rename_input: None,
@@ -405,11 +758,12 @@ impl AppState {
 
     // ── 主题（手册 §6.6）：应用 + 落盘 ──
 
-    /// 应用当前配置里的主题（seed + 明暗）并写回 config.toml。
+    /// 应用当前配置里的主题（seed + 明暗 + 字体）并写回 config.toml。
     pub fn apply_theme(&mut self, window: Option<&mut Window>, cx: &mut App) {
         let dark = matches!(self.app_config.theme, photo_config::Theme::Dark);
         let seed = self.app_config.accent_color.clone();
-        crate::theme::apply(seed.as_deref(), dark, window, cx);
+        let font = self.app_config.font_family.clone();
+        crate::theme::apply(seed.as_deref(), dark, Some(&font), window, cx);
         self.save_config();
     }
 
@@ -420,6 +774,41 @@ impl AppState {
             photo_config::Theme::Dark => photo_config::Theme::Light,
         };
         self.apply_theme(window, cx);
+    }
+
+    /// 设置全局字体并即刻生效与落盘。
+    pub fn set_font_family(&mut self, font: &str, window: Option<&mut Window>, cx: &mut App) {
+        let trimmed = font.trim();
+        if !trimmed.is_empty() {
+            self.app_config.font_family = trimmed.to_string();
+            self.apply_theme(window, cx);
+        }
+    }
+
+    /// 把当前字体家族名回写到自定义字体输入框。
+    pub fn sync_font_input(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(input) = self.font_input.clone() else {
+            return;
+        };
+        let font = self.app_config.font_family.clone();
+        input.update(cx, |state, cx| state.set_value(font, window, cx));
+    }
+
+    /// 同步字体下拉选择框的选中项。
+    pub fn sync_font_select(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(select) = self.font_select.clone() else {
+            return;
+        };
+        let font: SharedString = self.app_config.font_family.clone().into();
+        select.update(cx, |state, cx| {
+            state.set_selected_value(&font, window, cx);
+            if state.selected_value() != Some(&font) && !font.is_empty() {
+                // 如果是新输入的自定义字体，刷新选项列表并选中
+                let items = build_font_options(&font, cx);
+                state.set_items(items, window, cx);
+                state.set_selected_value(&font, window, cx);
+            }
+        });
     }
 
     /// 设置主题色 seed；格式非法则不改动并返回 false（调用方给用户提示）。
@@ -466,18 +855,10 @@ impl AppState {
     }
 
     /// 标记键作用域（§5.3 markPaths）：
-    /// 对比态 -> 仅聚焦格那一张
     /// 幻灯片态 -> 当前显示张
     /// 其余 -> 选中集
     pub fn mark_indices(&self) -> Vec<usize> {
         match self.view_mode {
-            ViewMode::Compare => {
-                if let Some(&idx) = self.compare_indices.get(self.compare_focused_slot) {
-                    vec![idx]
-                } else {
-                    Vec::new()
-                }
-            }
             ViewMode::Slideshow => {
                 if let Some(&idx) = self.display_order.get(self.slideshow_pos) {
                     vec![idx]
@@ -669,22 +1050,17 @@ impl AppState {
             self.recognize_cancel.store(true, Ordering::Relaxed);
             return true;
         }
-        // 4. 对比态 -> 退出对比
-        if self.view_mode == ViewMode::Compare {
-            self.view_mode = self.view_before_compare;
-            return true;
-        }
-        // 5. 幻灯片态 -> 退出幻灯片
+        // 4. 幻灯片态 -> 退出幻灯片
         if self.view_mode == ViewMode::Slideshow {
             self.view_mode = self.view_before_slideshow;
             return true;
         }
-        // 6. 统计态 -> 退出统计回网格
+        // 5. 统计态 -> 退出统计回网格
         if self.view_mode == ViewMode::Stats {
             self.view_mode = ViewMode::Grid;
             return true;
         }
-        // 7. 预览态 -> 返回网格
+        // 6. 预览态 -> 返回网格
         if self.view_mode == ViewMode::Preview {
             self.view_mode = ViewMode::Grid;
             return true;
@@ -700,7 +1076,7 @@ impl AppState {
 
     /// 复制当前照片到系统剪贴板（全尺寸 RGBA）。
     ///
-    /// 作用对象与标记键一致：预览/对比/幻灯片取当前那张，网格取主选中项。
+    /// 作用对象与标记键一致：预览/幻灯片取当前那张，网格取主选中项。
     /// 对应已删除的 Tauri 版 `copy_image_to_clipboard` command。
     pub fn copy_current_image_to_clipboard(&mut self, cx: &mut Context<Self>) {
         if self.primary_selected_meta().is_none() {

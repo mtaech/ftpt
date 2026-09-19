@@ -38,6 +38,8 @@ async fn pump(async_cx: &mut gpui_kit::AsyncApp, ms: u64) {
 }
 
 fn main() {
+    // 无头冒烟固定走 Xvfb 的 X11 后端：Wayland 会话下窗口会落到真实桌面，渲染帧不可控
+    photo_ui::app::prepare_headless_smoke();
     let Some(dir) = std::env::args().nth(1).map(PathBuf::from) else {
         eprintln!("跳过：未提供含 RAW 的目录（用法见文件头）");
         return;
@@ -50,7 +52,7 @@ fn main() {
     let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
     app.run(move |cx| {
         gpui_kit::component::init(cx);
-        photo_ui::theme::apply(None, false, None, cx);
+        photo_ui::theme::apply(None, false, None, None, cx);
         AppState::register_keybindings(cx);
 
         let window_options = WindowOptions {

@@ -225,10 +225,48 @@ pub fn normalize_accent_hex(input: &str) -> Option<String> {
 /// 默认 seed：近黑。色相无关、chroma ≈ 0，生成"墨白"单色 accent。
 pub const DEFAULT_ACCENT_HEX: &str = "#111111";
 
+/// 配置目录（config.toml 与 logs/ 都在这里）。
+///
+/// 解析优先级（与 PHOTO_EXIFTOOL / PHOTO_DATA_DIR 同一风格）：
+/// 1. `PHOTO_CONFIG_DIR` —— 显式覆盖，值就是目录本身（无头冒烟、多套配置并行用）
+/// 2. `XDG_CONFIG_HOME` —— Linux/BSD 惯例，取 `$XDG_CONFIG_HOME/pt`
+/// 3. 否则 `<home>/.config/pt`（Windows 即 `%USERPROFILE%\.config\pt`）
+///
+/// 空串按「未设置」处理（POSIX）。
+///
+/// 第 2 条是必须的：冒烟脚本一直写着 `XDG_CONFIG_HOME=/tmp/... 隔离配置`，
+/// 而此前这里硬编码 home，于是每次冒烟都在读写**用户真实配置**——`lease_smoke`
+/// 的「左停靠区宽度」检查会因为真实配置里被拖宽过的值而假失败。
+///
+/// 刻意不用 `dirs::config_dir()`：它在 Windows 给 `%APPDATA%\`，
+/// 会破坏「全平台同一相对布局」这个约定。
+pub fn config_dir() -> Result<PathBuf, std::io::Error> {
+    config_dir_from(
+        std::env::var_os("PHOTO_CONFIG_DIR"),
+        std::env::var_os("XDG_CONFIG_HOME"),
+        dirs::home_dir(),
+    )
+}
+
+/// `config_dir` 的纯逻辑：环境变量与 home 由调用方传入，便于单测（不动进程全局 env）。
+fn config_dir_from(
+    override_dir: Option<std::ffi::OsString>,
+    xdg_config_home: Option<std::ffi::OsString>,
+    home: Option<PathBuf>,
+) -> Result<PathBuf, std::io::Error> {
+    if let Some(dir) = override_dir.filter(|d| !d.is_empty()) {
+        return Ok(PathBuf::from(dir));
+    }
+    if let Some(dir) = xdg_config_home.filter(|d| !d.is_empty()) {
+        return Ok(PathBuf::from(dir).join("pt"));
+    }
+    let home = home.ok_or_else(|| std::io::Error::other("无法定位用户主目录"))?;
+    Ok(home.join(".config").join("pt"))
+}
+
 pub fn determine_config_path() -> Result<PathBuf, std::io::Error> {
-    // 全平台统一 ~/.config/pt/config.toml（Windows 为 %USERPROFILE%\.config\pt\config.toml）
-    let home = dirs::home_dir().ok_or_else(|| std::io::Error::other("无法定位用户主目录"))?;
-    let dir = home.join(".config").join("pt");
+    // 全平台统一：目录由 config_dir() 决定（默认 ~/.config/pt），文件名固定 config.toml
+    let dir = config_dir()?;
     std::fs::create_dir_all(&dir)?;
     Ok(dir.join("config.toml"))
 }
@@ -469,14 +507,43 @@ mod tests {
     }
 
     #[test]
-    fn test_config_path() {
-        let result = determine_config_path().unwrap();
-        // 全平台统一 ~/.config/pt/config.toml（Windows 为 %USERPROFILE%\.config\...）
-        let rel = result
-            .strip_prefix(dirs::home_dir().unwrap())
-            .expect("配置路径应在主目录下")
-            .to_path_buf();
-        assert_eq!(rel, PathBuf::from(".config/pt/config.toml"));
+    fn test_config_dir_precedence() {
+        // 1. PHOTO_CONFIG_DIR 最高优先级，且值就是目录本身
+        assert_eq!(
+            config_dir_from(
+                Some("/tmp/pt-iso".into()),
+                Some("/tmp/xdg".into()),
+                Some("/home/u".into())
+            )
+            .unwrap(),
+            PathBuf::from("/tmp/pt-iso")
+        );
+        // 2. XDG_CONFIG_HOME 次之，取 pt 子目录（冒烟脚本靠它隔离真实配置）
+        assert_eq!(
+            config_dir_from(None, Some("/tmp/xdg".into()), Some("/home/u".into())).unwrap(),
+            PathBuf::from("/tmp/xdg/pt")
+        );
+        // 3. 都没有 → ~/.config/pt（Windows 同一相对布局，刻意不用 dirs::config_dir()）
+        assert_eq!(
+            config_dir_from(None, None, Some("/home/u".into())).unwrap(),
+            PathBuf::from("/home/u/.config/pt")
+        );
+        // 4. 空串按未设置处理（POSIX）
+        assert_eq!(
+            config_dir_from(Some("".into()), Some("".into()), Some("/home/u".into())).unwrap(),
+            PathBuf::from("/home/u/.config/pt")
+        );
+        // 5. 既无覆盖也无 home → 报错，不静默落到 cwd
+        assert!(config_dir_from(None, None, None).is_err());
+    }
+
+    #[test]
+    fn test_config_path_sits_in_config_dir() {
+        // 不假设 home/XDG 的具体值（开发机可能设了 XDG_CONFIG_HOME），只校验两者的关系
+        let dir = config_dir().unwrap();
+        let path = determine_config_path().unwrap();
+        assert_eq!(path.parent(), Some(dir.as_path()));
+        assert_eq!(path.file_name().and_then(|n| n.to_str()), Some("config.toml"));
     }
 
     #[test]

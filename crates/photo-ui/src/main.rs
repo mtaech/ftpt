@@ -29,13 +29,14 @@ fn main() {
         let app_config = photo_ui::state::app_state::load_app_config();
         let seed = photo_ui::theme::resolve_seed(app_config.accent_color.as_deref());
         let dark = matches!(app_config.theme, photo_config::Theme::Dark);
-        photo_ui::theme::apply(Some(&seed), dark, None, cx);
+        photo_ui::theme::apply(Some(&seed), dark, Some(&app_config.font_family), None, cx);
         // 主题生效证据：把解析后的实际令牌写进日志（排查"主题没上"的第一锚点）
         {
             let theme = gpui_kit::component::theme::Theme::global(cx);
             tracing::info!(
-                "主题生效：seed={} mode={:?} radius={}px radius_lg={}px background={} foreground={} primary={} border={}",
+                "主题生效：seed={} font={} mode={:?} radius={}px radius_lg={}px background={} foreground={} primary={} border={}",
                 seed,
+                theme.font_family,
                 theme.mode,
                 f32::from(theme.radius),
                 f32::from(theme.radius_lg),
@@ -87,7 +88,15 @@ fn main() {
                 }
             }
 
-            app_state
+            // 根视图必须是 gpui-component 的 `Root`：`Button::tooltip` 最终调
+            // `Root::tooltip_overlay(window, cx)`，而它靠 `window.root::<Root>()` 查找——
+            // 根视图不是 Root 时所有 tooltip 被**静默丢弃**（侧边栏图标因此"没有提示"）。
+            // Root 同时提供原生菜单浮层与 Notification 层；bordered(false)：窗口已用
+            // 系统装饰，不要再叠一层自绘边框/阴影。
+            let root_state = app_state.clone();
+            cx.new(|cx| {
+                gpui_kit::component::Root::new(root_state, window, cx).bordered(false)
+            })
         })
         .expect("打开主窗口失败");
     });

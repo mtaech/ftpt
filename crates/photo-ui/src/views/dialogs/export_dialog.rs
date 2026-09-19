@@ -61,6 +61,7 @@ pub fn render_export_dialog(
                                 .ghost()
                                 .small()
                                 .icon(IconName::Close)
+                                .tooltip("关闭 (Esc)")
                                 .on_click(cx.listener(|state, _, _, cx| {
                                     state.active_dialog = None;
                                     cx.notify();

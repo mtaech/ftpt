@@ -16,13 +16,15 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     rating::Rating as ComponentRating,
+    slider::{Slider, SliderState},
     tag::Tag,
     v_flex,
 };
-use gpui_kit::{Context, IntoElement, div, prelude::*, px};
+use gpui_kit::{Context, Entity, IntoElement, Window, div, prelude::*, px};
 use photo_domain::{ColorLabel, Flag, Rating, RecognitionStatus};
 
 use crate::actions::{RecognizeSelected, ToggleBbox};
+use crate::model::adjust::{AdjustField, format_exposure, format_tone};
 use crate::state::AppState;
 use crate::state::engine_ops::{set_color_label, set_flag, set_rating};
 use crate::theme::{
@@ -475,69 +477,179 @@ fn render_color_dot(
         }))
 }
 
+/// 调整 tab（ADR 0007）：曝光 / 对比度 / 饱和度三条滑杆。
+///
+/// 每行 = 标签 + 数值 chip + 单项重置，滑杆独占下一行整宽（§9.7：单行布局在 200px 宽下不可用）。
+/// 拖动只改内存参数——落盘（350ms 去抖）与预览重算都由 AppState 发起，主线程零像素工作。
 pub fn render_adjustments_tab(
-    _state: &AppState,
-    _meta: Option<&photo_domain::CaptureMeta>,
+    state: &mut AppState,
+    meta: Option<&photo_domain::CaptureMeta>,
+    window: &mut Window,
     cx: &mut Context<AppState>,
 ) -> impl IntoElement + use<> {
-    crate::theme::section_first(cx)
+    let Some(meta) = meta else {
+        return div()
+            .w_full()
+            .py_12()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child("未选择图片")
+            .into_any_element();
+    };
+
+    // 面板可见即可靠地装载（与预览渲染共用同一入口，切图不会漏 flush/load）
+    state.ensure_adjustments_loaded(&meta.primary_path, window, cx);
+    state.ensure_adjust_sliders(window, cx);
+
+    let params = state.adjust;
+    let (exposure_slider, contrast_slider, saturation_slider) = {
+        let sliders = state
+            .adjust_sliders
+            .as_ref()
+            .expect("ensure_adjust_sliders 刚执行过");
+        (
+            sliders.exposure.clone(),
+            sliders.contrast.clone(),
+            sliders.saturation.clone(),
+        )
+    };
+    let is_adjusted = !params.is_neutral();
+
+    v_flex()
+        .w_full()
         .gap_4()
         .child(
-            v_flex()
+            h_flex()
                 .w_full()
-                .gap_1()
+                .items_center()
+                .justify_between()
                 .child(
                     h_flex()
-                        .justify_between()
-                        .text_xs()
-                        .child(div().text_color(cx.theme().foreground).child("曝光 (EV)"))
-                        .child(div().text_color(cx.theme().muted_foreground).child("0.00")),
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_medium()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("调整参数"),
+                        )
+                        .when(is_adjusted, |this| {
+                            this.child(
+                                div()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded(px(6.))
+                                    .bg(cx.theme().primary.opacity(0.15))
+                                    .text_size(px(10.))
+                                    .text_color(cx.theme().primary)
+                                    .child("已调整"),
+                            )
+                        }),
                 )
-                .child(
-                    div()
-                        .w_full()
-                        .h(px(4.))
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().border),
-                ),
+                .when(is_adjusted, |this| {
+                    this.child(
+                        Button::new("adjust-reset-all")
+                            .ghost()
+                            .xsmall()
+                            .label("全部重置")
+                            .on_click(cx.listener(|state, _, window, cx| {
+                                state.reset_all_adjustments(window, cx);
+                                cx.notify();
+                            })),
+                    )
+                }),
         )
+        .child(render_adjust_row(
+            "曝光 (EV)",
+            format_exposure(params.exposure),
+            params.exposure == 0.0,
+            AdjustField::Exposure,
+            exposure_slider,
+            cx,
+        ))
+        .child(render_adjust_row(
+            "对比度",
+            format_tone(params.contrast),
+            params.contrast == 0,
+            AdjustField::Contrast,
+            contrast_slider,
+            cx,
+        ))
+        .child(render_adjust_row(
+            "饱和度",
+            format_tone(params.saturation),
+            params.saturation == 0,
+            AdjustField::Saturation,
+            saturation_slider,
+            cx,
+        ))
         .child(
-            v_flex()
-                .w_full()
-                .gap_1()
-                .child(
-                    h_flex()
-                        .justify_between()
-                        .text_xs()
-                        .child(div().text_color(cx.theme().foreground).child("对比度"))
-                        .child(div().text_color(cx.theme().muted_foreground).child("0")),
-                )
-                .child(
-                    div()
-                        .w_full()
-                        .h(px(4.))
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().border),
-                ),
-        )
-        .child(
-            v_flex()
-                .w_full()
-                .gap_1()
-                .child(
-                    h_flex()
-                        .justify_between()
-                        .text_xs()
-                        .child(div().text_color(cx.theme().foreground).child("饱和度"))
-                        .child(div().text_color(cx.theme().muted_foreground).child("0")),
-                )
-                .child(
-                    div()
-                        .w_full()
-                        .h(px(4.))
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().border),
-                ),
+            div()
+                .text_size(px(10.))
+                .text_color(cx.theme().muted_foreground)
+                .child("参数随图片保存，原图永不被修改"),
         )
         .into_any_element()
+}
+
+/// 一行调整控件：标签 + 数值 chip + 单项重置；滑杆独占下一行整宽。
+fn render_adjust_row(
+    label: &'static str,
+    value: String,
+    neutral: bool,
+    field: AdjustField,
+    slider: Entity<SliderState>,
+    cx: &mut Context<AppState>,
+) -> impl IntoElement {
+    v_flex()
+        .w_full()
+        .gap_2()
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().foreground)
+                        .child(label),
+                )
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            div()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded(px(6.))
+                                .bg(cx.theme().muted.opacity(0.7))
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_size(px(11.))
+                                .text_color(if neutral {
+                                    cx.theme().muted_foreground
+                                } else {
+                                    cx.theme().primary
+                                })
+                                .child(value),
+                        )
+                        .child(
+                            Button::new(format!("adjust-reset-{label}"))
+                                .ghost()
+                                .xsmall()
+                                .label("重置")
+                                .on_click(cx.listener(move |state, _, window, cx| {
+                                    state.reset_adjust_field(field, window, cx);
+                                    cx.notify();
+                                })),
+                        ),
+                ),
+        )
+        .child(div().w_full().child(Slider::new(&slider).horizontal()))
 }

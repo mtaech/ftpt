@@ -1,7 +1,6 @@
 //! UI 视图组件模块。
 
 pub mod activity_bar;
-pub mod compare;
 pub mod dialogs;
 pub mod dock_panels;
 pub mod filmstrip;
@@ -17,7 +16,6 @@ pub mod status_bar;
 pub mod title_bar;
 
 pub use activity_bar::{render_left_activity_bar, render_right_activity_bar};
-pub use compare::render_compare_view;
 pub use dock_panels::{DockPanel, DockPanelKind, create_dock};
 pub use filmstrip::render_filmstrip;
 pub use filter_bar::render_filter_bar;

@@ -8,9 +8,12 @@
 //! - 全局动作分发与快捷键（§5.4 Esc 优先级链与 §5.6 键位总表）
 
 use gpui_kit::component::dock::DockPlacement;
+use gpui_kit::component::searchable_list::{SearchableListDelegate as _, SearchableVec};
+use gpui_kit::component::select::{SelectEvent, SelectState};
 use gpui_kit::component::{ActiveTheme as _, h_flex, input::InputState, v_flex};
 use gpui_kit::{
-    App, Context, Decorations, IntoElement, KeyBinding, Render, Window, div, prelude::*,
+    App, Context, Decorations, IntoElement, KeyBinding, Render, SharedString, Window, div,
+    prelude::*,
 };
 use photo_domain::{ColorLabel, Flag, Rating};
 
@@ -38,6 +41,38 @@ impl AppState {
                 .placeholder("#RRGGBB")
         });
         state.accent_input = Some(accent_input);
+        // 自定义字体输入框：初值 = 当前 font_family
+        let initial_font = state.app_config.font_family.clone();
+        let font_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(initial_font)
+                .placeholder("输入字体名称，如 Noto Sans SC")
+        });
+        state.font_input = Some(font_input);
+        // 全局界面字体选择器：汇聚推荐预设与操作系统全部安装字体，支持中英文双向实时搜索过滤
+        let font_options =
+            crate::state::app_state::build_font_options(&state.app_config.font_family, cx);
+        let initial_font_sh: SharedString = state.app_config.font_family.clone().into();
+        let selected_ix = font_options.position(&initial_font_sh);
+        let font_select = cx.new(|cx| {
+            SelectState::new(font_options, selected_ix, window, cx).searchable(true)
+        });
+        let font_select_sub = cx.subscribe(
+            &font_select,
+            |this,
+             _entity,
+             event: &SelectEvent<SearchableVec<crate::state::app_state::FontOption>>,
+             cx| {
+                if let SelectEvent::Confirm(Some(value)) = event {
+                    let val_str = value.as_ref();
+                    this.set_font_family(val_str, None, cx);
+                    this.set_status_message(format!("全局字体已切换为 {val_str}"));
+                    cx.notify();
+                }
+            },
+        );
+        state.font_select = Some(font_select);
+        state._font_select_sub = Some(font_select_sub);
         // 导入弹窗输入框：目标根目录 / 重命名模板
         state.import_dest_input =
             Some(cx.new(|cx| {
@@ -63,7 +98,6 @@ impl AppState {
             KeyBinding::new("q", PrevMember, None),
             KeyBinding::new("e", NextMember, None),
             KeyBinding::new("g", ToggleView, None),
-            KeyBinding::new("c", Compare, None),
             KeyBinding::new("s", Slideshow, None),
             KeyBinding::new("space", TogglePlay, None),
             KeyBinding::new("t", Stats, None),
@@ -113,6 +147,28 @@ impl AppState {
     }
 }
 
+/// 无头冒烟入口：把 GPUI 的后端**钉在 X11**（`xvfb-run` 提供的那个显示）上。
+///
+/// GPUI 选后端只看环境变量（`platform::guess_compositor()`）：`WAYLAND_DISPLAY` 非空优先
+/// Wayland，其次 `DISPLAY`（X11），都没有才 Headless。而 `xvfb-run` 只准备 X 显示——
+/// 在 Wayland 会话里跑冒烟（`WAYLAND_DISPLAY` 是继承来的）时窗口会落到**用户真实桌面**，
+/// 帧由真实合成器决定（遮挡/最小化时干脆不产帧）：渲染驱动的行为（预览母版、缩略图）
+/// 就随环境时好时坏，同一份代码一会儿 13/13 一会儿 12/13。
+///
+/// 所以冒烟在 `gpui_kit::application()` 之前调本函数：把 `WAYLAND_DISPLAY` 置空
+/// （GPUI 判空即视为未设置），强制走 Xvfb。
+/// 需要真机 Wayland 目检时设 `PHOTO_SMOKE_ALLOW_WAYLAND=1` 跳过。
+pub fn prepare_headless_smoke() {
+    if std::env::var_os("PHOTO_SMOKE_ALLOW_WAYLAND").is_some() {
+        return;
+    }
+    // SAFETY: 只在 main() 最开头、GPUI 启动前调用（此时进程还是单线程），
+    // 之后不再有任何线程读环境变量。
+    unsafe {
+        std::env::set_var("WAYLAND_DISPLAY", "");
+    }
+}
+
 /// 首帧后把焦点交给根视图。
 ///
 /// GPUI 的 `Window::dispatch_action` 是「从当前焦点节点向上冒泡」：窗口里没有任何
@@ -132,6 +188,7 @@ impl Render for AppState {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            .font_family(cx.theme().font_family.clone())
             .when_some(self.focus_handle.clone(), |this, handle| {
                 this.track_focus(&handle)
             })
@@ -148,16 +205,6 @@ impl Render for AppState {
             }))
             .on_action(cx.listener(|this, _: &Prev, _window, cx| {
                 match this.view_mode {
-                    ViewMode::Compare => {
-                        if !this.compare_indices.is_empty() {
-                            if this.compare_focused_slot > 0 {
-                                this.compare_focused_slot -= 1;
-                            } else {
-                                this.compare_focused_slot =
-                                    this.compare_indices.len().saturating_sub(1);
-                            }
-                        }
-                    }
                     ViewMode::Slideshow => {
                         if !this.display_order.is_empty() {
                             if this.slideshow_pos > 0 {
@@ -175,12 +222,6 @@ impl Render for AppState {
             }))
             .on_action(cx.listener(|this, _: &Next, _window, cx| {
                 match this.view_mode {
-                    ViewMode::Compare => {
-                        if !this.compare_indices.is_empty() {
-                            this.compare_focused_slot =
-                                (this.compare_focused_slot + 1) % this.compare_indices.len();
-                        }
-                    }
                     ViewMode::Slideshow => {
                         if !this.display_order.is_empty() {
                             this.slideshow_pos =
@@ -232,45 +273,6 @@ impl Render for AppState {
                     }
                     _ => {
                         this.view_mode = ViewMode::Grid;
-                    }
-                }
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &Compare, _window, cx| {
-                if this.view_mode == ViewMode::Compare {
-                    this.view_mode = this.view_before_compare;
-                } else {
-                    let candidate_indices: Vec<usize> =
-                        if this.selected_indices.len() >= 2 && this.selected_indices.len() <= 4 {
-                            this.selected_indices.clone()
-                        } else if let Some(cur) = this.primary_selected_index() {
-                            if let Some(entry) = this.burst_groups.get(&cur) {
-                                let group_members: Vec<usize> = this
-                                    .burst_groups
-                                    .iter()
-                                    .filter(|(_, e)| e.group_id == entry.group_id)
-                                    .map(|(&pos, _)| pos)
-                                    .take(4)
-                                    .collect();
-                                if group_members.len() >= 2 {
-                                    group_members
-                                } else {
-                                    vec![cur]
-                                }
-                            } else {
-                                vec![cur]
-                            }
-                        } else {
-                            Vec::new()
-                        };
-
-                    if candidate_indices.len() >= 2 {
-                        this.view_before_compare = this.view_mode;
-                        this.compare_indices = candidate_indices;
-                        this.compare_focused_slot = 0;
-                        this.view_mode = ViewMode::Compare;
-                    } else {
-                        this.set_status_message("对比模式需要多选 2–4 张照片或位于连拍组");
                     }
                 }
                 cx.notify();
@@ -455,7 +457,10 @@ impl Render for AppState {
                     });
                 }
             }))
-            .on_action(cx.listener(|this, _: &OpenSettings, _window, cx| {
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                this.sync_accent_input(window, cx);
+                this.sync_font_input(window, cx);
+                this.sync_font_select(window, cx);
                 this.active_dialog = Some(ActiveDialog::Settings);
                 cx.notify();
             }))

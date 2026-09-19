@@ -2,7 +2,7 @@
 //!
 //! 用官方 Dock 组件（DockArea + DockSkin）搭工作区：
 //! - 左停靠区：文件树 / 批量操作（dock 自己的标签栏，替代原来的自绘 TabBar）
-//! - 中央：当前主视图（网格 / 预览 / 对比 / 幻灯片 / 统计）
+//! - 中央：当前主视图（网格 / 预览 / 幻灯片 / 统计）
 //! - 右停靠区：信息 / 调整
 //!
 //! 边缘拖宽、折叠显隐、宽度持久化都由 dock 负责；set_locked(true) 只锁重排，
@@ -20,7 +20,7 @@ use gpui_kit::{
 
 use crate::state::{AppState, ViewMode};
 use crate::views::{
-    render_adjustments_tab, render_batch_ops_tab, render_compare_view, render_file_tree_tab,
+    render_adjustments_tab, render_batch_ops_tab, render_file_tree_tab,
     render_filter_bar, render_info_tab, render_photo_grid, render_photo_preview, render_slideshow,
     render_stats_view,
 };
@@ -64,7 +64,6 @@ fn view_label(mode: ViewMode) -> &'static str {
     match mode {
         ViewMode::Grid => "网格",
         ViewMode::Preview => "预览",
-        ViewMode::Compare => "对比",
         ViewMode::Slideshow => "幻灯片",
         ViewMode::Stats => "统计",
     }
@@ -130,7 +129,7 @@ impl DockPanel {
                 v_flex()
                     .w_full()
                     .p_3()
-                    .child(render_adjustments_tab(state, meta.as_ref(), cx))
+                    .child(render_adjustments_tab(state, meta.as_ref(), window, cx))
                     .into_any_element()
             }),
             DockPanelKind::Center => self.app.update(cx, |state, cx| {
@@ -144,9 +143,6 @@ impl DockPanel {
                         ViewMode::Grid => render_photo_grid(state, window, cx).into_any_element(),
                         ViewMode::Preview => {
                             render_photo_preview(state, window, cx).into_any_element()
-                        }
-                        ViewMode::Compare => {
-                            render_compare_view(state, window, cx).into_any_element()
                         }
                         ViewMode::Slideshow => {
                             render_slideshow(state, window, cx).into_any_element()

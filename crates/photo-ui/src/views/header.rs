@@ -2,18 +2,19 @@
 //!
 //! 44px 高：
 //! - 左：当前目录名 + 项数
-//! - 中：网格 / 预览 / 对比 / 幻灯片 / 统计 签名下划线 Tab
+//! - 中：网格 / 预览 / 幻灯片 / 统计 签名下划线 Tab
 //! - 右：扫描/识别任务进度 + 快捷动作
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _,
+    ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     tag::Tag,
 };
 use gpui_kit::{ClickEvent, Context, IntoElement, Window, div, prelude::*, px};
 
-use crate::actions::{Compare, OpenSettings, Rescan, Slideshow, Stats};
+use crate::actions::{OpenSettings, RecognizeAllUnrecognized, Rescan, Stats};
 use crate::state::{AppState, ViewMode};
 
 pub fn render_header(
@@ -30,6 +31,33 @@ pub fn render_header(
 
     let total_count = state.items.len();
     let filtered_count = state.display_order.len();
+
+    // 「全部识别」按钮：作用口径与 Ctrl+B（RecognizeAllUnrecognized）完全一致——
+    // 只覆盖当前目录里**从未识别**（recognition_status == None）的照片，不碰筛选、
+    // 也不重跑已有结果（要连已识别的一起重跑是 Ctrl+Shift+B）。
+    let unrecognized_count = state
+        .items
+        .iter()
+        .filter(|m| m.recognition_status.is_none())
+        .count();
+    // 按钮直接 dispatch 既有 action，不复制识别逻辑
+    let (recognize_label, recognize_disabled, recognize_tip) = if state.is_recognizing {
+        ("识别中…".to_string(), true, "批量识别进行中（状态栏可取消）")
+    } else if unrecognized_count > 0 {
+        (
+            format!("全部识别 {unrecognized_count}"),
+            false,
+            "识别当前目录全部未识别照片（Ctrl+B）；连已识别的一起重跑用 Ctrl+Shift+B",
+        )
+    } else if state.items.is_empty() {
+        ("全部识别".to_string(), true, "当前目录还没有照片")
+    } else {
+        (
+            "全部已识别".to_string(),
+            true,
+            "没有未识别的照片；要全部重跑用 Ctrl+Shift+B",
+        )
+    };
 
     h_flex()
         .w_full()
@@ -103,7 +131,7 @@ pub fn render_header(
                 .child(render_view_mode_pill(
                     "pill-view-preview",
                     "单张",
-                    IconName::Frame,
+                    IconName::Image,
                     state.view_mode == ViewMode::Preview,
                     cx.listener(|state, _, _, cx| {
                         if state.primary_selected_meta().is_some() {
@@ -114,26 +142,6 @@ pub fn render_header(
                             cx.notify();
                         }
                     }),
-                    cx,
-                ))
-                .child(render_view_mode_pill(
-                    "pill-view-compare",
-                    "对比",
-                    IconName::Copy,
-                    state.view_mode == ViewMode::Compare,
-                    |_, window, cx| {
-                        window.dispatch_action(Box::new(Compare), cx);
-                    },
-                    cx,
-                ))
-                .child(render_view_mode_pill(
-                    "pill-view-slideshow",
-                    "连拍",
-                    IconName::Play,
-                    state.view_mode == ViewMode::Slideshow,
-                    |_, window, cx| {
-                        window.dispatch_action(Box::new(Slideshow), cx);
-                    },
                     cx,
                 ))
                 .child(render_view_mode_pill(
@@ -173,6 +181,19 @@ pub fn render_header(
                             ),
                     )
                 })
+                // ── 全部识别（Ctrl+B 同效）：常驻可见，不用先选中照片 ──
+                .child(
+                    Button::new("header-recognize-all")
+                        .secondary()
+                        .small()
+                        .icon(IconName::Sparkles)
+                        .disabled(recognize_disabled)
+                        .tooltip(recognize_tip)
+                        .label(recognize_label)
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(RecognizeAllUnrecognized), cx);
+                        }),
+                )
                 .child(
                     Button::new("header-rescan")
                         .ghost()

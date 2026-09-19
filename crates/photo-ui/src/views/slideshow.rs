@@ -132,6 +132,7 @@ pub fn render_slideshow(
                                 .ghost()
                                 .xsmall()
                                 .icon(IconName::ChevronLeft)
+                                .tooltip("上一张 (←)")
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(Box::new(Prev), cx);
                                 }),
@@ -146,6 +147,11 @@ pub fn render_slideshow(
                                 } else {
                                     IconName::Pause
                                 })
+                                .tooltip(if state.slideshow_paused {
+                                    "播放 (空格)"
+                                } else {
+                                    "暂停 (空格)"
+                                })
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(Box::new(TogglePlay), cx);
                                 }),
@@ -156,6 +162,7 @@ pub fn render_slideshow(
                                 .ghost()
                                 .xsmall()
                                 .icon(IconName::ChevronRight)
+                                .tooltip("下一张 (→)")
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(Box::new(Next), cx);
                                 }),

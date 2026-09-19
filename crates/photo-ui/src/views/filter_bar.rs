@@ -85,6 +85,7 @@ pub fn render_filter_bar(
                                                 .icon(IconName::Close)
                                                 .ghost()
                                                 .xsmall()
+                                                .tooltip("清除格式筛选")
                                                 .on_click(cx.listener(|state, _, _, cx| {
                                                     state.criteria.format_filter = None;
                                                     state.recompute_pipeline();
@@ -107,6 +108,7 @@ pub fn render_filter_bar(
                                                 .icon(IconName::Close)
                                                 .ghost()
                                                 .xsmall()
+                                                .tooltip("清除评分筛选")
                                                 .on_click(cx.listener(|state, _, _, cx| {
                                                     state.criteria.min_rating = None;
                                                     state.recompute_pipeline();
@@ -129,6 +131,7 @@ pub fn render_filter_bar(
                                                 .icon(IconName::Close)
                                                 .ghost()
                                                 .xsmall()
+                                                .tooltip("清除旗标筛选")
                                                 .on_click(cx.listener(|state, _, _, cx| {
                                                     state.criteria.flag_filter = None;
                                                     state.recompute_pipeline();
@@ -151,6 +154,7 @@ pub fn render_filter_bar(
                                                 .icon(IconName::Close)
                                                 .ghost()
                                                 .xsmall()
+                                                .tooltip("清除色标筛选")
                                                 .on_click(cx.listener(|state, _, _, cx| {
                                                     state.criteria.color_label = None;
                                                     state.recompute_pipeline();
@@ -175,6 +179,7 @@ pub fn render_filter_bar(
                                                     .icon(IconName::Close)
                                                     .ghost()
                                                     .xsmall()
+                                                    .tooltip("清除识别筛选")
                                                     .on_click(cx.listener(|state, _, _, cx| {
                                                         state.criteria.recognition_filter =
                                                             RecognitionFilter::All;

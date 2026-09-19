@@ -63,6 +63,11 @@ pub fn render_photo_preview(
         return render_video_preview(state, &meta, window, cx).into_any_element();
     }
 
+    // 调整参数（ADR 0007）：装载焦点图的参数；非中性时预览走「调整母版」，不再请求原图母版
+    state.ensure_adjustments_loaded(&meta.primary_path, window, cx);
+    let adjust_active = state.adjust_path.as_deref() == Some(meta.primary_path.as_str())
+        && !state.adjust.is_neutral();
+
     // 视口尺寸：优先使用 post-layout prepaint 实测尺寸；首帧回退根据窗口与边栏动态估算
     let (container_w, container_h) = if let Some((w, h)) = state.preview_viewport_size {
         (w, h)
@@ -144,7 +149,10 @@ pub fn render_photo_preview(
         .preview_image
         .as_ref()
         .is_some_and(|(p, _)| p == &meta.primary_path);
-    if !has_master && state.preview_request.as_deref() != Some(meta.primary_path.as_str()) {
+    if !has_master
+        && !adjust_active
+        && state.preview_request.as_deref() != Some(meta.primary_path.as_str())
+    {
         if let Some(src) = source.clone() {
             state.preview_request = Some(meta.primary_path.clone());
             load_preview_image(
@@ -162,7 +170,9 @@ pub fn render_photo_preview(
         .as_ref()
         .is_some_and(|s| matches!(s.format, photo_domain::ImageFormat::Raw(_)));
     let original_path = std::path::PathBuf::from(&meta.primary_path);
-    let one_to_one = state.preview_zoom == 0.0 && !is_raw && original_path.exists();
+    // 有调整时不切原图：原文件没有烘焙参数，1:1 会静默丢掉调整效果（全尺寸重算见 ADR 遗留项）
+    let one_to_one =
+        state.preview_zoom == 0.0 && !is_raw && original_path.exists() && !adjust_active;
 
     let master = state
         .preview_image
@@ -173,7 +183,8 @@ pub fn render_photo_preview(
     // 显示尺寸超过母版可用像素（母版长边 = MASTER_SIZE）时需要真原图：1:1 与高倍放大都属此列。
     // 常规图直接渲染原文件（one_to_one），RAW 渲染层解不了，改后台加载全分辨率母版
     // （get_or_generate_full：AHD 全尺寸 + 落盘缓存）。否则 1:1 就是把 2560 母版放大 3 倍多。
-    let need_full = is_raw && exceeds_master_res((disp_w, disp_h), MASTER_SIZE);
+    let need_full =
+        is_raw && exceeds_master_res((disp_w, disp_h), MASTER_SIZE) && !adjust_active;
     let full = if need_full {
         state
             .preview_full
@@ -414,6 +425,7 @@ pub fn render_photo_preview(
                                 .ghost()
                                 .xsmall()
                                 .icon(IconName::Minus)
+                                .tooltip("缩小 (-)")
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(Box::new(ZoomOut), cx);
                                 }),
@@ -433,6 +445,7 @@ pub fn render_photo_preview(
                                 .ghost()
                                 .xsmall()
                                 .icon(IconName::Plus)
+                                .tooltip("放大 (=)")
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(Box::new(ZoomIn), cx);
                                 }),
