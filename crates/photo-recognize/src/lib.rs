@@ -360,6 +360,14 @@ mod tests {
     use photo_domain::{BBox, ImageFormat, RecognitionFailureStage, RecognitionStatus, SourceFile};
     use std::path::PathBuf;
 
+    /// 常驻缓存的前提：识别器要能跨到后台执行器线程（photo-ui 的
+    /// SharedRecognizer 把它放进 Arc<Mutex<..>> 后 move 进 background_executor）。
+    #[test]
+    fn test_recognizer_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<Recognizer>();
+    }
+
     /// 验证失败阶段 → 识别状态的映射表
     #[test]
     fn test_failure_stage_status_mapping() {

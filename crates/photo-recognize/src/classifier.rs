@@ -25,7 +25,10 @@ pub struct Classified {
 }
 
 /// 识别后端。
-pub trait Classifier {
+///
+/// `Send`：识别器要常驻缓存（`photo-ui` 的批量识别与框选识别共用同一个实例，
+/// 装配一次约 1-2s），实例会跨到后台执行器线程。
+pub trait Classifier: Send {
     /// 对给定区域分类并落到物种。
     ///
     /// 推理层故障返回 Err（管线映射为 NeedsReview(Classification)）；

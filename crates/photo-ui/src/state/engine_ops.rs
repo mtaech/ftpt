@@ -20,7 +20,7 @@ use photo_engine::folder_db::{ExifCacheRow, FileEntry, FolderDb};
 use photo_engine::global_db::{GlobalDb, SpeciesRow};
 use photo_engine::scanner;
 
-use super::app_state::AppState;
+use super::app_state::{AppState, SharedRecognizer};
 
 /// 在监听器里安全触发一个「会同步 update AppState」的入口（扫描 / 识别 / 删除 …）。
 ///
@@ -791,6 +791,43 @@ fn apply_recognition(
     }
 }
 
+/// 状态栏/日志里的识别器名（BioCLIP 是唯一后端）
+const BACKEND_LABEL: &str = "BioCLIP（全物种）";
+
+/// 确保常驻识别器已装配（**在后台线程调用**；已装配则直接返回）。
+///
+/// 模型装配（org_det + BioCLIP int8 + 名录子集，约 1-2s）只做一次：批量识别与框选
+/// 识别共用同一个实例，避免每次识别都重装。失败返回面向用户的错误文案。
+fn ensure_recognizer(
+    slot: &SharedRecognizer,
+    models_dir: &Path,
+    catalog_db: &Path,
+) -> Result<(), String> {
+    let mut guard = slot.lock();
+    if guard.is_none() {
+        match photo_recognize::Recognizer::new(models_dir, catalog_db) {
+            Ok(recognizer) => {
+                tracing::info!(
+                    "识别器装配完成（常驻缓存）：后端 {}（{}），资产版本 {:?}",
+                    recognizer.classifier_backend(),
+                    BACKEND_LABEL,
+                    recognizer.asset_version()
+                );
+                *guard = Some(recognizer);
+                Ok(())
+            }
+            // RecognizeError::ModelLoad 的文案已含「缺哪个文件」，直接透传
+            Err(e) => {
+                let msg = format!("初始化识别模型失败（{BACKEND_LABEL}）：{e}");
+                tracing::warn!("{msg}");
+                Err(msg)
+            }
+        }
+    } else {
+        Ok(())
+    }
+}
+
 /// 预览手动框选识别（漏检补充）：对用户框选的区域跑识别（跳过 YOLO 检测），
 /// 结果作为**新主体**追加进该照片已有的 subjects，落 folder_db + 全局索引。
 ///
@@ -802,19 +839,18 @@ pub fn start_region_recognition(
     bbox: BBox,
     cx: &mut App,
 ) {
-    // 防重入：同一时刻只跑一次框选识别
-    let proceed = state_entity.update(cx, |state, cx| {
+    // 防重入：同一时刻只跑一次框选识别；顺带取出常驻识别器槽位
+    let Some(shared) = state_entity.update(cx, |state, cx| {
         if state.region_recognizing {
-            return false;
+            return None;
         }
         state.region_recognizing = true;
         state.set_status_message("框选识别中…".to_string());
         cx.notify();
-        true
-    });
-    if !proceed {
+        Some(state.recognizer.clone())
+    }) else {
         return;
-    }
+    };
 
     let Some(data_root) = crate::state::app_state::data_root() else {
         state_entity.update(cx, |state, cx| {
@@ -830,10 +866,11 @@ pub fn start_region_recognition(
     cx.spawn(async move |async_cx: &mut gpui_kit::AsyncApp| {
         // 后台：模型装配 + 区域识别（CPU 密集，绝不放前台执行器）
         let path_bg = path.clone();
-        let result = async_cx
+        let result: Result<photo_domain::Recognition, String> = async_cx
             .background_executor()
             .spawn(async move {
-                let mut recognizer = photo_recognize::Recognizer::new(&models_dir, &catalog_db)?;
+                // 常驻识别器：首次调用装配（~1-2s），之后复用（批量/框选共用）
+                ensure_recognizer(&shared, &models_dir, &catalog_db)?;
                 let format = photo_domain::ImageFormat::from_extension(
                     path_bg
                         .extension()
@@ -855,7 +892,14 @@ pub fn start_region_recognition(
                     }],
                     primary_index: 0,
                 };
-                recognizer.recognize_region(&capture, bbox, None)
+                // 推理期间持锁：与批量识别互斥（同一个 ONNX session 不做并发推理）
+                let mut guard = shared.lock();
+                let Some(recognizer) = guard.as_mut() else {
+                    return Err("识别器未就绪".to_string());
+                };
+                recognizer
+                    .recognize_region(&capture, bbox, None)
+                    .map_err(|e| e.to_string())
             })
             .await;
 
@@ -1056,8 +1100,8 @@ pub fn start_recognition(
 
     let models_dir = data_root.join("models");
     let catalog_db = data_root.join("data/bird_catalog.db");
-    // 状态栏/日志里的识别器名（BioCLIP 是唯一后端）
-    const BACKEND_LABEL: &str = "BioCLIP（全物种）";
+    // 常驻识别器槽位：克隆进后台线程（批量与框选共用同一实例，装配一次）
+    let shared_recognizer = state_entity.read(cx).recognizer.clone();
 
     // 后台 worker -> 前台的结果队列（前台 try_recv 非阻塞，节拍到了就收）
     let (tx, rx) = std::sync::mpsc::channel::<RecognizeOutcome>();
@@ -1067,27 +1111,12 @@ pub fn start_recognition(
         async_cx
             .background_executor()
             .spawn(async move {
-                let recognizer = photo_recognize::Recognizer::new(&models_dir, &catalog_db);
-                let mut recognizer = match recognizer {
-                    Ok(recognizer) => {
-                        tracing::info!(
-                            "识别器就绪：后端 {}（{}），资产版本 {:?}",
-                            recognizer.classifier_backend(),
-                            BACKEND_LABEL,
-                            recognizer.asset_version()
-                        );
-                        recognizer
-                    }
-                    Err(e) => {
-                        // RecognizeError::ModelLoad 的文案已含「缺哪个文件」，直接透传
-                        tracing::warn!("初始化识别模型失败（{BACKEND_LABEL}）: {e}");
-                        let _ = tx.send(RecognizeOutcome::Fatal(format!(
-                            "初始化识别模型失败（{BACKEND_LABEL}）：{e}"
-                        )));
-                        let _ = tx.send(RecognizeOutcome::Finished);
-                        return;
-                    }
-                };
+                // 常驻识别器：首次调用装配（~1-2s），之后复用（批量/框选共用）
+                if let Err(msg) = ensure_recognizer(&shared_recognizer, &models_dir, &catalog_db) {
+                    let _ = tx.send(RecognizeOutcome::Fatal(msg));
+                    let _ = tx.send(RecognizeOutcome::Finished);
+                    return;
+                }
 
                 for (idx, path) in items_to_recognize {
                     if cancel_flag.load(Ordering::Relaxed) {
@@ -1114,7 +1143,16 @@ pub fn start_recognition(
                         }],
                         primary_index: 0,
                     };
-                    let result = recognizer.recognize(&capture, None, None);
+                    // 锁只在单张推理期间持有（不整批持有）：框选识别可在两张之间插进来
+                    let result = {
+                        let mut guard = shared_recognizer.lock();
+                        match guard.as_mut() {
+                            Some(recognizer) => recognizer.recognize(&capture, None, None),
+                            None => Err(photo_recognize::RecognizeError::ModelLoad(
+                                "识别器未就绪".to_string(),
+                            )),
+                        }
+                    };
                     let filename = path
                         .file_name()
                         .unwrap_or_default()

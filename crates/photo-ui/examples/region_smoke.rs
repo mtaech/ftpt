@@ -1,14 +1,17 @@
-//! 手动冒烟：预览「框选识别」（漏检补充）端到端链路（无头，自建素材，不碰真实配置）。
+//! 手动冒烟：预览「框选识别」（漏检补充）+ 识别器常驻（无头，自建素材，不碰真实配置）。
 //!
 //! 跑法：
 //!   XDG_CONFIG_HOME=/tmp/pt-region-config xvfb-run -a \
 //!     cargo run -p photo-ui --example region_smoke
 //! 全部通过退出码 0；失败退出码 1；缺 models/ 时跳过（退出码 0）。
 //!
-//! 钉住三件事：
+//! 钉住：
 //!   1) ToggleRegionSelect action 切换框选模式状态
-//!   2) 框选识别结果**追加**为该照片的新主体（漏检补充语义，不覆盖已有主体）
-//!   3) folder_db 持久化的 subjects 同步增长 + 全局索引（global.db）落行
+//!   2) 识别器懒装配一次后**常驻缓存**（槽位从 None → Some 并保持），
+//!      第二次框选免掉 ~1-2s 模型装配
+//!   3) 框选结果**追加**为该照片的新主体（首次建结论、二次追加，不覆盖已有主体）
+//!   4) folder_db 持久化同步 + 全局索引（global.db）落行
+//!   5) 批量识别复用同一常驻实例（不再另装一份）
 //!
 //! 说明：鼠标坐标 → 归一化 bbox 的换算由 model::tests 的纯函数单测覆盖；
 //! 本冒烟直接调 start_region_recognition 验证引擎/持久化链路（含真实模型推理）。
@@ -149,42 +152,30 @@ fn main() {
                     !read_state!(|s: &AppState| s.region_select)
                 );
 
-                // ── 2) 先自动识别，拿到基准主体数 ──
-                fire(async_cx, handle, Box::new(RecognizeAllUnrecognized));
-                let mut started = false;
-                for _ in 0..800 {
-                    pump(async_cx, 50).await;
-                    let recognizing = read_state!(|s: &AppState| s.is_recognizing);
-                    if recognizing {
-                        started = true;
-                    } else if started {
-                        break;
-                    }
-                }
-                let (path, before_subjects, before_status) = read_state!(|s: &AppState| {
-                    let m = &s.items[0];
-                    (
-                        std::path::PathBuf::from(&m.primary_path),
-                        m.subjects.len(),
-                        m.recognition_status.is_some(),
-                    )
-                });
-                check!("自动识别跑完且拿到状态", before_status);
+                // ── 2) 识别器懒加载：任何识别之前槽位应为空 ──
                 check!(
-                    format!("自动识别后主体数 {before_subjects}（>=1）"),
-                    before_subjects >= 1
+                    "识别器初始未装配（懒加载）",
+                    !read_state!(|s: &AppState| s.recognizer.lock().is_some())
                 );
 
-                // ── 3) 框选识别：对区域追加一个新主体 ──
-                let bbox = BBox::new(0.15, 0.15, 0.65, 0.75);
+                let path = read_state!(|s: &AppState| {
+                    std::path::PathBuf::from(&s.items[0].primary_path)
+                });
+
+                // ── 3) 第一次框选（冷启动：装配 + 识别）→ 首次建立结论 ──
+                let t_first = std::time::Instant::now();
                 async_cx.update(|cx| {
-                    start_region_recognition(task_state.clone(), path.clone(), bbox, cx);
+                    start_region_recognition(
+                        task_state.clone(),
+                        path.clone(),
+                        BBox::new(0.15, 0.15, 0.65, 0.75),
+                        cx,
+                    );
                 });
                 check!(
                     "框选识别已启动（进行中标志置位）",
                     read_state!(|s: &AppState| s.region_recognizing)
                 );
-
                 let mut finished = false;
                 for _ in 0..800 {
                     // 最多 40s（含模型装配）
@@ -194,34 +185,63 @@ fn main() {
                         break;
                     }
                 }
-                check!("框选识别在 40s 内完成", finished);
-
-                let after_subjects = read_state!(|s: &AppState| s.items[0].subjects.len());
+                let first_elapsed = t_first.elapsed();
+                let after_first = read_state!(|s: &AppState| s.items[0].subjects.len());
                 let status_msg = read_state!(|s: &AppState| {
                     s.status_message.as_ref().map(|(m, _)| m.clone())
                 });
                 check!(
-                    format!(
-                        "框选结果追加为主体（{before_subjects} → {after_subjects}）[状态栏: {:?}]",
-                        status_msg
-                    ),
-                    after_subjects == before_subjects + 1
+                    format!("第一次框选在 40s 内完成并建立结论（{after_first} 个主体）[状态栏: {status_msg:?}]"),
+                    finished && after_first == 1
                 );
 
-                // ── 4) 持久化：folder_db 的主体数一致 ──
-                let rel = "reg_0.jpg";
+                // ── 4) 常驻缓存：槽位已装配并保持 ──
+                check!(
+                    "识别器装配后常驻缓存（槽位 Some）",
+                    read_state!(|s: &AppState| s.recognizer.lock().is_some())
+                );
+
+                // ── 5) 第二次框选（热：直接复用，免装配）→ 追加为主体 ──
+                let t_second = std::time::Instant::now();
+                async_cx.update(|cx| {
+                    start_region_recognition(
+                        task_state.clone(),
+                        path.clone(),
+                        BBox::new(0.35, 0.4, 0.85, 0.9),
+                        cx,
+                    );
+                });
+                let mut finished2 = false;
+                for _ in 0..800 {
+                    pump(async_cx, 50).await;
+                    if !read_state!(|s: &AppState| s.region_recognizing) {
+                        finished2 = true;
+                        break;
+                    }
+                }
+                let second_elapsed = t_second.elapsed();
+                let after_second = read_state!(|s: &AppState| s.items[0].subjects.len());
+                println!(
+                    "[diag] 框选耗时：首次 {first_elapsed:?}（含模型装配）/ 第二次 {second_elapsed:?}（复用常驻）"
+                );
+                check!(
+                    format!("第二次框选**追加**为主体且免装配（1 → {after_second}，耗时 {second_elapsed:?}）"),
+                    finished2 && after_second == after_first + 1
+                );
+
+                // ── 6) 持久化：folder_db 的主体数一致 ──
                 let persisted = read_state!(|s: &AppState| {
                     s.folder_db
                         .as_ref()
-                        .and_then(|db| db.get_recognition(rel).ok().flatten())
+                        .and_then(|db| db.get_recognition("reg_0.jpg").ok().flatten())
                         .map(|r| r.subjects.len())
                 });
                 check!(
-                    format!("folder_db 持久化主体数 {persisted:?} == {after_subjects}"),
-                    persisted == Some(after_subjects)
+                    format!("folder_db 持久化主体数 {persisted:?} == {after_second}"),
+                    persisted == Some(after_second)
                 );
 
-                // ── 5) 全局索引：应有对应主体行 ──
+                // ── 7) 全局索引：应有对应主体行 ──
                 let gdb_rows = read_state!(|s: &AppState| {
                     s.global_db
                         .as_ref()
@@ -229,8 +249,25 @@ fn main() {
                         .map(|v| v.iter().map(|x| x.photo_count).sum::<i64>())
                 });
                 check!(
-                    format!("全局索引主体行数 {gdb_rows:?}（>= {after_subjects}）"),
-                    gdb_rows.unwrap_or(0) >= after_subjects as i64
+                    format!("全局索引主体行数 {gdb_rows:?}（>= {after_second}）"),
+                    gdb_rows.unwrap_or(0) >= after_second as i64
+                );
+
+                // ── 8) 批量识别复用同一常驻实例（不再另装一份）──
+                fire(async_cx, handle, Box::new(RecognizeAllUnrecognized));
+                let mut started = false;
+                for _ in 0..300 {
+                    pump(async_cx, 50).await;
+                    if read_state!(|s: &AppState| s.is_recognizing) {
+                        started = true;
+                    } else if started {
+                        break;
+                    }
+                }
+                check!(
+                    "批量识别跑完且仍复用同一常驻识别器",
+                    read_state!(|s: &AppState| s.recognizer.lock().is_some())
+                        && !read_state!(|s: &AppState| s.is_recognizing)
                 );
 
                 // 清理：本冒烟在临时目录产生的全局索引行不留在开发库

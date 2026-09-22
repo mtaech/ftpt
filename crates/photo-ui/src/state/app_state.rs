@@ -166,6 +166,11 @@ pub fn build_font_options(current_font: &str, cx: &App) -> SearchableVec<ChoiceO
     SearchableVec::new(options)
 }
 
+/// 常驻识别器（懒加载，装配一次 ~1-2s 后复用；批量识别与框选识别共用同一实例）。
+/// `Arc<Mutex<Option<..>>>`：克隆后 move 进后台执行器线程；None = 尚未装配。
+/// 模型/名录路径在进程内固定，故不需要失效重建。
+pub type SharedRecognizer = Arc<parking_lot::Mutex<Option<photo_recognize::Recognizer>>>;
+
 /// 应用核心权威与派生状态
 pub struct AppState {
     pub settings_tab: SettingsTab,
@@ -174,6 +179,8 @@ pub struct AppState {
     pub items: Vec<CaptureMeta>,
     pub folder_db: Option<FolderDb>,
     pub global_db: Option<GlobalDb>,
+    /// 常驻识别器（识别路径懒装配一次后复用，避免每次识别/框选重装 ~1-2s 模型）
+    pub recognizer: SharedRecognizer,
     pub app_config: AppConfig,
     pub image_manager: ImageManager,
     pub op_journal: OpJournal,
@@ -601,6 +608,7 @@ impl AppState {
             items: Vec::new(),
             folder_db: None,
             global_db,
+            recognizer: Arc::new(parking_lot::Mutex::new(None)),
             app_config,
             image_manager: ImageManager::new(None),
             op_journal: OpJournal::new(),
