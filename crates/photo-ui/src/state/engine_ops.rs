@@ -547,6 +547,50 @@ async fn do_background_scan(
     Ok((metas, folder_db))
 }
 
+/// EXIF 补提取完成后，把当前文件夹的拍摄日期回写全局索引（docs/todo.md #12 残留）。
+///
+/// 扫描完成时索引行的 `date_taken` 取的是**补提取之前**的元数据（首次扫描恒为 None），
+/// 而 `species_stats()` 的 `first_date` / `last_date` 直接读它——不补写，一个目录的
+/// 「首见/最近」日期会一直缺到下次重扫。这里只对本批补到日期的照片按 rel_path 增量
+/// upsert（没有识别记录的照片本来就不在索引里，跳过；`upsert_rows` 是 REPLACE 语义，
+/// 其余列原样带回）。返回写入行数，失败只记日志（派生索引是尽力而为）。
+pub fn rewrite_folder_index_dates(
+    folder_db: &FolderDb,
+    global_db: &GlobalDb,
+    folder: &Path,
+    items: &[CaptureMeta],
+) -> usize {
+    let folder_str = folder.to_string_lossy().to_string();
+    let mut rows: Vec<SpeciesRow> = Vec::new();
+    for meta in items {
+        let Some(date) = meta.date_taken.as_deref() else {
+            continue;
+        };
+        let Some(rel) = rel_path_of(folder, Path::new(&meta.primary_path)) else {
+            continue;
+        };
+        let Ok(Some(rec)) = folder_db.get_recognition(&rel) else {
+            continue;
+        };
+        rows.extend(SpeciesRow::from_recognition(
+            &folder_str,
+            &rel,
+            &rec,
+            Some(date),
+        ));
+    }
+    if rows.is_empty() {
+        return 0;
+    }
+    match global_db.upsert_rows(&rows) {
+        Ok(()) => rows.len(),
+        Err(e) => {
+            tracing::warn!("全局索引回写拍摄日期失败：{e}");
+            0
+        }
+    }
+}
+
 /// 后台增量 EXIF 提取
 pub fn start_background_enrich(state_entity: Entity<AppState>, generation: u64, cx: &mut App) {
     let to_enrich: Vec<(usize, PathBuf, ImageFormat)> = state_entity.update(cx, |state, _| {
@@ -590,15 +634,31 @@ pub fn start_background_enrich(state_entity: Entity<AppState>, generation: u64, 
                 if state.scan_generation != generation {
                     return;
                 }
+                let mut enriched = 0usize;
                 for (idx, path, meta) in enriched_results {
                     if let Some(item) = state.items.get_mut(idx) {
                         item.enrich_with_exif(&meta);
                         if let Some(db) = &state.folder_db {
                             let _ = db.put_exif(&path, &meta);
                         }
+                        enriched += 1;
                     }
                 }
                 state.recompute_pipeline();
+                // 索引行在扫描那一刻取的是补提取前的 date_taken（首次扫描恒为 None）→
+                // 补到日期后重写一次，`species_stats()` 的首见/最近日期才是真的
+                if enriched > 0
+                    && let (Some(db), Some(gdb), Some(dir)) = (
+                        state.folder_db.as_ref(),
+                        state.global_db.as_ref(),
+                        state.current_dir.clone(),
+                    )
+                {
+                    let written = rewrite_folder_index_dates(db, gdb, &dir, &state.items);
+                    if written > 0 {
+                        tracing::debug!("全局索引回写拍摄日期：{written} 行");
+                    }
+                }
                 cx.notify();
             });
         });
@@ -1774,6 +1834,73 @@ mod recognition_tests {
             primary_index: 0,
         };
         CaptureMeta::from_capture(&capture, 0)
+    }
+
+    /// 造一个临时工作区：照片目录（folder_db）+ 数据目录（global_db），互不干扰
+    fn temp_dbs(tag: &str) -> (PathBuf, FolderDb, GlobalDb) {
+        let base = std::env::temp_dir().join(format!("ftpt-index-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let photo_dir = base.join("photos");
+        std::fs::create_dir_all(&photo_dir).expect("建照片目录");
+        let db = FolderDb::open_in_dir(&photo_dir).expect("开 folder_db");
+        let gdb = GlobalDb::open(&base.join("data")).expect("开 global_db");
+        (photo_dir, db, gdb)
+    }
+
+    fn crow() -> photo_domain::Recognition {
+        recognition(Some(TaxonMatch {
+            taxon_id: Some(42),
+            cn_name: "大嘴乌鸦".to_string(),
+            latin_name: "Corvus macrorhynchos".to_string(),
+            cn_level: CnLevel::Species,
+            ranks: vec![],
+        }))
+    }
+
+    #[test]
+    fn test_rewrite_folder_index_dates_backfills_first_date() {
+        let (photo_dir, db, gdb) = temp_dbs("dates");
+        let rec = crow();
+        db.upsert_recognition("a.jpg", &rec).expect("写识别行");
+        let folder = photo_dir.to_string_lossy().to_string();
+        // 扫描那一刻：EXIF 还没提取，date_taken = None
+        gdb.upsert_rows(&SpeciesRow::from_recognition(&folder, "a.jpg", &rec, None))
+            .expect("写索引行");
+        assert_eq!(
+            gdb.species_stats().expect("统计")[0].first_date,
+            None,
+            "扫描时索引没有日期"
+        );
+
+        // 补提取完成后 items 带回日期 → 回写
+        let mut meta = empty_meta();
+        meta.primary_path = photo_dir.join("a.jpg").to_string_lossy().to_string();
+        meta.date_taken = Some("2024:05:12 10:30:00".to_string());
+        let written = rewrite_folder_index_dates(&db, &gdb, &photo_dir, &[meta]);
+        assert_eq!(written, 1, "命中一条有识别记录的照片");
+
+        let stats = gdb.species_stats().expect("统计");
+        let stat = stats
+            .iter()
+            .find(|s| s.species_name == "大嘴乌鸦")
+            .expect("物种行");
+        assert_eq!(
+            stat.first_date.as_deref(),
+            Some("2024:05:12 10:30:00"),
+            "首见日期被回写"
+        );
+        assert_eq!(stat.first_date, stat.last_date, "只有一条记录");
+    }
+
+    #[test]
+    fn test_rewrite_folder_index_dates_skips_without_recognition() {
+        let (photo_dir, db, gdb) = temp_dbs("nodate");
+        let mut meta = empty_meta();
+        meta.primary_path = photo_dir.join("b.jpg").to_string_lossy().to_string();
+        meta.date_taken = Some("2024-01-01".to_string());
+        // 没有识别记录 → 不新建索引行（回写是「更新」而不是「补录」）
+        assert_eq!(rewrite_folder_index_dates(&db, &gdb, &photo_dir, &[meta]), 0);
+        assert!(gdb.species_stats().expect("统计").is_empty());
     }
 
     #[test]

@@ -18,7 +18,8 @@ use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::select::SelectState;
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, SharedString, Subscription, UniformListScrollHandle, Window,
+    App, AppContext as _, Context, Entity, ScrollHandle, SharedString, Subscription,
+    UniformListScrollHandle, Window,
 };
 
 use super::import::ImportState;
@@ -287,6 +288,13 @@ pub struct AppState {
     /// 网格容器实测尺寸（post-layout prepaint 回填）；缩略图边长按它算，
     /// 首帧为空时按窗口与停靠区宽度估算。
     pub grid_viewport_size: Option<(f64, f64)>,
+    /// 列表滚动句柄（GPUI 溢出容器不画滚动条，必须 track_scroll + 叠 Scrollbar；
+    /// 规格统一在 `views/scroll_area.rs`）：统计页左栏物种榜 / 右栏照片网格 /
+    /// 导入弹窗内容 / 胶片条。
+    pub stats_species_scroll: ScrollHandle,
+    pub stats_photos_scroll: ScrollHandle,
+    pub import_scroll: ScrollHandle,
+    pub filmstrip_scroll: ScrollHandle,
     /// 拖宽去抖保存的世代号（350ms 内多次变更只落盘一次）
     layout_save_generation: u64,
     /// Dock 布局事件订阅（drop 即取消，必须持有）
@@ -710,6 +718,10 @@ impl AppState {
             grid_columns: 4,
             grid_scroll: UniformListScrollHandle::new(),
             grid_viewport_size: None,
+            stats_species_scroll: ScrollHandle::new(),
+            stats_photos_scroll: ScrollHandle::new(),
+            import_scroll: ScrollHandle::new(),
+            filmstrip_scroll: ScrollHandle::new(),
             layout_save_generation: 0,
             _dock_subscription: None,
 

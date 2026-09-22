@@ -83,19 +83,22 @@ pub fn render_import_dialog(
                 )
                 // ── 内容 ──
                 .child(
-                    v_flex()
-                        .id("import-scroll")
-                        .w_full()
-                        .flex_1()
-                        .p_4()
-                        .gap_3()
-                        .overflow_y_scroll()
-                        .child(render_tabs(state, cx))
-                        .child(if is_import {
-                            render_import_pane(state, cx)
-                        } else {
-                            render_add_pane(state, cx)
-                        }),
+                    crate::views::scroll_area::scroll_area_v(
+                        "import-scroll",
+                        &state.import_scroll,
+                        v_flex()
+                            .w_full()
+                            .gap_3()
+                            .child(render_tabs(state, cx))
+                            .child(if is_import {
+                                render_import_pane(state, cx)
+                            } else {
+                                render_add_pane(state, cx)
+                            }),
+                    )
+                    .w_full()
+                    .flex_1()
+                    .p_4(),
                 )
                 // ── 底栏 ──
                 .child(render_footer(state, cx)),

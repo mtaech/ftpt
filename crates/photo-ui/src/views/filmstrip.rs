@@ -11,6 +11,12 @@ use gpui_kit::{Context, IntoElement, Window, div, img, prelude::*, px};
 
 use crate::image::THUMB_SIZE_GRID;
 use crate::state::AppState;
+use crate::views::scroll_area::scroll_area_h;
+
+/// 缩略图项宽（px，手册 §9.6）
+const THUMB_W: f32 = 96.0;
+/// 缩略图间距（px，手册 §9.6）
+const THUMB_GAP: f32 = 6.0;
 
 pub fn render_filmstrip(
     state: &AppState,
@@ -18,19 +24,16 @@ pub fn render_filmstrip(
     cx: &mut Context<AppState>,
 ) -> impl IntoElement {
     let active_idx = state.primary_selected_index();
+    let count = state.display_order.len();
+    // 横向滚动的内容必须显式撑宽（flex 项默认被拉伸到容器宽，不给宽度滚动条长度为 0）
+    let content_w = count as f32 * THUMB_W
+        + count.saturating_sub(1) as f32 * THUMB_GAP
+        + 16.0;
 
-    h_flex()
-        .id("filmstrip-scroller")
-        .w_full()
-        .h(px(80.))
-        .bg(cx.theme().sidebar)
-        .border_t_1()
-        .border_color(cx.theme().border.opacity(0.6))
-        .px_2()
-        .py_1()
-        .overflow_x_scroll()
-        .gap(px(6.))
-        .children(state.display_order.iter().filter_map(|&item_idx| {
+    let thumbs: Vec<gpui_kit::AnyElement> = state
+        .display_order
+        .iter()
+        .filter_map(|&item_idx| {
             let meta = state.items.get(item_idx)?;
             let is_active = Some(item_idx) == active_idx;
             let thumb_path = state.image_manager.get_thumbnail_path(
@@ -69,7 +72,26 @@ pub fn render_filmstrip(
                                 .bg(cx.theme().muted)
                                 .into_any_element()
                         },
-                    )),
+                    ))
+                    .into_any_element(),
             )
-        }))
+        })
+        .collect();
+
+    scroll_area_h(
+        "filmstrip-scroller",
+        &state.filmstrip_scroll,
+        content_w,
+        h_flex()
+            .h_full()
+            .px_2()
+            .py_1()
+            .gap(px(THUMB_GAP))
+            .children(thumbs),
+    )
+    .w_full()
+    .h(px(80.))
+    .bg(cx.theme().sidebar)
+    .border_t_1()
+    .border_color(cx.theme().border.opacity(0.6))
 }

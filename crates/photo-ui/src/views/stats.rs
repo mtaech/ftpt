@@ -13,7 +13,7 @@ use gpui_kit::component::{
     tag::Tag,
     v_flex,
 };
-use gpui_kit::{AnyElement, Context, IntoElement, Window, div, img, prelude::*, px};
+use gpui_kit::{AnyElement, Context, IntoElement, ScrollHandle, Window, div, img, prelude::*, px};
 use photo_engine::global_db::SpeciesStat;
 
 use crate::actions::Escape;
@@ -109,11 +109,18 @@ pub fn render_stats_view(
                 .flex_1()
                 .gap_4()
                 .overflow_hidden()
-                .child(render_stats_ranking(&stats, total_photos, selected.as_deref(), cx))
+                .child(render_stats_ranking(
+                    &stats,
+                    total_photos,
+                    selected.as_deref(),
+                    &state.stats_species_scroll,
+                    cx,
+                ))
                 .child(render_stats_photos(
                     &photos,
                     photo_total,
                     selected.as_deref(),
+                    &state.stats_photos_scroll,
                     cx,
                 )),
         )
@@ -125,6 +132,7 @@ fn render_stats_ranking(
     stats: &[SpeciesStat],
     total_photos: i64,
     selected: Option<&str>,
+    scroll: &ScrollHandle,
     cx: &mut Context<AppState>,
 ) -> impl IntoElement + use<> {
     let rows: Vec<AnyElement> = stats
@@ -219,12 +227,13 @@ fn render_stats_ranking(
                 .child("物种排行榜（点击查看照片）"),
         )
         .child(
-            div()
-                .id("stats-species-scroll")
-                .w_full()
-                .flex_1()
-                .overflow_y_scroll()
-                .child(v_flex().w_full().gap_1p5().children(rows)),
+            crate::views::scroll_area::scroll_area_v(
+                "stats-species-scroll",
+                scroll,
+                v_flex().w_full().gap_1p5().children(rows),
+            )
+            .w_full()
+            .flex_1(),
         )
 }
 
@@ -236,6 +245,7 @@ fn render_stats_photos(
     photos: &[StatsPhoto],
     total: usize,
     selected: Option<&str>,
+    scroll: &ScrollHandle,
     cx: &mut Context<AppState>,
 ) -> impl IntoElement + use<> {
     let panel_base = || {
@@ -382,12 +392,13 @@ fn render_stats_photos(
 
     panel
         .child(
-            div()
-                .id("stats-photos-scroll")
-                .w_full()
-                .flex_1()
-                .overflow_y_scroll()
-                .child(h_flex().w_full().flex_wrap().gap_2().children(tiles)),
+            crate::views::scroll_area::scroll_area_v(
+                "stats-photos-scroll",
+                scroll,
+                h_flex().w_full().flex_wrap().gap_2().children(tiles),
+            )
+            .w_full()
+            .flex_1(),
         )
         .into_any_element()
 }

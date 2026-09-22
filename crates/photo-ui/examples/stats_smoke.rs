@@ -16,7 +16,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use gpui_kit::{AppContext as _, Bounds, Point, WindowBounds, WindowOptions, px, size};
+use gpui_kit::{AppContext as _, Bounds, Point, WindowBounds, WindowOptions, point, px, size};
 use photo_engine::global_db::SpeciesRow;
 
 use photo_ui::actions::Rescan;
@@ -233,6 +233,114 @@ fn main() {
                     format!("点击缩略图跳转选中 st_1.jpg（实际 {selected_path:?}）"),
                     selected_path.as_deref() == Some(target.as_str())
                 );
+
+                // ── 5b) 滚动条（docs/todo.md #4）：统计页两处列表真的有滚动范围 ──
+                // 右栏照片网格：补 34 条记录（文件不存在 → 占位 tile）撑出纵向溢出；
+                // 左栏排行榜：补 30 个物种（各 1 条）。两条列表此前都是裸 overflow_y_scroll。
+                let extra_photos: Vec<SpeciesRow> = (0..34)
+                    .map(|i| mk_row(&format!("syn_{i}.jpg"), 70.0))
+                    .collect();
+                let extra_species: Vec<SpeciesRow> = (0..30)
+                    .map(|i| {
+                        let mut row = mk_row(&format!("sp_{i}.jpg"), 60.0);
+                        row.species_name = format!("冒烟物种{i:02}");
+                        row
+                    })
+                    .collect();
+                let wrote_extra = read_state!(|s: &AppState| s
+                    .global_db
+                    .as_ref()
+                    .map(|g| g.upsert_rows(&extra_photos).is_ok()
+                        && g.upsert_rows(&extra_species).is_ok())
+                    .unwrap_or(false));
+                check!("补写 34 张照片 + 30 个物种行", wrote_extra);
+                async_cx.update(|cx| {
+                    task_state.update(cx, |s, cx| {
+                        select_stats_species(s, SPECIES);
+                        // 上一步点击缩略图会切回网格（open_stats_photo 的语义），
+                        // 统计页的滚动句柄只在该视图渲染时更新——断言前切回来
+                        s.view_mode = ViewMode::Stats;
+                        cx.notify();
+                    });
+                });
+                pump(async_cx, 800).await;
+                let (n_extra, species_max, species_vp, photos_max, photos_vp) =
+                    read_state!(|s: &AppState| {
+                        (
+                            s.stats_photos.len(),
+                            f32::from(s.stats_species_scroll.max_offset().y),
+                            f32::from(s.stats_species_scroll.bounds().size.height),
+                            f32::from(s.stats_photos_scroll.max_offset().y),
+                            f32::from(s.stats_photos_scroll.bounds().size.height),
+                        )
+                    });
+                check!(format!("右栏照片记录扩到 {n_extra} 条"), n_extra == PHOTOS + 34);
+                check!(
+                    format!("物种榜滚动区：视口高 {species_vp}、可滚 {species_max}"),
+                    species_vp > 0.0 && species_max > 0.0
+                );
+                check!(
+                    format!("照片网格滚动区：视口高 {photos_vp}、可滚 {photos_max}"),
+                    photos_vp > 0.0 && photos_max > 0.0
+                );
+                // 写偏移 → 跨帧保留（滚动位置与滚动条同源，网格视图同款做法）
+                async_cx.update(|cx| {
+                    task_state.update(cx, |s, _cx| {
+                        s.stats_photos_scroll.set_offset(point(px(0.), px(-120.)));
+                    });
+                });
+                pump(async_cx, 300).await;
+                let kept = read_state!(|s: &AppState| s.stats_photos_scroll.offset().y);
+                check!(
+                    format!("照片网格滚动偏移跨帧保留（{kept:?}）"),
+                    kept <= px(-100.)
+                );
+
+                // ── 5c) 胶片条横向滚动条：补足素材后进预览，内容宽 > 视口宽 ──
+                for i in 2..16 {
+                    write_jpeg(&dir.join(format!("st_{i}.jpg")), (80, 160, 80));
+                }
+                fire(async_cx, handle, Box::new(Rescan));
+                pump(async_cx, 1500).await;
+                let item_count = read_state!(|s: &AppState| s.items.len());
+                async_cx.update(|cx| {
+                    task_state.update(cx, |s, cx| {
+                        s.view_mode = ViewMode::Preview;
+                        s.selected_indices = vec![0];
+                        s.anchor_index = Some(0);
+                        cx.notify();
+                    });
+                });
+                pump(async_cx, 800).await;
+                let (film_max, film_vp) = read_state!(|s: &AppState| {
+                    (
+                        f32::from(s.filmstrip_scroll.max_offset().x),
+                        f32::from(s.filmstrip_scroll.bounds().size.width),
+                    )
+                });
+                check!(
+                    format!("胶片条横向可滚（{item_count} 张，视口宽 {film_vp}、可滚 {film_max}）"),
+                    item_count >= 16 && film_vp > 0.0 && film_max > 0.0
+                );
+
+                // ── 5d) 导入弹窗内容滚动区接上了句柄 ──
+                async_cx.update(|cx| {
+                    let _ = handle.update(cx, |_view, window, cx| {
+                        task_state.update(cx, |s, cx| s.open_import_dialog(window, cx));
+                    });
+                });
+                pump(async_cx, 500).await;
+                let import_vp = read_state!(|s: &AppState| {
+                    f32::from(s.import_scroll.bounds().size.height)
+                });
+                check!(format!("导入弹窗内容滚动区拿到视口（{import_vp}）"), import_vp > 0.0);
+                async_cx.update(|cx| {
+                    task_state.update(cx, |s, cx| {
+                        s.active_dialog = None;
+                        cx.notify();
+                    });
+                });
+                pump(async_cx, 200).await;
 
                 // ── 6) 清理：清掉写入的全局索引行 ──
                 let _ = async_cx.update(|cx| {
