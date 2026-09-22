@@ -18,6 +18,8 @@
 //! 花卉照片上原单类鸟检测器 `detect.onnx` 一个框都不给，org_det 给出
 //! `flower 0.78`；鸟类照片上两者框位基本重合（6/7 张检出；1 张漏检退化为整图识别）。
 
+use std::cmp::Ordering;
+
 use image::DynamicImage;
 use ort::session::Session;
 use ort::value::Tensor;
@@ -42,6 +44,12 @@ const ROW_LEN: usize = 38;
 /// 当图内还有更小的主体框时优先取后者，避免「树 0.62」把鸟 0.68 之外的场景抢走
 /// （实测 小黑领噪鹛：整幅 tree 0.617 vs bird 0.681，只差 0.06）。
 const BACKGROUND_AREA_RATIO: f32 = 0.9;
+
+/// 多主体上限：一张照片最多保留几个主体（控推理成本；org_det 每框一次 BioCLIP）
+const MAX_SUBJECTS: usize = 8;
+
+/// 去重 IoU 阈值：与已保留框重叠超过该值的候选视为同一主体（org_det 已 NMS，跨类重复少见）
+const DUP_IOU_THRESHOLD: f32 = 0.5;
 
 /// 开放词表类别名（顺序即模型 `names` 元数据 0..18）
 pub const CLASS_NAMES: [&str; 19] = [
@@ -80,11 +88,12 @@ pub(crate) fn resize_to_yolo_input(img: &DynamicImage) -> DynamicImage {
 
 /// 使用已完成缩放的 640×640 图运行检测（管线共享缩放结果时调用）。
 ///
-/// `Ok(Some(result))` 检测成功，`Ok(None)` 无有效检测，`Err(...)` 系统故障。
+/// 返回**多个**候选主体（已去背景 / 去重 / 限数）；`Ok(vec![])` = 无有效检测，
+/// `Err(...)` 系统故障。
 pub(crate) fn run_yolo_detection_resized(
     session: &mut Session,
     resized: &DynamicImage,
-) -> Result<Option<DetectionResult>, RecognizeError> {
+) -> Result<Vec<DetectionResult>, RecognizeError> {
     let input_data = build_input_data(resized);
     let tensor = Tensor::<f32>::from_array((
         [1usize, 3, INPUT_SIZE, INPUT_SIZE],
@@ -100,7 +109,7 @@ pub(crate) fn run_yolo_detection_resized(
     };
 
     let (_shape, flat) = output.try_extract_tensor::<f32>()?;
-    Ok(pick_best(&parse_candidates(flat)))
+    Ok(pick_subjects(&parse_candidates(flat)))
 }
 
 /// 扁平输出 → 候选列表（纯函数）。
@@ -131,11 +140,14 @@ fn parse_candidates(flat: &[f32]) -> Vec<Candidate> {
     out
 }
 
-/// 候选 → 最终结论（纯函数）：最高分，但近满幅背景框让位于更小的主体框。
+/// 候选 → 多主体结论（纯函数）。
 ///
-/// 若所有候选都是近满幅（例如只有「整片树冠」一个框），仍返回最高分者——
-/// 此时等价于整图识别，比什么都不给更接近可用结果。
-fn pick_best(candidates: &[Candidate]) -> Option<DetectionResult> {
+/// 规则：
+/// 1. 近满幅背景框（树冠/天空/整片植物）在存在更小主体框时剔除；
+///    只有背景时退化为单主体（整幅 ≈ 整图识别）。
+/// 2. 按置信度降序贪心选取，与已保留框 IoU ≥ 阈值视为同一主体跳过。
+/// 3. 最多保留 [`MAX_SUBJECTS`] 个（每框一次 BioCLIP，控推理成本）。
+fn pick_subjects(candidates: &[Candidate]) -> Vec<DetectionResult> {
     let to_result = |c: &Candidate| DetectionResult {
         bbox: c.bbox,
         raw_score: c.score,
@@ -153,9 +165,30 @@ fn pick_best(candidates: &[Candidate]) -> Option<DetectionResult> {
     } else {
         subjects
     };
-    pool.into_iter()
-        .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
-        .map(to_result)
+    let mut pool = pool;
+    pool.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
+
+    let mut kept: Vec<&Candidate> = Vec::new();
+    for c in pool {
+        if kept.len() >= MAX_SUBJECTS {
+            break;
+        }
+        if kept.iter().any(|k| iou(&k.bbox, &c.bbox) >= DUP_IOU_THRESHOLD) {
+            continue;
+        }
+        kept.push(c);
+    }
+    kept.into_iter().map(to_result).collect()
+}
+
+/// 两个归一化框的 IoU（0..1）。
+fn iou(a: &BBox, b: &BBox) -> f32 {
+    let ix = (a.x2.min(b.x2) - a.x1.max(b.x1)).max(0.0);
+    let iy = (a.y2.min(b.y2) - a.y1.max(b.y1)).max(0.0);
+    let inter = ix * iy;
+    let area_a = ((a.x2 - a.x1) * (a.y2 - a.y1)).max(0.0);
+    let area_b = ((b.x2 - b.x1) * (b.y2 - b.y1)).max(0.0);
+    inter / (area_a + area_b - inter).max(f32::MIN_POSITIVE)
 }
 
 /// 640×640 RGB/255 归一化 NCHW 预处理。
@@ -230,38 +263,73 @@ mod tests {
     }
 
     #[test]
-    fn test_pick_best_prefers_subject_over_full_frame_background() {
-        // 实测场景：鸟 0.681（小框）vs 整幅树 0.617。按分数直觉会选树，
-        // 但整幅框是背景，必须让位给真正的主体
+    fn test_pick_subjects_drops_full_frame_background() {
+        // 实测场景：鸟 0.681（小框）vs 整幅树 0.617 → 只留鸟
         let cands = vec![
             Candidate { bbox: BBox::new(0.307, 0.377, 0.606, 0.886), score: 0.681, class_id: 1 },
             Candidate { bbox: BBox::new(0.0, 0.001, 0.994, 1.0), score: 0.617, class_id: 13 },
         ];
-        let best = pick_best(&cands).unwrap();
-        assert_eq!(best.class_name, "bird");
-        assert!((best.raw_score - 0.681).abs() < 1e-6);
+        let out = pick_subjects(&cands);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].class_name, "bird");
+        assert!((out[0].raw_score - 0.681).abs() < 1e-6);
     }
 
     #[test]
-    fn test_pick_best_keeps_full_frame_when_only_candidate() {
+    fn test_pick_subjects_keeps_full_frame_when_only_candidate() {
         // 只有整幅背景框时仍返回它（等价整图识别，好过什么都不给）
         let cands = vec![Candidate {
             bbox: BBox::new(0.005, 0.002, 0.999, 0.998),
             score: 0.273,
             class_id: 13,
         }];
-        let best = pick_best(&cands).unwrap();
-        assert_eq!(best.class_name, "tree");
+        let out = pick_subjects(&cands);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].class_name, "tree");
     }
 
     #[test]
-    fn test_pick_best_highest_score_among_subjects_and_unknown_class() {
+    fn test_pick_subjects_multi_sorted_by_score() {
+        // 多个主体框：按置信度降序返回
         let cands = vec![
-            Candidate { bbox: BBox::new(0.1, 0.1, 0.4, 0.4), score: 0.5, class_id: 99 },
-            Candidate { bbox: BBox::new(0.5, 0.5, 0.8, 0.8), score: 0.7, class_id: 12 },
+            Candidate { bbox: BBox::new(0.1, 0.1, 0.3, 0.3), score: 0.5, class_id: 1 },
+            Candidate { bbox: BBox::new(0.6, 0.6, 0.9, 0.9), score: 0.7, class_id: 12 },
+            Candidate { bbox: BBox::new(0.05, 0.6, 0.2, 0.85), score: 0.4, class_id: 6 },
         ];
-        let best = pick_best(&cands).unwrap();
-        assert_eq!(best.class_name, "flower");
-        assert!(pick_best(&[]).is_none());
+        let out = pick_subjects(&cands);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].class_name, "flower");
+        assert_eq!(out[1].class_name, "bird");
+        assert_eq!(out[2].class_name, "insect");
+    }
+
+    #[test]
+    fn test_pick_subjects_dedup_overlapping_boxes() {
+        // 高度重叠的两个框（同一主体被出两次）→ 去重只留高分者
+        let cands = vec![
+            Candidate { bbox: BBox::new(0.1, 0.1, 0.4, 0.4), score: 0.9, class_id: 1 },
+            Candidate { bbox: BBox::new(0.12, 0.12, 0.42, 0.42), score: 0.8, class_id: 0 },
+        ];
+        let out = pick_subjects(&cands);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].raw_score, 0.9);
+    }
+
+    #[test]
+    fn test_pick_subjects_caps_at_max_and_empty() {
+        // 12 个互不重叠的框 → 截断到 MAX_SUBJECTS
+        let mut cands = Vec::new();
+        for i in 0..12u32 {
+            let x = (i % 4) as f32 * 0.2 + 0.05;
+            let y = (i / 4) as f32 * 0.2 + 0.05;
+            cands.push(Candidate {
+                bbox: BBox::new(x, y, x + 0.1, y + 0.1),
+                score: 0.9 - i as f32 * 0.01,
+                class_id: 1,
+            });
+        }
+        let out = pick_subjects(&cands);
+        assert_eq!(out.len(), MAX_SUBJECTS);
+        assert!(pick_subjects(&[]).is_empty());
     }
 }

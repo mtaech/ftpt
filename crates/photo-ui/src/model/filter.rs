@@ -145,12 +145,13 @@ pub fn filter_captures(items: &[CaptureMeta], criteria: &FilterCriteria) -> Vec<
             }
         }
 
-        // taxon_names: 命中任一选中项即保留
+        // taxon_names: 命中任一选中项即保留（多主体：任一主体的展示名命中即可）
         if !criteria.taxon_names.is_empty() {
-            let matched = match &meta.taxon_name {
-                Some(name) => criteria.taxon_names.iter().any(|b| b == name),
-                None => false,
-            };
+            let matched = meta.subjects.iter().any(|s| {
+                criteria.taxon_names.iter().any(|b| b == &s.display_name)
+            }) || meta.taxon_name.as_ref().is_some_and(|name| {
+                criteria.taxon_names.iter().any(|b| b == name)
+            });
             if !matched {
                 continue;
             }

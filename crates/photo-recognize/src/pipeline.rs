@@ -15,10 +15,11 @@ use ort::session::Session;
 
 use photo_domain::{
     BBox, Capture, FocusPoint, FocusShape, Recognition, RecognitionFailureStage, RecognitionStatus,
+    SubjectRecognition,
 };
 
 use crate::catalog::CatalogDb;
-use crate::classifier::{Classified, Classifier};
+use crate::classifier::Classifier;
 use crate::detect;
 use crate::RecognizeError;
 
@@ -281,6 +282,7 @@ fn recognize_capture_impl(
                 candidates: vec![],
                 failure_stage,
                 recognized_at,
+                subjects: vec![],
             });
         }
     };
@@ -296,48 +298,21 @@ fn recognize_capture_impl(
         let bbox = focus_to_bbox(&fp);
         report_progress(on_progress, 0.5, "检测完成");
         report_progress(on_progress, 0.7, "分类中");
-        return Ok(classify_and_map(classifier, catalog, &img, bbox, on_progress, recognized_at));
+        let subject = classify_subject(classifier, catalog, &img, bbox, 0);
+        report_progress(on_progress, 0.85, "结果整理中");
+        return Ok(build_recognition(vec![subject], recognized_at));
     }
 
     // ---- 共享 640×640 缩放：检测与眼模型同尺寸同插值（CatmullRom），
     // 缩放一次同时喂给两者，避免对同一张图做第二次全图缩放 ----
     let shared_640 = detect::resize_to_yolo_input(&img);
 
-    // ---- 2. 检测 ----
+    // ---- 2. 检测（org_det 多框） ----
     report_progress(on_progress, 0.35, "检测中");
-    let detection = match detect::run_yolo_detection_resized(detection_session, &shared_640) {
-        Ok(Some(d)) => d,
-        Ok(None) => {
-            // 检测无框 → 退回整图识别（org_det 的 19 个粗类偶尔也会漏掉主体，
-            // 此时整图直接分类仍是可用的兜底）。
-            if classifier.whole_image_on_no_detection() {
-                tracing::debug!("[识别] {} 未检出主体，BioCLIP 退回整图识别", capture.base_name);
-                report_progress(on_progress, 0.5, "整图识别");
-                return Ok(classify_and_map(
-                    classifier,
-                    catalog,
-                    &img,
-                    BBox::new(0.0, 0.0, 1.0, 1.0),
-                    on_progress,
-                    recognized_at,
-                ));
-            }
-            tracing::debug!("[识别] {} 未检出鸟体（Unrecognized）", capture.base_name);
-            let (status, failure_stage) = stage_to_status(RecognitionFailureStage::Detection, true);
-            return Ok(Recognition {
-                status,
-                taxon: None,
-                class_index: None,
-                confidence: None,
-                bbox: None,
-                candidates: vec![],
-                failure_stage,
-                recognized_at,
-            });
-        }
+    let detections = match detect::run_yolo_detection_resized(detection_session, &shared_640) {
+        Ok(d) => d,
         Err(e) => {
             // 检测系统故障 → NeedsReview(Classification) 而不是 Err
-            //
             tracing::error!("[识别] 检测系统错误: {e}");
             let (status, failure_stage) =
                 stage_to_status(RecognitionFailureStage::Classification, false);
@@ -350,15 +325,46 @@ fn recognize_capture_impl(
                 candidates: vec![],
                 failure_stage,
                 recognized_at,
+                subjects: vec![],
             });
         }
     };
-    let bbox = detection.bbox;
     report_progress(on_progress, 0.5, "检测完成");
 
-    // ---- 3. 分类 + 名录映射（与 recognize_region 共用尾部管线） ----
+    if detections.is_empty() {
+        // 检测无框 → 退回整图识别（org_det 的 19 个粗类偶尔也会漏掉主体，
+        // 此时整图直接分类仍是可用的兜底；整幅图算一个主体）。
+        if classifier.whole_image_on_no_detection() {
+            tracing::debug!("[识别] {} 未检出主体，BioCLIP 退回整图识别", capture.base_name);
+            report_progress(on_progress, 0.5, "整图识别");
+            let subject = classify_subject(classifier, catalog, &img, BBox::new(0.0, 0.0, 1.0, 1.0), 0);
+            report_progress(on_progress, 0.85, "结果整理中");
+            return Ok(build_recognition(vec![subject], recognized_at));
+        }
+        tracing::debug!("[识别] {} 未检出主体（Unrecognized）", capture.base_name);
+        let (status, failure_stage) = stage_to_status(RecognitionFailureStage::Detection, true);
+        return Ok(Recognition {
+            status,
+            taxon: None,
+            class_index: None,
+            confidence: None,
+            bbox: None,
+            candidates: vec![],
+            failure_stage,
+            recognized_at,
+            subjects: vec![],
+        });
+    }
+
+    // ---- 3. 每个主体分类 + 名录映射（多主体：逐个分类） ----
     report_progress(on_progress, 0.7, "分类中");
-    Ok(classify_and_map(classifier, catalog, &img, bbox, on_progress, recognized_at))
+    let subjects: Vec<SubjectRecognition> = detections
+        .iter()
+        .enumerate()
+        .map(|(i, d)| classify_subject(classifier, catalog, &img, d.bbox, i as u32))
+        .collect();
+    report_progress(on_progress, 0.85, "结果整理中");
+    Ok(build_recognition(subjects, recognized_at))
 }
 
 /// 用户手动框选区域识别：跳过 YOLO 检测，直接对用户给的 bbox 分类 + 名录映射。
@@ -426,6 +432,7 @@ fn recognize_region_impl(
                 candidates: vec![],
                 failure_stage,
                 recognized_at,
+                subjects: vec![],
             });
         }
     };
@@ -433,55 +440,74 @@ fn recognize_region_impl(
 
     let ResolvedSource::Image(img) = source;
 
-    // ---- 2. 分类 + 名录映射（跳过检测） ----
+    // ---- 2. 分类 + 名录映射（跳过检测，单主体） ----
     report_progress(on_progress, 0.5, "分类中");
-    Ok(classify_and_map(classifier, catalog, &img, bbox, on_progress, recognized_at))
+    let subject = classify_subject(classifier, catalog, &img, bbox, 0);
+    report_progress(on_progress, 0.85, "结果整理中");
+    Ok(build_recognition(vec![subject], recognized_at))
 }
 
-/// 分类 → 名录映射 → 候选解析，构建最终 Recognition。
+/// 单个主体：分类 → 名录映射 → 主体结论（多主体照片的数组元素）。
 ///
-/// `recognize_capture`（检测框）与 `recognize_region`（用户手动画框）共用的尾部管线。
-fn classify_and_map(
+/// 单个主体的分类失败（系统级）只让该主体变成 NeedsReview(Classification)，
+/// 不中断同一张照片里其他主体的识别。
+fn classify_subject(
     classifier: &mut dyn Classifier,
     catalog: &CatalogDb,
     img: &DynamicImage,
     bbox: BBox,
-    on_progress: Option<&ProgressCallback>,
-    recognized_at: String,
-) -> Recognition {
-    // ---- 分类 + 落到物种（后端内部完成，见 classifier.rs） ----
-    let classified: Classified = match classifier.classify(catalog, img, bbox) {
-        Ok(c) => c,
+    index: u32,
+) -> SubjectRecognition {
+    match classifier.classify(catalog, img, bbox) {
+        Ok(c) => SubjectRecognition {
+            index,
+            bbox,
+            taxon: c.taxon,
+            class_index: c.class_index,
+            confidence: c.confidence,
+            candidates: c.candidates,
+            failure: c.failure,
+        },
         Err(e) => {
-            // 分类失败 → NeedsReview(Classification)
-            tracing::error!("[识别] 分类错误: {e}");
-            return Recognition {
-                status: RecognitionStatus::NeedsReview,
+            tracing::error!("[识别] 主体 {index} 分类错误: {e}");
+            SubjectRecognition {
+                index,
+                bbox,
                 taxon: None,
                 class_index: None,
                 confidence: None,
-                bbox: Some(bbox),
                 candidates: vec![],
-                failure_stage: RecognitionFailureStage::Classification,
-                recognized_at,
-            };
+                failure: RecognitionFailureStage::Classification,
+            }
         }
-    };
-    report_progress(on_progress, 0.85, "结果整理中");
+    }
+}
 
-    // 状态推断：有物种结论 → Confirmed(None)；没落到物种 → NeedsReview(Mapping)
-    // （与测试共用 stage_to_status，避免测试复制一份映射逻辑）
-    let (status, failure_stage) = stage_to_status(classified.failure, false);
-
+/// 各主体结论 → 最终 Recognition。
+///
+/// - 顶层字段恒 = 主主体（subjects[0]），兼容既有展示 / 筛选 / 持久化
+/// - 照片状态：任一主体有结论（failure == None）→ Confirmed；
+///   所有主体都失败 → NeedsReview(首个失败阶段)；无主体 → Unrecognized(Detection)
+fn build_recognition(subjects: Vec<SubjectRecognition>, recognized_at: String) -> Recognition {
+    let primary = subjects.first();
+    let (status, failure_stage) =
+        match subjects.iter().find(|s| s.failure == RecognitionFailureStage::None) {
+            Some(_) => (RecognitionStatus::Confirmed, RecognitionFailureStage::None),
+            None => match subjects.first() {
+                Some(s) => (RecognitionStatus::NeedsReview, s.failure),
+                None => (RecognitionStatus::Unrecognized, RecognitionFailureStage::Detection),
+            },
+        };
     Recognition {
         status,
-        taxon: classified.taxon,
-        class_index: classified.class_index,
-        confidence: classified.confidence,
-        bbox: Some(bbox),
-        candidates: classified.candidates,
+        taxon: primary.and_then(|s| s.taxon.clone()),
+        class_index: primary.and_then(|s| s.class_index),
+        confidence: primary.and_then(|s| s.confidence),
+        bbox: primary.map(|s| s.bbox),
+        candidates: primary.map(|s| s.candidates.clone()).unwrap_or_default(),
         failure_stage,
         recognized_at,
+        subjects,
     }
 }
 
@@ -523,8 +549,8 @@ pub(crate) fn stage_to_status(
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
-    use super::{focus_to_bbox, stage_to_status};
-    use photo_domain::{FocusPoint, RecognitionFailureStage, RecognitionStatus};
+    use super::{build_recognition, focus_to_bbox, stage_to_status};
+    use photo_domain::{BBox, FocusPoint, RecognitionFailureStage, RecognitionStatus, SubjectRecognition};
 
     /// 对焦点 → ROI 构造：三种形状的尺寸/位置语义与保底下限
     #[test]
@@ -607,5 +633,56 @@ mod tests {
             stage_to_status(RecognitionFailureStage::None, false),
             (RecognitionStatus::Confirmed, RecognitionFailureStage::None)
         );
+    }
+
+    /// 造一个主体（taxon 全空，仅指定失败阶段）
+    fn subject_with(failure: RecognitionFailureStage, conf: Option<f32>) -> SubjectRecognition {
+        SubjectRecognition {
+            index: 0,
+            bbox: BBox::new(0.1, 0.1, 0.5, 0.5),
+            taxon: None,
+            class_index: None,
+            confidence: conf,
+            candidates: vec![],
+            failure,
+        }
+    }
+
+    #[test]
+    fn test_build_recognition_status_aggregation() {
+        // 任一主体有结论 → Confirmed；顶层字段 = 主主体（subjects[0]）
+        let r = build_recognition(
+            vec![subject_with(RecognitionFailureStage::None, Some(88.0))],
+            "t".into(),
+        );
+        assert_eq!(r.status, RecognitionStatus::Confirmed);
+        assert_eq!(r.failure_stage, RecognitionFailureStage::None);
+        assert_eq!(r.subjects.len(), 1);
+        assert_eq!(r.confidence, Some(88.0));
+
+        // 全部失败 → NeedsReview(首个失败阶段)
+        let r = build_recognition(
+            vec![subject_with(RecognitionFailureStage::Classification, None)],
+            "t".into(),
+        );
+        assert_eq!(r.status, RecognitionStatus::NeedsReview);
+        assert_eq!(r.failure_stage, RecognitionFailureStage::Classification);
+
+        // 多主体混合：一个有结论 → Confirmed，主主体仍是 subjects[0]
+        let r = build_recognition(
+            vec![
+                subject_with(RecognitionFailureStage::None, Some(70.0)),
+                subject_with(RecognitionFailureStage::None, Some(80.0)),
+            ],
+            "t".into(),
+        );
+        assert_eq!(r.status, RecognitionStatus::Confirmed);
+        assert_eq!(r.subjects.len(), 2);
+        assert_eq!(r.confidence, Some(70.0), "主主体 = subjects[0] 的置信度");
+
+        // 无主体 → Unrecognized(Detection)
+        let r = build_recognition(vec![], "t".into());
+        assert_eq!(r.status, RecognitionStatus::Unrecognized);
+        assert_eq!(r.failure_stage, RecognitionFailureStage::Detection);
     }
 }

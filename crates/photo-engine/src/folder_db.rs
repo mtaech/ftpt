@@ -17,7 +17,7 @@ use rusqlite_migration::{Migrations, M};
 
 use photo_domain::{
     AdjustParams, BBox, CnLevel, ImageFormat, Recognition, RecognitionFailureStage,
-    RecognitionStatus, TaxonCandidate, TaxonMatch,
+    RecognitionStatus, SubjectRecognition, TaxonCandidate, TaxonMatch,
 };
 use photo_domain::ExifMetadata;
 use photo_domain::XmpMetadata;
@@ -114,6 +114,9 @@ fn folder_migrations() -> Migrations<'static> {
             "ALTER TABLE recognition DROP COLUMN eye_sharpness;
              ALTER TABLE recognition DROP COLUMN eye_bbox;",
         ),
+        // 多主体：识别结论从「一张图一个」扩展为「每主体一个」，
+        // 完整主体列表以 JSON 存 subjects 列（顶层列仍是主主体，兼容旧展示）。
+        M::up("ALTER TABLE recognition ADD COLUMN subjects TEXT;"),
     ])
 }
 
@@ -353,14 +356,15 @@ impl FolderDb {
         let normalized = rel_path.replace('\\', "/");
         let bbox_str = rec.bbox.as_ref().map(|b| b.to_db_string());
         let candidates_str = serde_json::to_string(&rec.candidates)?;
+        let subjects_str = serde_json::to_string(&rec.subjects)?;
         // bird_id 列即名录主键（taxon_id），列名保持历史不动；BioCLIP 预测不在名录中时为 NULL。
         // ranks 是七级分类明细，不持久化（识别当次可用，落库无消费方）。
         conn.execute(
             "INSERT OR REPLACE INTO recognition
              (rel_path, status, bird_id, bird_name, class_index, confidence,
               bbox, candidates, failure_stage, recognized_at,
-              latin_name, cn_level)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+              latin_name, cn_level, subjects)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![
                 normalized,
                 rec.status.as_str(),
@@ -374,6 +378,7 @@ impl FolderDb {
                 rec.recognized_at,
                 rec.taxon.as_ref().map(|t| t.latin_name.as_str()),
                 rec.taxon.as_ref().map(|t| t.cn_level.as_str()),
+                subjects_str,
             ],
         )?;
         Ok(())
@@ -386,7 +391,7 @@ impl FolderDb {
         let mut stmt = conn.prepare_cached(
             "SELECT rel_path, status, bird_id, bird_name, class_index, confidence,
                     bbox, candidates, failure_stage, recognized_at,
-                    latin_name, cn_level
+                    latin_name, cn_level, subjects
              FROM recognition WHERE rel_path = ?1",
         )?;
         match stmt.query_row(rusqlite::params![normalized], |row| row_to_recognition(row)) {
@@ -402,7 +407,7 @@ impl FolderDb {
         let mut stmt = conn.prepare_cached(
             "SELECT rel_path, status, bird_id, bird_name, class_index, confidence,
                     bbox, candidates, failure_stage, recognized_at,
-                    latin_name, cn_level
+                    latin_name, cn_level, subjects
              FROM recognition",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -454,7 +459,7 @@ impl FolderDb {
             let mut stmt = conn.prepare_cached(
                 "SELECT rel_path, status, bird_id, bird_name, class_index, confidence,
                         bbox, candidates, failure_stage, recognized_at,
-                        latin_name, cn_level
+                        latin_name, cn_level, subjects
                  FROM recognition WHERE rel_path = ?1",
             )?;
             for (src_rel, dst_rel) in entries {
@@ -1016,6 +1021,7 @@ fn row_to_recognition(row: &rusqlite::Row) -> rusqlite::Result<Result<Recognitio
     let recognized_at: String = row.get(9)?;
     let latin_name: Option<String> = row.get(10)?;
     let cn_level_str: Option<String> = row.get(11)?;
+    let subjects_str: Option<String> = row.get(12)?;
 
     let taxon = if bird_id.is_none() && bird_name.is_none() {
         None
@@ -1038,6 +1044,12 @@ fn row_to_recognition(row: &rusqlite::Row) -> rusqlite::Result<Result<Recognitio
         None => Vec::new(),
     };
 
+    // 多主体：subjects 列 JSON；旧行（NULL）为空 Vec，读侧以顶层字段兜底单主体
+    let subjects: Vec<SubjectRecognition> = match subjects_str {
+        Some(s) => serde_json::from_str(&s).unwrap_or_default(),
+        None => Vec::new(),
+    };
+
     Ok(Ok(Recognition {
         status,
         taxon,
@@ -1047,6 +1059,7 @@ fn row_to_recognition(row: &rusqlite::Row) -> rusqlite::Result<Result<Recognitio
         candidates,
         failure_stage,
         recognized_at,
+        subjects,
     }))
 }
 
@@ -1121,7 +1134,54 @@ mod tests {
             ],
             failure_stage: RecognitionFailureStage::None,
             recognized_at: "2026-07-28T10:00:00Z".into(),
+            subjects: vec![],
         }
+    }
+
+    #[test]
+    fn test_recognition_multi_subject_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        let mut rec = make_recognition();
+        rec.subjects = vec![
+            SubjectRecognition {
+                index: 0,
+                bbox: BBox::new(0.1, 0.2, 0.4, 0.5),
+                taxon: Some(taxon(42, "大斑啄木鸟", "Dendrocopos major")),
+                class_index: Some(123),
+                confidence: Some(95.5),
+                candidates: vec![],
+                failure: RecognitionFailureStage::None,
+            },
+            SubjectRecognition {
+                index: 1,
+                bbox: BBox::new(0.6, 0.2, 0.9, 0.6),
+                taxon: Some(taxon(7, "乌鸫", "Turdus merula")),
+                class_index: Some(200),
+                confidence: Some(80.0),
+                candidates: vec![],
+                failure: RecognitionFailureStage::None,
+            },
+        ];
+        db.upsert_recognition("photos/multi.jpg", &rec).unwrap();
+        let got = db.get_recognition("photos/multi.jpg").unwrap().expect("should exist");
+        assert_eq!(got.subjects.len(), 2);
+        // 主主体 = subjects[0]（顶层字段一致）
+        assert_eq!(got.taxon.as_ref().and_then(|t| t.taxon_id), Some(42));
+        assert_eq!(got.subjects[1].taxon.as_ref().and_then(|t| t.taxon_id), Some(7));
+        assert_eq!(got.subjects[1].confidence, Some(80.0));
+    }
+
+    #[test]
+    fn test_recognition_legacy_row_subjects_empty() {
+        // 旧行（subjects 列 NULL）：读回 subjects 为空，UI 侧以顶层字段退化为单主体
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        let rec = make_recognition();
+        db.upsert_recognition("photos/legacy.jpg", &rec).unwrap();
+        let got = db.get_recognition("photos/legacy.jpg").unwrap().expect("should exist");
+        assert!(got.subjects.is_empty(), "无 subjects 数据的行应为空 Vec");
+        assert!(got.taxon.is_some());
     }
 
     #[test]

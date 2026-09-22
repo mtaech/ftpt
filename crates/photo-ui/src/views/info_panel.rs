@@ -207,6 +207,37 @@ pub fn render_info_tab(
                             div().child("")
                         }),
                 )
+                // 多主体：主主体在标题行，这里列出其余主体
+                .when(meta.subjects.len() > 1, |this| {
+                    this.child(
+                        div()
+                            .w_full()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_medium()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!("另有 {} 个主体", meta.subjects.len() - 1)),
+                            )
+                            .children(meta.subjects.iter().skip(1).enumerate().map(|(i, s)| {
+                                h_flex()
+                                    .w_full()
+                                    .items_center()
+                                    .justify_between()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!("{}. {}", i + 2, s.display_name))
+                                    .child(
+                                        s.confidence
+                                            .map(|c| format!("{c:.1}%"))
+                                            .unwrap_or_else(|| "–".to_string()),
+                                    )
+                                    .into_any_element()
+                            })),
+                    )
+                })
                 .child(
                     h_flex()
                         .items_center()

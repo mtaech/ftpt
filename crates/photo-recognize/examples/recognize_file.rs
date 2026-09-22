@@ -98,4 +98,15 @@ fn main() {
             .unwrap_or("<未映射>");
         println!("  - cls={} {name} {:.1}%", c.class_index, c.confidence);
     }
+    if result.subjects.len() > 1 {
+        println!("subjects:      {} 个主体", result.subjects.len());
+        for s in &result.subjects {
+            let name = s.taxon.as_ref().map(|t| t.display_name()).unwrap_or("<未识别>");
+            let conf = s.confidence.map(|c| format!("{c:.1}%")).unwrap_or_else(|| "–".into());
+            println!(
+                "  [{}] {} {conf} bbox=[{:.3}, {:.3}, {:.3}, {:.3}]",
+                s.index, name, s.bbox.x1, s.bbox.y1, s.bbox.x2, s.bbox.y2
+            );
+        }
+    }
 }

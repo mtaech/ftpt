@@ -126,6 +126,17 @@ pub struct Capture {
     pub primary_index: usize,
 }
 
+/// 多主体识别摘要：一个识别主体的轻量展示信息（UI 用，与 Recognition.subjects 对应）。
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubjectSummary {
+    /// 主体展示名（有中文名用中文名，否则学名）
+    pub display_name: String,
+    /// 主体置信度（0–100）
+    pub confidence: Option<f32>,
+}
+
 /// 发送到前端的拍摄摘要（轻量，不含完整 SourceFile）
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +176,8 @@ pub struct CaptureMeta {
     pub taxon_confidence: Option<f32>,
     pub recognition_status: Option<RecognitionStatus>,
     pub taxon_bbox: Option<BBox>,
+    /// 多主体识别摘要（与 Recognition.subjects 对应；主主体在前，旧数据退化为单主体）
+    pub subjects: Vec<SubjectSummary>,
 }
 
 /// 从 Capture 构造 CaptureMeta。注意 index 固定为 0（历史调用约定，
@@ -237,6 +250,7 @@ impl CaptureMeta {
             taxon_confidence: None,
             recognition_status: None,
             taxon_bbox: None,
+            subjects: Vec::new(),
         }
     }
 
@@ -283,6 +297,21 @@ impl CaptureMeta {
         self.taxon_confidence = recognition.confidence;
         self.recognition_status = Some(recognition.status);
         self.taxon_bbox = recognition.bbox;
+        // 多主体：有 subjects 用 subjects；旧数据（空）以顶层字段退化为单主体
+        self.subjects = if recognition.subjects.is_empty() {
+            recognition.taxon.as_ref().map(|t| {
+                vec![SubjectSummary {
+                    display_name: t.display_name().to_string(),
+                    confidence: recognition.confidence,
+                }]
+            }).unwrap_or_default()
+        } else {
+            recognition.subjects.iter().map(|s| SubjectSummary {
+                display_name: s.taxon.as_ref().map(|t| t.display_name().to_string())
+                    .unwrap_or_else(|| "<未识别>".to_string()),
+                confidence: s.confidence,
+            }).collect()
+        };
     }
 }
 
@@ -806,6 +835,31 @@ pub struct Recognition {
     pub failure_stage: RecognitionFailureStage,
     /// ISO8601 时间戳
     pub recognized_at: String,
+    /// 多主体：每个检测到的主体的识别结论（主主体在 0 位）。
+    /// 单主体 = 1 个元素；顶层 taxon/confidence/bbox/candidates 恒 = 主主体（subjects[0]），
+    /// 兼容既有展示；旧数据（无 subjects 列）subjects 为空，读侧以顶层字段兜底。
+    pub subjects: Vec<SubjectRecognition>,
+}
+
+/// 一张照片里的一个识别主体（多主体数组元素）。
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubjectRecognition {
+    /// 主体序号（检测顺序；0 = 主主体）
+    pub index: u32,
+    /// 主体检测框（归一化 0-1，相对原图）
+    pub bbox: BBox,
+    /// 该主体的物种结论
+    pub taxon: Option<TaxonMatch>,
+    /// 该主体 Top-1 原始类别号（诊断用）
+    pub class_index: Option<u32>,
+    /// 该主体 Top-1 置信度（0–100）
+    pub confidence: Option<f32>,
+    /// 该主体 Top-5 候选
+    pub candidates: Vec<TaxonCandidate>,
+    /// 该主体失败阶段（None = 有结论）
+    pub failure: RecognitionFailureStage,
 }
 
 /// 识别状态筛选条件
@@ -995,6 +1049,7 @@ mod tests {
             taxon_confidence: None,
             recognition_status: None,
             taxon_bbox: None,
+            subjects: vec![],
         };
         cm.enrich_with_xmp(&xmp);
         assert_eq!(cm.rating, Rating::Three);
@@ -1262,6 +1317,7 @@ mod tests {
             candidates: vec![],
             failure_stage: RecognitionFailureStage::None,
             recognized_at: "2026-07-28T12:00:00Z".into(),
+            subjects: vec![],
         };
         let mut cm = CaptureMeta::from(&Capture {
             base_name: "DSC_0001".into(),
@@ -1280,6 +1336,96 @@ mod tests {
     }
 
     #[test]
+    fn test_subjects_serde_roundtrip() {
+        let subject = SubjectRecognition {
+            index: 0,
+            bbox: BBox::new(0.1, 0.2, 0.4, 0.5),
+            taxon: Some(TaxonMatch {
+                taxon_id: Some(1),
+                cn_name: "乌鸫".into(),
+                latin_name: "Turdus merula".into(),
+                cn_level: CnLevel::Species,
+                ranks: vec![],
+            }),
+            class_index: Some(7),
+            confidence: Some(88.0),
+            candidates: vec![],
+            failure: RecognitionFailureStage::None,
+        };
+        let json = serde_json::to_string(&subject).unwrap();
+        let back: SubjectRecognition = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, subject);
+    }
+
+    #[test]
+    fn test_enrich_with_recognition_multi_subject_builds_summary() {
+        let rec = Recognition {
+            status: RecognitionStatus::Confirmed,
+            taxon: Some(TaxonMatch {
+                taxon_id: Some(1),
+                cn_name: "乌鸫".into(),
+                latin_name: "Turdus merula".into(),
+                cn_level: CnLevel::Species,
+                ranks: vec![],
+            }),
+            class_index: Some(7),
+            confidence: Some(88.0),
+            bbox: Some(BBox::new(0.1, 0.2, 0.3, 0.4)),
+            candidates: vec![],
+            failure_stage: RecognitionFailureStage::None,
+            recognized_at: "2026-07-28T12:00:00Z".into(),
+            subjects: vec![
+                SubjectRecognition {
+                    index: 0,
+                    bbox: BBox::new(0.1, 0.2, 0.3, 0.4),
+                    taxon: Some(TaxonMatch {
+                        taxon_id: Some(1),
+                        cn_name: "乌鸫".into(),
+                        latin_name: "Turdus merula".into(),
+                        cn_level: CnLevel::Species,
+                        ranks: vec![],
+                    }),
+                    class_index: Some(7),
+                    confidence: Some(88.0),
+                    candidates: vec![],
+                    failure: RecognitionFailureStage::None,
+                },
+                SubjectRecognition {
+                    index: 1,
+                    bbox: BBox::new(0.6, 0.2, 0.9, 0.6),
+                    taxon: Some(TaxonMatch {
+                        taxon_id: Some(2),
+                        cn_name: "大山雀".into(),
+                        latin_name: "Parus major".into(),
+                        cn_level: CnLevel::Species,
+                        ranks: vec![],
+                    }),
+                    class_index: Some(8),
+                    confidence: Some(77.0),
+                    candidates: vec![],
+                    failure: RecognitionFailureStage::None,
+                },
+            ],
+        };
+        let mut cm = CaptureMeta::from(&Capture {
+            base_name: "DSC_0001".into(),
+            source_files: vec![SourceFile {
+                path: std::path::PathBuf::from("/photos/DSC_0001.jpg"),
+                format: ImageFormat::Jpeg,
+                file_size: Some(1024),
+            }],
+            primary_index: 0,
+        });
+        cm.enrich_with_recognition(&rec);
+        assert_eq!(cm.subjects.len(), 2);
+        assert_eq!(cm.subjects[0].display_name, "乌鸫");
+        assert_eq!(cm.subjects[1].display_name, "大山雀");
+        assert_eq!(cm.subjects[1].confidence, Some(77.0));
+        // 主主体字段仍是 subjects[0]（乌鸫）
+        assert_eq!(cm.taxon_name.as_deref(), Some("乌鸫"));
+    }
+
+    #[test]
     fn test_enrich_with_recognition_unrecognized_has_no_bird_fields() {
         let rec = Recognition {
             status: RecognitionStatus::Unrecognized,
@@ -1290,6 +1436,7 @@ mod tests {
             candidates: vec![],
             failure_stage: RecognitionFailureStage::Detection,
             recognized_at: "2026-07-28T12:00:00Z".into(),
+            subjects: vec![],
         };
         let mut cm = CaptureMeta::from(&Capture {
             base_name: "DSC_0002".into(),

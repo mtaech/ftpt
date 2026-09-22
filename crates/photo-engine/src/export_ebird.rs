@@ -287,6 +287,7 @@ mod tests {
             candidates: Vec::new(),
             failure_stage: RecognitionFailureStage::None,
             recognized_at: "2024-01-01T00:00:00Z".to_string(),
+            subjects: Vec::new(),
         }
     }
 

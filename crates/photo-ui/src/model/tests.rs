@@ -3,6 +3,7 @@
 use chrono::NaiveDate;
 use photo_domain::{
     CaptureMeta, ColorLabel, ImageFormat, Rating, RecognitionFilter, RecognitionStatus, SortBy,
+    SubjectSummary,
 };
 use photo_engine::template::{NameTemplateContext, render_name_template};
 
@@ -37,6 +38,7 @@ fn make_meta(base_name: &str, primary_path: &str, primary_format: &str) -> Captu
         taxon_confidence: None,
         recognition_status: None,
         taxon_bbox: None,
+        subjects: vec![],
     }
 }
 
@@ -60,6 +62,34 @@ fn test_filter_captures_date_taken_unparseable_kept() {
 
     let indices = filter_captures(&[m1], &criteria);
     assert_eq!(indices, vec![0], "dateTaken 解析失败应保留");
+}
+
+#[test]
+fn test_filter_captures_taxon_any_subject_match() {
+    // 主主体是乌鸫，但筛选「大山雀」——多主体任一命中即保留
+    let mut m = make_meta("a", "/photos/a.jpg", "JPEG");
+    m.taxon_name = Some("乌鸫".to_string());
+    m.subjects = vec![
+        SubjectSummary { display_name: "乌鸫".to_string(), confidence: Some(88.0) },
+        SubjectSummary { display_name: "大山雀".to_string(), confidence: Some(77.0) },
+    ];
+    let mut criteria = FilterCriteria::default();
+    criteria.taxon_names = vec!["大山雀".to_string()];
+    assert_eq!(filter_captures(&[m.clone()], &criteria), vec![0]);
+
+    // 未命中的物种 → 排除
+    criteria.taxon_names = vec!["翠鸟".to_string()];
+    assert!(filter_captures(&[m], &criteria).is_empty());
+}
+
+#[test]
+fn test_filter_captures_taxon_single_subject_fallback() {
+    // 旧数据（subjects 空）：退化到主主体 taxon_name 匹配
+    let mut m = make_meta("a", "/photos/a.jpg", "JPEG");
+    m.taxon_name = Some("乌鸫".to_string());
+    let mut criteria = FilterCriteria::default();
+    criteria.taxon_names = vec!["乌鸫".to_string()];
+    assert_eq!(filter_captures(&[m], &criteria), vec![0]);
 }
 
 #[test]

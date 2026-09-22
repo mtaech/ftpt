@@ -493,6 +493,23 @@ fn render_grid_cell(
                                     ),
                             )
                         })
+                        // 右下角：多主体数量徽标（>1 主体时显示 ×N）
+                        .when(meta.map_or(false, |m| m.subjects.len() > 1), |this| {
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .bottom_2()
+                                    .right_2()
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_full()
+                                    .bg(gpui_kit::rgba(0x0000_00a0))
+                                    .text_size(px(10.))
+                                    .font_semibold()
+                                    .text_color(gpui_kit::white())
+                                    .child(format!("×{}", meta.map_or(0, |m| m.subjects.len()))),
+                            )
+                        })
                         // 左下角：连拍选优徽标（琥珀星胶囊）
                         .when(is_best, |this| {
                             this.child(

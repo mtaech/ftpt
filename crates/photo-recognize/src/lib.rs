@@ -373,6 +373,7 @@ mod tests {
             candidates: vec![],
             failure_stage: RecognitionFailureStage::Detection,
             recognized_at: String::new(),
+            subjects: vec![],
         };
         assert_eq!(r.status, RecognitionStatus::Unrecognized);
         assert_eq!(r.failure_stage, RecognitionFailureStage::Detection);
@@ -387,6 +388,7 @@ mod tests {
             candidates: vec![],
             failure_stage: RecognitionFailureStage::Classification,
             recognized_at: String::new(),
+            subjects: vec![],
         };
         assert_eq!(r.status, RecognitionStatus::NeedsReview);
         assert_eq!(r.failure_stage, RecognitionFailureStage::Classification);
@@ -401,6 +403,7 @@ mod tests {
             candidates: vec![],
             failure_stage: RecognitionFailureStage::Mapping,
             recognized_at: String::new(),
+            subjects: vec![],
         };
         assert_eq!(r.status, RecognitionStatus::NeedsReview);
         assert_eq!(r.failure_stage, RecognitionFailureStage::Mapping);
@@ -415,6 +418,7 @@ mod tests {
             candidates: vec![],
             failure_stage: RecognitionFailureStage::Assets,
             recognized_at: String::new(),
+            subjects: vec![],
         };
         assert_eq!(r.status, RecognitionStatus::NeedsReview);
         assert_eq!(r.failure_stage, RecognitionFailureStage::Assets);
@@ -435,6 +439,7 @@ mod tests {
             candidates: vec![],
             failure_stage: RecognitionFailureStage::None,
             recognized_at: "2026-07-28T12:00:00+00:00".into(),
+            subjects: vec![],
         };
         assert_eq!(r.status, RecognitionStatus::Confirmed);
         assert_eq!(r.failure_stage, RecognitionFailureStage::None);
