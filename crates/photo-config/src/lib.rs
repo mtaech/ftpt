@@ -72,9 +72,6 @@ pub struct AppConfig {
     #[serde(default = "default_right_panel_width")]
     pub right_panel_width: u32,
     pub font_family: String,
-    /// 批量识别线程数（1-4）。低配设备减小，高配设备加大。默认 4（8 核以上 CPU）。
-    #[serde(default = "default_recognition_threads")]
-    pub recognition_thread_count: u32,
     /// 识别鸟体定位来源（默认 Yolo = 全图 YOLO 检测；Focus = 优先相机对焦点 ROI，
     /// 无对焦点时回退 YOLO）。枚举无钳制；改动后对下次批量识别生效。
     #[serde(default)]
@@ -144,10 +141,6 @@ fn default_font_family() -> String {
     "Microsoft YaHei UI".to_string()
 }
 
-fn default_recognition_threads() -> u32 {
-    4
-}
-
 fn default_grid_columns() -> u32 {
     4
 }
@@ -169,7 +162,6 @@ impl Default for AppConfig {
             right_panel_visible: true,
             right_panel_width: 200,
             font_family: default_font_family(),
-            recognition_thread_count: default_recognition_threads(),
             detection_source: DetectionSource::default(),
             include_subdirectories: false,
             export_presets: vec![ExportPreset::default()],
@@ -187,7 +179,6 @@ impl AppConfig {
         self.thumbnail_size = self.thumbnail_size.clamp(64, 1024);
         self.left_panel_width = self.left_panel_width.clamp(200, 480);
         self.right_panel_width = self.right_panel_width.clamp(200, 480);
-        self.recognition_thread_count = self.recognition_thread_count.clamp(1, 4);
         self.grid_columns = self.grid_columns.clamp(2, 5);
         self.ui_scale = self.ui_scale.clamp(70, 200);
         self.accent_color = self.accent_color.as_deref().and_then(normalize_accent_hex);
@@ -322,7 +313,6 @@ mod tests {
             thumbnail_size: 99_999,
             left_panel_width: 10,
             right_panel_width: 9_999,
-            recognition_thread_count: 0,
             grid_columns: 99,
             ui_scale: 0,
             export_presets: vec![ExportPreset {
@@ -336,7 +326,6 @@ mod tests {
         assert_eq!(c.thumbnail_size, 1024);
         assert_eq!(c.left_panel_width, 200);
         assert_eq!(c.right_panel_width, 480);
-        assert_eq!(c.recognition_thread_count, 1);
         assert_eq!(c.grid_columns, 5);
         assert_eq!(c.ui_scale, 70);
         assert_eq!(c.export_presets[0].quality, 1);

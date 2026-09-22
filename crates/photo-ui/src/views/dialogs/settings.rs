@@ -729,48 +729,6 @@ fn build_recognition_page(app: &Entity<AppState>) -> SettingPage {
                     .description("Focus 模式优先从 EXIF 提取相机硬件对焦区域直接送入分类器，无对焦点时回退全图 YOLO")
                     .keywords(["识别", "YOLO", "对焦点", "AI", "定位", "模型", "detection", "focus"]),
 
-                    SettingItem::new(
-                        "批量识别并发线程数",
-                        SettingField::render({
-                            let app = app.clone();
-                            move |options: &RenderOptions, _window: &mut Window, cx: &mut App| {
-                                let current_threads = app.read(cx).app_config.recognition_thread_count;
-                                let thread_opts = [
-                                    (1, "1 线程"),
-                                    (2, "2 线程"),
-                                    (4, "4 线程 (推荐)"),
-                                    (8, "8 线程"),
-                                ];
-                                h_flex()
-                                    .gap_1()
-                                    .p_0p5()
-                                    .rounded_lg()
-                                    .bg(cx.theme().muted.opacity(0.35))
-                                    .border_1()
-                                    .border_color(cx.theme().border.opacity(0.5))
-                                    .children(thread_opts.map(|(threads, label)| {
-                                        let is_active = threads == current_threads;
-                                        let app = app.clone();
-                                        Button::new(format!("threads-{threads}"))
-                                            .small()
-                                            .with_size(options.size())
-                                            .when(is_active, |b| b.secondary())
-                                            .when(!is_active, |b| b.ghost())
-                                            .label(label)
-                                            .on_click(move |_, _, cx| {
-                                                app.update(cx, |state, cx| {
-                                                    state.app_config.recognition_thread_count = threads;
-                                                    state.save_config();
-                                                    cx.notify();
-                                                });
-                                            })
-                                    }))
-                            }
-                        }),
-                    )
-                    .layout(Axis::Vertical)
-                    .description("控制并发运行 ONNX Runtime 推理的 CPU 工作线程数，修改后对下一次批量识别生效")
-                    .keywords(["线程", "并发", "CPU", "性能", "推理", "threads", "performance"]),
                 ]),
         )
         .group(

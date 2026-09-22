@@ -82,7 +82,7 @@ BioCLIP 2 权重是 **MIT**、TreeOfLife-200M 是 **CC0-1.0**，随包分发没�
 
 BioCLIP int8 ViT-L 在 CPU 上实测 **0.27s/图**（48 张 12.8s），比 `bird_model` 慢一个数量级；
 峰值 RSS 1.29GB（含 307MB 模型 + 287MB 文本 embedding）。
-- `recognitionThreadCount` 配置项至今没有接线（AGENTS.md 里也记着）。要不要做并发 worker？
+- ~~`recognitionThreadCount` 配置项至今没有接线。要不要做并发 worker？~~ **已解决（2026-09-22）：实测并发无收益**（4 worker 1.10–1.61x / 内存 +0.5GB；8 worker 1.01x / 4189MB），配置项连同设置页那项**已删除**。详见 AGENTS.md 顶部配置记录与 perf 记录。
 
 ## 二、已知未做（不用你回答，只是状态记录）
 
