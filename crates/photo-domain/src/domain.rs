@@ -862,6 +862,60 @@ pub struct SubjectRecognition {
     pub failure: RecognitionFailureStage,
 }
 
+impl Recognition {
+    /// 手动框选补充主体：把框选识别出的新主体追加进 subjects（漏检补充语义）。
+    ///
+    /// - 旧数据（subjects 空）先把顶层字段物化为「主主体」subject 0，再追加——
+    ///   这样旧的识别结论不被覆盖，手动框选的成为补充主体
+    /// - 新主体 index = 现有最大 index + 1；顶层字段保持 = 主主体（subjects[0]）
+    /// - 状态重新聚合：任一主体有结论（failure == None）→ Confirmed；全失败 → NeedsReview
+    /// - recognized_at 刷新为当前时间
+    pub fn append_subject(mut self, mut subject: SubjectRecognition) -> Recognition {
+        // 旧数据兜底：subjects 空时顶层字段就是唯一主体，先物化为 subject 0
+        if self.subjects.is_empty() {
+            if let Some(t) = self.taxon.clone() {
+                self.subjects.push(SubjectRecognition {
+                    index: 0,
+                    bbox: self.bbox.unwrap_or(BBox::new(0.0, 0.0, 1.0, 1.0)),
+                    taxon: Some(t),
+                    class_index: self.class_index,
+                    confidence: self.confidence,
+                    candidates: self.candidates.clone(),
+                    failure: RecognitionFailureStage::None,
+                });
+            }
+        }
+        let next_index = self
+            .subjects
+            .iter()
+            .map(|s| s.index)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
+        subject.index = next_index;
+        self.subjects.push(subject);
+        // 状态重新聚合：任一主体有结论 → Confirmed；否则 NeedsReview（首个失败阶段）
+        if self
+            .subjects
+            .iter()
+            .any(|s| s.failure == RecognitionFailureStage::None)
+        {
+            self.status = RecognitionStatus::Confirmed;
+            self.failure_stage = RecognitionFailureStage::None;
+        } else {
+            self.status = RecognitionStatus::NeedsReview;
+            self.failure_stage = self
+                .subjects
+                .iter()
+                .find(|s| s.failure != RecognitionFailureStage::None)
+                .map(|s| s.failure)
+                .unwrap_or(RecognitionFailureStage::Detection);
+        }
+        self.recognized_at = chrono::Utc::now().to_rfc3339();
+        self
+    }
+}
+
 /// 识别状态筛选条件
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1233,6 +1287,111 @@ mod tests {
             assert_eq!(RecognitionStatus::from_str(s.as_str()), Some(s));
         }
         assert_eq!(RecognitionStatus::from_str("pending"), None);
+    }
+
+    // ── 手动框选补充：Recognition::append_subject ──
+
+    fn subject(index: u32, latin: &str, cn: &str, failure: RecognitionFailureStage) -> SubjectRecognition {
+        SubjectRecognition {
+            index,
+            bbox: BBox::new(0.1, 0.1, 0.4, 0.4),
+            taxon: Some(TaxonMatch {
+                taxon_id: None,
+                cn_name: cn.to_string(),
+                latin_name: latin.to_string(),
+                cn_level: CnLevel::Species,
+                ranks: vec![],
+            }),
+            class_index: Some(index),
+            confidence: Some(80.0),
+            candidates: vec![],
+            failure,
+        }
+    }
+
+    fn base_rec() -> Recognition {
+        Recognition {
+            status: RecognitionStatus::Confirmed,
+            taxon: Some(TaxonMatch {
+                taxon_id: None,
+                cn_name: "长耳鸮".to_string(),
+                latin_name: "Asio otus".to_string(),
+                cn_level: CnLevel::Species,
+                ranks: vec![],
+            }),
+            class_index: Some(0),
+            confidence: Some(70.0),
+            bbox: Some(BBox::new(0.0, 0.0, 0.5, 0.5)),
+            candidates: vec![],
+            failure_stage: RecognitionFailureStage::None,
+            recognized_at: "2026-09-22T10:00:00Z".to_string(),
+            subjects: vec![subject(0, "Asio otus", "长耳鸮", RecognitionFailureStage::None)],
+        }
+    }
+
+    #[test]
+    fn test_append_subject_appends_with_next_index() {
+        let rec = base_rec().append_subject(subject(99, "Entoloma", "粉褶蕈属", RecognitionFailureStage::None));
+        assert_eq!(rec.subjects.len(), 2);
+        // 新主体 index = 现有最大 + 1（忽略入参里的 99，重新编号）
+        assert_eq!(rec.subjects[1].index, 1);
+        assert_eq!(rec.subjects[1].taxon.as_ref().unwrap().latin_name, "Entoloma");
+        // 顶层仍 = 主主体（subjects[0]），不因追加而变
+        assert_eq!(rec.taxon.as_ref().unwrap().latin_name, "Asio otus");
+        assert_eq!(rec.status, RecognitionStatus::Confirmed);
+    }
+
+    #[test]
+    fn test_append_subject_failure_moves_status_to_needs_review() {
+        // 两个主体都有结论 → 追加一个失败主体 → 整张仍 Confirmed（任一有结论）
+        let rec = base_rec().append_subject(subject(1, "x", "y", RecognitionFailureStage::Classification));
+        assert_eq!(rec.status, RecognitionStatus::Confirmed);
+        assert_eq!(rec.subjects[1].failure, RecognitionFailureStage::Classification);
+        // 全部失败 → NeedsReview（首个失败阶段）
+        let all_fail = Recognition {
+            status: RecognitionStatus::NeedsReview,
+            taxon: None,
+            class_index: None,
+            confidence: None,
+            bbox: None,
+            candidates: vec![],
+            failure_stage: RecognitionFailureStage::Classification,
+            recognized_at: "2026-09-22T10:00:00Z".to_string(),
+            subjects: vec![subject(0, "a", "b", RecognitionFailureStage::Classification)],
+        };
+        let rec = all_fail.append_subject(subject(1, "c", "d", RecognitionFailureStage::Mapping));
+        assert_eq!(rec.status, RecognitionStatus::NeedsReview);
+        assert_eq!(rec.failure_stage, RecognitionFailureStage::Classification);
+    }
+
+    #[test]
+    fn test_append_subject_legacy_empty_subjects_materializes_top_level() {
+        // 旧数据：subjects 空但顶层有结论 → 先物化为 subject 0，新主体为 subject 1
+        let legacy = Recognition {
+            status: RecognitionStatus::Confirmed,
+            taxon: Some(TaxonMatch {
+                taxon_id: None,
+                cn_name: "白鹭".to_string(),
+                latin_name: "Egretta garzetta".to_string(),
+                cn_level: CnLevel::Species,
+                ranks: vec![],
+            }),
+            class_index: Some(3),
+            confidence: Some(90.0),
+            bbox: None,
+            candidates: vec![],
+            failure_stage: RecognitionFailureStage::None,
+            recognized_at: "2026-08-01T10:00:00Z".to_string(),
+            subjects: vec![],
+        };
+        let rec = legacy.append_subject(subject(0, "Entoloma", "粉褶蕈属", RecognitionFailureStage::None));
+        assert_eq!(rec.subjects.len(), 2);
+        assert_eq!(rec.subjects[0].taxon.as_ref().unwrap().latin_name, "Egretta garzetta");
+        assert_eq!(rec.subjects[0].index, 0);
+        assert_eq!(rec.subjects[1].index, 1);
+        // 顶层保持 = 物化后的主主体（旧结论）
+        assert_eq!(rec.taxon.as_ref().unwrap().latin_name, "Egretta garzetta");
+        assert_eq!(rec.status, RecognitionStatus::Confirmed);
     }
 
     #[test]

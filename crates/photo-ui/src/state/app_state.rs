@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use photo_config::AppConfig;
-use photo_domain::{AdjustParams, CaptureMeta, ImageFormat, SortBy, SortDirection};
+use photo_domain::{AdjustParams, BBox, CaptureMeta, ImageFormat, SortBy, SortDirection};
 use photo_engine::folder_db::FolderDb;
 use photo_engine::global_db::GlobalDb;
 use photo_engine::undo::OpJournal;
@@ -214,6 +214,14 @@ pub struct AppState {
     pub preview_viewport_size: Option<(f64, f64)>,
     /// 预览图片拖拽平移的鼠标起点 (x, y)
     pub preview_drag_start: Option<(gpui_kit::Pixels, gpui_kit::Pixels)>,
+    /// 预览「框选识别」模式开关（工具条按钮 toggle；开启时左键拖拽画框而非平移）
+    pub region_select: bool,
+    /// 框选拖拽起点（图片视口坐标）；None = 未在拖拽
+    pub region_drag_start: Option<(f64, f64)>,
+    /// 进行中/最近一次的框选矩形（归一化 0-1，叠加层绘制用）
+    pub region_bbox: Option<BBox>,
+    /// 框选识别进行中（防重复触发 + 状态栏提示）
+    pub region_recognizing: bool,
 
     // ── 调整状态（ADR 0007：右栏「调整」tab，参数随图入库） ──
     /// 焦点图的调整参数（全零 = 无调整，走未调整母版）
@@ -623,6 +631,10 @@ impl AppState {
             show_clipping: false,
             preview_viewport_size: None,
             preview_drag_start: None,
+            region_select: false,
+            region_drag_start: None,
+            region_bbox: None,
+            region_recognizing: false,
 
             adjust: AdjustParams::default(),
             adjust_path: None,

@@ -12,6 +12,8 @@
 //! - 底部胶片条（80px）
 //! - 视频等非图片格式：不解码、不抽帧，只给「用默认软件打开」一条出口（§7.5）
 
+use std::path::PathBuf;
+
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::dock::DockPlacement;
 use gpui_kit::component::{
@@ -27,14 +29,17 @@ use gpui_kit::{
 use photo_domain::FocusShape;
 
 use crate::actions::{
-    CopyImage, ToggleBbox, ToggleClipping, ToggleFocus, ToggleView, ZoomIn, ZoomOut,
+    CopyImage, ToggleBbox, ToggleClipping, ToggleFocus, ToggleRegionSelect, ToggleView, ZoomIn,
+    ZoomOut,
 };
 use crate::image::{MASTER_SIZE, THUMB_SIZE_GRID, source_file_of};
 use crate::model::preview_math::{
-    clamp_pan_axis, exceeds_master_res, fit_scale, preview_center_offset,
+    clamp_pan_axis, exceeds_master_res, fit_scale, preview_center_offset, region_bbox_from_drag,
 };
 use crate::state::AppState;
-use crate::state::engine_ops::{load_preview_full, load_preview_image};
+use crate::state::engine_ops::{
+    defer_entity_action, load_preview_full, load_preview_image, start_region_recognition,
+};
 use crate::theme::COLOR_FOCUS;
 use crate::views::filmstrip::render_filmstrip;
 
@@ -219,6 +224,9 @@ pub fn render_photo_preview(
     let entity = cx.entity().clone();
     let is_dragging = state.preview_drag_start.is_some();
     let can_pan = disp_w > container_w || disp_h > container_h;
+    // 框选：叠加层用值 + 触发识别要的文件路径（BBox 是 Copy）
+    let region_overlay = state.region_bbox;
+    let region_path = meta.primary_path.clone();
 
     v_flex()
         .w_full()
@@ -263,12 +271,21 @@ pub fn render_photo_preview(
                     MouseButton::Left,
                     cx.listener(|state, event: &gpui_kit::MouseDownEvent, _window, cx| {
                         if event.click_count == 2 {
+                            // 双击缩放（框选模式下也保留）
                             if (state.preview_zoom - 1.0).abs() < 1e-4 {
                                 state.preview_zoom = 0.0;
                             } else {
                                 state.preview_zoom = 1.0;
                             }
                             state.preview_pan = (0.0, 0.0);
+                            cx.notify();
+                        } else if state.region_select {
+                            // 框选模式：左键拖拽画框（不进入平移）
+                            state.region_drag_start = Some((
+                                f32::from(event.position.x) as f64,
+                                f32::from(event.position.y) as f64,
+                            ));
+                            state.region_bbox = None;
                             cx.notify();
                         } else {
                             state.preview_drag_start = Some((event.position.x, event.position.y));
@@ -277,12 +294,49 @@ pub fn render_photo_preview(
                 )
                 .on_mouse_up(
                     MouseButton::Left,
-                    cx.listener(|state, _event: &gpui_kit::MouseUpEvent, _window, _cx| {
-                        state.preview_drag_start = None;
+                    cx.listener(move |state, event: &gpui_kit::MouseUpEvent, _window, cx| {
+                        if state.region_select {
+                            if let Some(start) = state.region_drag_start.take() {
+                                let end = (
+                                    f32::from(event.position.x) as f64,
+                                    f32::from(event.position.y) as f64,
+                                );
+                                // 面积过小的框视为误点击（不触发识别）
+                                let bbox = region_bbox_from_drag(
+                                    start,
+                                    end,
+                                    (offset_x, offset_y),
+                                    (disp_w, disp_h),
+                                )
+                                .filter(|b| (b.x2 - b.x1) * (b.y2 - b.y1) >= 0.0004);
+                                state.region_bbox = bbox;
+                                if let Some(b) = bbox {
+                                    // listener 内 AppState 已租借，直接 update 会 panic：
+                                    // 用 defer_entity_action 排到本轮 effect 之后（同识别/扫描入口）
+                                    let entity = cx.entity().clone();
+                                    let path = PathBuf::from(region_path.clone());
+                                    defer_entity_action(cx, entity, move |entity, cx| {
+                                        start_region_recognition(entity, path, b, cx);
+                                    });
+                                }
+                                cx.notify();
+                            }
+                        } else {
+                            state.preview_drag_start = None;
+                        }
                     }),
                 )
-                .on_mouse_move(cx.listener(|state, event: &gpui_kit::MouseMoveEvent, _window, cx| {
-                    if let Some((start_x, start_y)) = state.preview_drag_start {
+                .on_mouse_move(cx.listener(move |state, event: &gpui_kit::MouseMoveEvent, _window, cx| {
+                    if let Some(start) = state.region_drag_start {
+                        // 框选进行中：实时更新叠加框
+                        let end = (
+                            f32::from(event.position.x) as f64,
+                            f32::from(event.position.y) as f64,
+                        );
+                        state.region_bbox =
+                            region_bbox_from_drag(start, end, (offset_x, offset_y), (disp_w, disp_h));
+                        cx.notify();
+                    } else if let Some((start_x, start_y)) = state.preview_drag_start {
                         let dx = f32::from(event.position.x - start_x) as f64;
                         let dy = f32::from(event.position.y - start_y) as f64;
                         if dx.abs() > 0.0 || dy.abs() > 0.0 {
@@ -353,6 +407,26 @@ pub fn render_photo_preview(
                                     .border_2()
                                     .border_color(cx.theme().primary)
                                     .bg(cx.theme().primary.opacity(0.15)),
+                            )
+                        })
+                        // ── 叠加层：手动框选矩形（warning 橙，区分识别检测框的 primary）──
+                        .when(region_overlay.is_some(), |this| {
+                            let bbox = region_overlay.unwrap();
+                            let bx = bbox.x1 as f64 * disp_w;
+                            let by = bbox.y1 as f64 * disp_h;
+                            let bw = (bbox.x2 - bbox.x1) as f64 * disp_w;
+                            let bh = (bbox.y2 - bbox.y1) as f64 * disp_h;
+
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .top(px(by as f32))
+                                    .left(px(bx as f32))
+                                    .w(px(bw as f32))
+                                    .h(px(bh as f32))
+                                    .border_2()
+                                    .border_color(cx.theme().warning)
+                                    .bg(cx.theme().warning.opacity(0.12)),
                             )
                         })
                         // ── 叠加层：对焦点 ──
@@ -485,6 +559,18 @@ pub fn render_photo_preview(
                                 }),
                         )
                         .child(Separator::vertical().h(px(16.)))
+                        // 框选识别（漏检补充）：开启后拖拽画框、松开识别
+                        .child(
+                            Button::new("toggle-region")
+                                .ghost()
+                                .xsmall()
+                                .icon(gpui_kit::assets::IconName::Scan)
+                                .tooltip("框选识别：检测漏检时手动框选补充主体")
+                                .selected(state.region_select)
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(ToggleRegionSelect), cx);
+                                }),
+                        )
                         // 检测框开关 (V)
                         .child(
                             Button::new("toggle-bbox")

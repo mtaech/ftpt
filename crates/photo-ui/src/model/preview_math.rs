@@ -52,3 +52,29 @@ pub fn fit_scale(container_w: f64, container_h: f64, img_w: f64, img_h: f64) -> 
     }
     (container_w / img_w).min(container_h / img_h).min(1.0)
 }
+
+/// 框选拖拽（视口坐标两点）→ 图片归一化 bbox（0-1，左上/右下规范化）。
+///
+/// 视口坐标系：offset = 图片显示区左上角在视口里的位置，disp = 显示区尺寸。
+/// 超出图片显示区的部分夹到 0-1（框选可以拖到图外，不应产生越界 bbox）。
+/// disp 任一维 <= 0（图片未就绪/未布局）时返回 None。
+pub fn region_bbox_from_drag(
+    start: Vec2,
+    end: Vec2,
+    offset: Vec2,
+    disp: Vec2,
+) -> Option<photo_domain::BBox> {
+    if disp.0 <= 0.0 || disp.1 <= 0.0 {
+        return None;
+    }
+    let norm = |v: f64, off: f64, d: f64| ((v - off) / d).clamp(0.0, 1.0) as f32;
+    let (x1, x2) = {
+        let (a, b) = (norm(start.0, offset.0, disp.0), norm(end.0, offset.0, disp.0));
+        if a <= b { (a, b) } else { (b, a) }
+    };
+    let (y1, y2) = {
+        let (a, b) = (norm(start.1, offset.1, disp.1), norm(end.1, offset.1, disp.1));
+        if a <= b { (a, b) } else { (b, a) }
+    };
+    Some(photo_domain::BBox::new(x1, y1, x2, y2))
+}

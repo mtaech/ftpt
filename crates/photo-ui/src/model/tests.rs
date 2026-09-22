@@ -282,6 +282,46 @@ fn test_preview_math() {
 }
 
 #[test]
+fn test_region_bbox_from_drag_normalizes_and_clamps() {
+    // 正常框选：offset (100,50) disp (800,600)，拖 (300,200)→(500,350)
+    let b = region_bbox_from_drag(
+        (300.0, 200.0),
+        (500.0, 350.0),
+        (100.0, 50.0),
+        (800.0, 600.0),
+    )
+    .unwrap();
+    assert!((b.x1 - 0.25).abs() < 1e-6);
+    assert!((b.y1 - 0.25).abs() < 1e-6);
+    assert!((b.x2 - 0.5).abs() < 1e-6);
+    assert!((b.y2 - 0.5).abs() < 1e-6);
+
+    // 反向拖拽（终点在起点左上）：仍然规范化成左上/右下
+    let b = region_bbox_from_drag(
+        (500.0, 350.0),
+        (300.0, 200.0),
+        (100.0, 50.0),
+        (800.0, 600.0),
+    )
+    .unwrap();
+    assert!(b.x1 <= b.x2 && b.y1 <= b.y2);
+    assert!((b.x1 - 0.25).abs() < 1e-6 && (b.y2 - 0.5).abs() < 1e-6);
+
+    // 拖出图片显示区：夹到 0-1
+    let b = region_bbox_from_drag(
+        (-200.0, -100.0),
+        (2000.0, 1500.0),
+        (100.0, 50.0),
+        (800.0, 600.0),
+    )
+    .unwrap();
+    assert_eq!((b.x1, b.y1, b.x2, b.y2), (0.0, 0.0, 1.0, 1.0));
+
+    // disp 非法（图片未布局）：None
+    assert!(region_bbox_from_drag((0.0, 0.0), (10.0, 10.0), (0.0, 0.0), (0.0, 0.0)).is_none());
+}
+
+#[test]
 fn test_preview_dynamic_fit_and_centering() {
     // 模拟用户截图场景：原图 7232 x 5424 (4:3)
     let natural_w = 7232.0;

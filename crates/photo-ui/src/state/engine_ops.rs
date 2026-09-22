@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use gpui_kit::{App, Entity};
 use photo_domain::{
-    AdjustParams, CaptureMeta, ColorLabel, FilterCriteria, Flag, ImageFormat, Rating, SourceFile,
+    AdjustParams, BBox, CaptureMeta, ColorLabel, FilterCriteria, Flag, ImageFormat, Rating,
+    SourceFile,
 };
 
 use crate::image::{ImageManager, THUMB_SIZE_GRID, source_file_of};
@@ -788,6 +789,179 @@ fn apply_recognition(
             }
         }
     }
+}
+
+/// 预览手动框选识别（漏检补充）：对用户框选的区域跑识别（跳过 YOLO 检测），
+/// 结果作为**新主体**追加进该照片已有的 subjects，落 folder_db + 全局索引。
+///
+/// 路径：预览工具条「框选」toggle 开启后，拖拽画框、松开即触发（见 preview.rs）。
+/// 重型推理放后台 executor（与批量识别同一口径），前台只做合并与落库。
+pub fn start_region_recognition(
+    state_entity: Entity<AppState>,
+    path: PathBuf,
+    bbox: BBox,
+    cx: &mut App,
+) {
+    // 防重入：同一时刻只跑一次框选识别
+    let proceed = state_entity.update(cx, |state, cx| {
+        if state.region_recognizing {
+            return false;
+        }
+        state.region_recognizing = true;
+        state.set_status_message("框选识别中…".to_string());
+        cx.notify();
+        true
+    });
+    if !proceed {
+        return;
+    }
+
+    let Some(data_root) = crate::state::app_state::data_root() else {
+        state_entity.update(cx, |state, cx| {
+            state.region_recognizing = false;
+            state.set_status_message("无法定位模型与名录库数据目录 (PHOTO_DATA_DIR)");
+            cx.notify();
+        });
+        return;
+    };
+    let models_dir = data_root.join("models");
+    let catalog_db = data_root.join("data/bird_catalog.db");
+
+    cx.spawn(async move |async_cx: &mut gpui_kit::AsyncApp| {
+        // 后台：模型装配 + 区域识别（CPU 密集，绝不放前台执行器）
+        let path_bg = path.clone();
+        let result = async_cx
+            .background_executor()
+            .spawn(async move {
+                let mut recognizer = photo_recognize::Recognizer::new(&models_dir, &catalog_db)?;
+                let format = photo_domain::ImageFormat::from_extension(
+                    path_bg
+                        .extension()
+                        .unwrap_or_default()
+                        .to_str()
+                        .unwrap_or_default(),
+                )
+                .unwrap_or(photo_domain::ImageFormat::Jpeg);
+                let capture = photo_domain::Capture {
+                    base_name: path_bg
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string(),
+                    source_files: vec![photo_domain::SourceFile {
+                        path: path_bg.clone(),
+                        format,
+                        file_size: None,
+                    }],
+                    primary_index: 0,
+                };
+                recognizer.recognize_region(&capture, bbox, None)
+            })
+            .await;
+
+        // 前台：合并主体 + 落库 + 摘要 + 全局索引同步
+        let _ = async_cx.update(|cx| {
+            state_entity.update(cx, |state, cx| {
+                state.region_recognizing = false;
+                match result {
+                    Err(e) => state.set_status_message(format!("框选识别失败：{e}")),
+                    Ok(rec) => apply_region_recognition(state, &path, rec),
+                }
+                cx.notify();
+            });
+        });
+    })
+    .detach();
+}
+
+/// 把框选识别结果合并进该照片已有识别（**只在前台线程调用**）。
+///
+/// - 框选主体无物种结论（分类/名录失败）→ 不追加，仅状态栏提示
+/// - 已有识别记录 → append_subject（旧数据先把顶层物化为「主主体」再追加）
+/// - 无识别记录 → 框选结果即该照片的识别结论
+fn apply_region_recognition(
+    state: &mut AppState,
+    path: &Path,
+    region_rec: photo_domain::Recognition,
+) {
+    let subject = match region_rec.subjects.first() {
+        Some(s) if s.taxon.is_some() => s.clone(),
+        Some(s) => {
+            let msg = s.failure.user_message();
+            state.set_status_message(format!(
+                "框选识别未得到物种结论{}",
+                if msg.is_empty() {
+                    String::new()
+                } else {
+                    format!("（{msg}）")
+                }
+            ));
+            return;
+        }
+        None => {
+            state.set_status_message("框选识别未得到物种结论".to_string());
+            return;
+        }
+    };
+    let display = subject
+        .taxon
+        .as_ref()
+        .map(|t| t.display_name().to_string())
+        .unwrap_or_default();
+
+    // 先 clone 出数据库句柄与目录，避免与后面对 state.items 的可变借用冲突
+    let dir = state.current_dir.clone();
+    let db = state.folder_db.clone();
+    let gdb = state.global_db.clone();
+    let (Some(dir), Some(db)) = (dir, db) else {
+        state.set_status_message("框选识别完成，但当前没有打开的文件夹数据库".to_string());
+        return;
+    };
+    let Ok(rel) = path.strip_prefix(&dir) else {
+        state.set_status_message("框选识别完成，但无法定位文件的相对路径".to_string());
+        return;
+    };
+    let rel_str = rel.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+
+    // 合并：已有记录 → 追加主体；无记录 → 框选结果直接用
+    let merged = match db.get_recognition(&rel_str).ok().flatten() {
+        Some(existing) => existing.append_subject(subject),
+        None => region_rec,
+    };
+    let _ = db.upsert_recognition(&rel_str, &merged);
+
+    // 内存摘要回填（网格/信息栏立即可见），并取拍摄时间供全局索引
+    let idx = state
+        .items
+        .iter()
+        .position(|m| Path::new(&m.primary_path) == path);
+    let date_taken = if let Some(i) = idx {
+        if let Some(meta) = state.items.get_mut(i) {
+            enrich_meta_recognition(meta, &merged);
+            meta.date_taken.clone()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // 全局索引同步（多主体按主体展开）
+    if let Some(gdb) = &gdb {
+        let folder_str = dir.to_string_lossy().to_string();
+        let rows =
+            SpeciesRow::from_recognition(&folder_str, &rel_str, &merged, date_taken.as_deref());
+        if rows.is_empty() {
+            let _ = gdb.delete_rows(&folder_str, &[rel_str.clone()]);
+        } else {
+            let _ = gdb.upsert_rows(&rows);
+        }
+    }
+
+    state.set_status_message(format!(
+        "框选识别：{display}（已作为新主体加入，共 {} 个主体）",
+        merged.subjects.len()
+    ));
 }
 
 /// 把识别结果写进 CaptureMeta 摘要，并把物种名归一为「显示名」。

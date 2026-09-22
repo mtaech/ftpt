@@ -468,6 +468,15 @@ impl Render for AppState {
                 this.show_clipping = !this.show_clipping;
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &ToggleRegionSelect, _window, cx| {
+                // 框选模式：关时清掉框与拖拽状态（开时保留进行中的框，继续画）
+                this.region_select = !this.region_select;
+                this.region_drag_start = None;
+                if !this.region_select {
+                    this.region_bbox = None;
+                }
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &ToggleLeftPanel, window, cx| {
                 this.toggle_dock(DockPlacement::Left, window, cx);
                 cx.notify();

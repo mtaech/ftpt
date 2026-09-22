@@ -44,6 +44,7 @@ actions!(
         ToggleBbox,
         ToggleFocus,
         ToggleClipping,
+        ToggleRegionSelect,
         // 选择与面板与系统
         SelectAll,
         DeselectAll,
