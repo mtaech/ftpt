@@ -77,6 +77,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 |`crates/photo-ui/src/state/`|`AppState`（单实体）/ `import.rs`（导入状态机）/ `engine_ops.rs`（调同步引擎的唯一桥）|
 |`crates/photo-ui/src/model/`|adjust / filter / sort / stacks / burst / preview_math / best_frame（纯逻辑 + 内联单测）|
 |`crates/photo-ui/src/theme/`|Material You 动态取色：`material.rs`（HCT/CAM16）+ `scheme.rs`（seed → 亮/暗语义色）|
+|`docs/todo.md`|**待办总账**（P0–P3，每条带可核实证据与估工）+ 建议顺序与维护约定；与 `docs/open-questions.md`（需拍板项）配套|
 |`docs/exiftool-update.md`|ExifTool 本地运行时更新指引（EXIF 后端依赖，进 git）|
 |`local-lib/`|预编译 Linux `libraw.so`/`libraw_r.so` + `exiftool/`（ExifTool 跨平台运行时：`windows/` perl.exe+exiftool.pl、`linux/` 源码包、VERSION.txt；更新指引 `docs/exiftool-update.md`，均不纳入版本控制）|
 
