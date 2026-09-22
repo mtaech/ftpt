@@ -21,6 +21,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use gpui_kit::{AppContext as _, Bounds, Point, WindowBounds, WindowOptions, px, size};
+use photo_domain::{
+    CnLevel, Recognition, RecognitionFailureStage, RecognitionStatus, TaxonMatch,
+};
 
 use photo_ui::actions::{Export, Rescan};
 use photo_ui::state::{ActiveDialog, AppState, engine_ops};
@@ -360,6 +363,104 @@ fn main() {
                     status_fail
                         .as_deref()
                         .is_some_and(|m| m.contains("导出失败") && m.contains("目标目录"))
+                );
+
+                // ── 8) eBird 记录导出（#9：统计页「导出记录 (CSV)」走同一条）──
+                // 门控看内存摘要、导出读 folder_db，两处都要造
+                let idx = async_cx.update(|cx| {
+                    task_state
+                        .read(cx)
+                        .items
+                        .iter()
+                        .position(|m| m.base_name == "alpha")
+                        .unwrap_or(0)
+                });
+                let rec = Recognition {
+                    status: RecognitionStatus::Confirmed,
+                    taxon: Some(TaxonMatch {
+                        taxon_id: Some(42),
+                        cn_name: "大嘴乌鸦".to_string(),
+                        latin_name: "Corvus macrorhynchos".to_string(),
+                        cn_level: CnLevel::Species,
+                        ranks: vec![],
+                    }),
+                    class_index: Some(7),
+                    confidence: Some(88.5),
+                    bbox: None,
+                    candidates: Vec::new(),
+                    failure_stage: RecognitionFailureStage::None,
+                    recognized_at: "2026-01-01T00:00:00Z".to_string(),
+                    subjects: Vec::new(),
+                };
+                let staged = async_cx.update(|cx| {
+                    task_state.update(cx, |s, _cx| {
+                        let mem_ok = {
+                            let m = &mut s.items[idx];
+                            m.recognition_status = Some(RecognitionStatus::Confirmed);
+                            m.taxon_name = Some("大嘴乌鸦".to_string());
+                            true
+                        };
+                        let db_ok = s
+                            .folder_db
+                            .as_ref()
+                            .map(|db| db.upsert_recognition("alpha.jpg", &rec).is_ok())
+                            .unwrap_or(false);
+                        mem_ok && db_ok
+                    })
+                });
+                check!("造出一条已确认记录（内存摘要 + folder_db）", staged);
+                let gate = async_cx.update(|cx| {
+                    photo_ui::model::ebird::ebird_candidates(&task_state.read(cx).items)
+                });
+                check!(format!("eBird 门控放行（可导出 {gate} 张）"), gate >= 1);
+
+                // 与统计页按钮背后同一条函数（无头下不点鼠标）
+                async_cx.update(|cx| {
+                    engine_ops::start_ebird_export(task_state.clone(), cx);
+                });
+                let mut waited = 0u64;
+                loop {
+                    let running = async_cx.update(|cx| task_state.read(cx).is_ebird_exporting);
+                    if !running || waited > 15_000 {
+                        break;
+                    }
+                    pump(async_cx, 100).await;
+                    waited += 100;
+                }
+                let (ebird_status, csv_dir) = async_cx.update(|cx| {
+                    let s = task_state.read(cx);
+                    (
+                        s.status_message.clone().map(|(m, _)| m),
+                        s.app_config.export_dir.clone(),
+                    )
+                });
+                let csv = csv_dir
+                    .map(std::path::PathBuf::from)
+                    .and_then(|d| {
+                        std::fs::read_dir(&d).ok()?.flatten().find_map(|e| {
+                            let p = e.path();
+                            (p.extension().is_some_and(|x| x == "csv")).then_some(p)
+                        })
+                    });
+                let csv_text = csv
+                    .as_ref()
+                    .and_then(|p| std::fs::read_to_string(p).ok())
+                    .unwrap_or_default();
+                check!("CSV 落盘在导出目录", csv.is_some());
+                check!(
+                    format!("状态栏报 CSV 结果（{ebird_status:?}）"),
+                    ebird_status
+                        .as_deref()
+                        .is_some_and(|m| m.contains("已导出观鸟记录") && m.contains("条"))
+                );
+                check!(
+                    "CSV 带 BOM + 表头（RFC 4180）",
+                    csv_text.starts_with('\u{feff}')
+                        && csv_text.contains("中文名,学名,数量,日期,纬度,经度,备注")
+                );
+                check!(
+                    format!("CSV 含物种聚合行（{}）", csv_text.lines().nth(1).unwrap_or("")),
+                    csv_text.contains("大嘴乌鸦") && csv_text.contains("Corvus macrorhynchos")
                 );
 
                 if failures == 0 {

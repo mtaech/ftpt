@@ -7,7 +7,7 @@
 //! - 退出返回网格
 
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     tag::Tag,
@@ -19,7 +19,9 @@ use photo_engine::global_db::SpeciesStat;
 use crate::actions::Escape;
 use crate::state::AppState;
 use crate::state::app_state::StatsPhoto;
-use crate::state::engine_ops::{defer_entity_action, open_stats_photo, select_stats_species};
+use crate::state::engine_ops::{
+    defer_entity_action, open_stats_photo, select_stats_species, start_ebird_export,
+};
 
 pub fn render_stats_view(
     state: &AppState,
@@ -36,6 +38,8 @@ pub fn render_stats_view(
 
     let total_species = stats.len();
     let total_photos: i64 = stats.iter().map(|s| s.photo_count).sum();
+    // eBird 记录导出（§10.6）：作用域 = 当前目录（引擎 build_rows 按文件夹汇总）
+    let ebird_candidates = crate::model::ebird::ebird_candidates(&state.items);
 
     // 右栏数据先拷出来：下面构造元素时要可变借用 cx（listener），不能同时借 state
     let selected = state.stats_selected_species.clone();
@@ -68,14 +72,38 @@ pub fn render_stats_view(
                         ),
                 )
                 .child(
-                    Button::new("btn-exit-stats")
-                        .ghost()
-                        .small()
-                        .icon(IconName::Close)
-                        .label("退出统计 (Esc)")
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(Escape), cx);
-                        }),
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            Button::new("btn-export-ebird")
+                                .ghost()
+                                .small()
+                                .icon(IconName::ExternalLink)
+                                .label("导出记录 (CSV)")
+                                .disabled(ebird_candidates == 0 || state.is_ebird_exporting)
+                                .tooltip(if ebird_candidates == 0 {
+                                    "当前目录没有带物种结论的照片"
+                                } else {
+                                    "导出当前目录的观鸟记录 CSV（eBird 只收录鸟类；引擎汇总全部有结论的物种，非鸟记录请自行剔除）"
+                                })
+                                .on_click(cx.listener(|_state, _, _window, cx| {
+                                    let entity = cx.entity();
+                                    defer_entity_action(cx, entity, |entity, cx| {
+                                        start_ebird_export(entity, cx)
+                                    });
+                                })),
+                        )
+                        .child(
+                            Button::new("btn-exit-stats")
+                                .ghost()
+                                .small()
+                                .icon(IconName::Close)
+                                .label("退出统计 (Esc)")
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(Escape), cx);
+                                }),
+                        ),
                 ),
         )
         // ── 顶部三卡 ──

@@ -361,6 +361,8 @@ pub struct AppState {
     /// 质量滑杆 Change 订阅（持有保证持续接收）
     pub _export_quality_sub: Option<Subscription>,
     pub is_exporting: bool,
+    /// eBird 记录 CSV 导出进行中（单文件导出：只在状态栏报结果，不做进度弹窗）
+    pub is_ebird_exporting: bool,
     pub export_done: u32,
     pub export_total: u32,
     pub export_current: String,
@@ -765,6 +767,7 @@ impl AppState {
             export_quality_slider: None,
             _export_quality_sub: None,
             is_exporting: false,
+            is_ebird_exporting: false,
             export_done: 0,
             export_total: 0,
             export_current: String::new(),

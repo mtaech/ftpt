@@ -5,6 +5,7 @@
 pub mod adjust;
 pub mod best_frame;
 pub mod burst;
+pub mod ebird;
 pub mod export;
 pub mod filter;
 pub mod preview_math;
@@ -20,6 +21,7 @@ pub use adjust::{
 };
 pub use best_frame::{non_best_paths, pick_best_frame};
 pub use burst::{BurstEntry, BurstGroupMap, compute_burst_groups, parse_exif_date};
+pub use ebird::ebird_candidates;
 pub use export::{
     ExportDraft, LONG_EDGE_OPTIONS, QUALITY_OPTIONS, export_targets, unique_output_path,
 };

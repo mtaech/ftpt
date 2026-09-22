@@ -127,7 +127,7 @@
 - f16 压缩 / PCA 降维都没做。
 - 参考：`docs/open-questions.md` §2 与文末状态表。
 
-### 9. eBird 导出（先补入口，再谈门控）
+### 9. ✅ eBird 导出（先补入口，再谈门控）
 
 - **更正（2026-09-22 复核）**：比「按类群门控」更前置的问题是——`photo-engine/src/export_ebird.rs`
   的 `build_rows` / `write_csv` 早已就绪，但 **`crates/photo-ui/` 里 0 引用**，整个 eBird 导出
@@ -136,7 +136,17 @@
   有鸟种结论才显示入口」实现，比在设置里加开关更省。
 - **估工**：入口 0.5 天（门控随入口一并落）。
 - **优先级**：入口部分不依赖任何拍板、可直接做（「建议顺序」第 4 位）；只有「门控规则」需要你确认。
-- 参考：`docs/open-questions.md` §7。
+- **已完成（2026-09-22 · commit 见 Batch 3）**：入口 = 统计页顶栏「导出记录 (CSV)」（手册 §10.6 的位置），
+  `engine_ops::start_ebird_export` 前台取快照 → 后台 `export_ebird::build_rows` + `write_csv` → 状态栏报
+  「已导出观鸟记录 N 条 → 路径」；目标目录复用 `AppConfig.export_dir`，文件名 `ebird_YYYYMMDD.csv`（同日重复去重）。
+  门控 = 新增纯逻辑 `model/ebird.rs::ebird_candidates`（Confirmed/NeedsReview 且带物种名，与引擎计入口径一致）。
+- **门控为什么不是「按类群」**：`recognition` 表**不持久化类群**（`ranks` 见 #11，暂缓），UI 无法可靠区分
+  鸟与非鸟；所以退一步按「有物种结论」放行，tooltip 与文档都写明「含全部类群，非鸟记录请自行剔除」。
+  **要真按类群门控，前置是把类群/`ranks` 落库**（与 #10 / #11 合并做一次 migration）。
+- **验证**：`cargo check --workspace --all-targets` 0 warning；`cargo test` 全绿（photo-ui 72→74，
+  新增 2 个门控单测：Confirmed+NeedsReview 计数 / Unrecognized·无物种名不计）；`export_smoke` 21 → **27 项**
+  全过（造识别记录 → 门控放行 1 张 → CSV 落盘 / BOM + 表头 / 物种聚合行 `大嘴乌鸦,Corvus macrorhynchos,1,…`）。
+- 参考：`docs/open-questions.md` §7（已同步：入口已补，类群门控待定）。
 
 ### 10. ⏸ 暂缓：`backend` / `asset_version` 未落库
 
@@ -219,7 +229,7 @@
    分组质量（`todo #2` 第 ④ 条），需要你给一个目录。
 3. ✅ **#4 / #3 滚动条**（同日 Batch 2：公用 `scroll_area` + 四处复用，`stats_smoke` 15 项）。
 4. ✅ **#12 全局索引 `date_taken` 回写**（同批，含 2 个单测）。
-5. **#9 eBird 入口**——先补入口（可复用 #1 的后台导出状态机），门控随入口一并落。
+5. ✅ **#9 eBird 入口**（同日 Batch 3：统计页「导出记录 (CSV)」+ 门控纯逻辑，`export_smoke` 27 项）。
 6. **#5–#8 语义/资产类**——先拍板再动工，别先写代码。
 7. **⏸ #10 / #11**——收益低于维护成本，等第二个识别后端出现再动。
 8. **P3（#13–#18）**——发包前先把 #15（NOTICE / 打包校验）做掉。

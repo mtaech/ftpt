@@ -1725,6 +1725,93 @@ pub fn start_export(state_entity: Entity<AppState>, cx: &mut App) {
     .detach();
 }
 
+/// 导出当前目录的观鸟（eBird）记录 CSV（手册 §10.6 统计页「导出记录 → CSV」）。
+///
+/// 单文件导出，套的是批量导出的同一套「前台取快照 → 后台干活 → 前台报结果」：
+/// - 目标 = `AppConfig.export_dir`（#1 记住的导出目录）→ 否则 `<当前目录>/exports`
+/// - 文件名 = `ebird_YYYYMMDD.csv`（同日重复导出自动 `_1` 后缀，不覆盖）
+/// - 引擎 `export_ebird::build_rows(dir)` 读 folder_db 汇总（按 物种×日期 聚合），
+///   `write_csv` 写 UTF-8 BOM CSV
+///
+/// **门控在 UI 侧**（`model::ebird::ebird_candidates`）：引擎汇总的是全部有物种结论的
+/// 记录，eBird 只收录鸟类，而类群没落库（todo #11 暂缓）——所以这里不假装能分辨鸟，
+/// 入口 tooltip 与 docs 都写明「含全部类群，请自行剔除」。
+pub fn start_ebird_export(state_entity: Entity<AppState>, cx: &mut App) {
+    let prepared: Option<(PathBuf, PathBuf)> = state_entity.update(cx, |state, cx| {
+        if state.is_ebird_exporting {
+            return None;
+        }
+        let Some(dir) = state.current_dir.clone() else {
+            state.set_status_message("导出失败：未打开目录");
+            cx.notify();
+            return None;
+        };
+        if crate::model::ebird::ebird_candidates(&state.items) == 0 {
+            state.set_status_message("没有可导出的物种记录（需要已识别且带物种结论的照片）");
+            cx.notify();
+            return None;
+        }
+        // 目标目录：记住的导出目录 → 否则当前目录下 exports/
+        let base = state
+            .app_config
+            .export_dir
+            .clone()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| dir.join("exports"));
+        let stamp = chrono::Local::now().format("%Y%m%d").to_string();
+        let mut used = std::collections::HashSet::new();
+        let dest = crate::model::export::unique_output_path(
+            &base,
+            &format!("ebird_{stamp}"),
+            "csv",
+            &mut used,
+        );
+        state.is_ebird_exporting = true;
+        cx.notify();
+        Some((dir, dest))
+    });
+
+    let Some((dir, dest)) = prepared else {
+        state_entity.update(cx, |state, cx| {
+            state.is_ebird_exporting = false;
+            cx.notify();
+        });
+        return;
+    };
+
+    cx.spawn(async move |async_cx: &mut gpui_kit::AsyncApp| {
+        // 读 folder_db + 聚合 + 写盘都在后台线程（大目录的 all_recognitions/all_exif 不该占前台）
+        let outcome = async_cx
+            .background_executor()
+            .spawn(async move {
+                match photo_engine::export_ebird::build_rows(&dir) {
+                    Ok(rows) if rows.is_empty() => Err("汇总后没有可导出的观鸟记录".to_string()),
+                    Ok(rows) => match photo_engine::export_ebird::write_csv(&rows, &dest) {
+                        Ok(()) => Ok((rows.len(), dest)),
+                        Err(e) => Err(format!("写 CSV 失败：{e}")),
+                    },
+                    Err(e) => Err(format!("汇总观鸟记录失败：{e}")),
+                }
+            })
+            .await;
+
+        let _ = async_cx.update(|cx| {
+            state_entity.update(cx, |state, cx| {
+                state.is_ebird_exporting = false;
+                match outcome {
+                    Ok((count, path)) => state.set_status_message(format!(
+                        "已导出观鸟记录 {count} 条 → {}",
+                        path.display()
+                    )),
+                    Err(msg) => state.set_status_message(format!("导出失败：{msg}")),
+                }
+                cx.notify();
+            });
+        });
+    })
+    .detach();
+}
+
 /// 选择导出目标目录（系统目录对话框）→ 回填草稿与输入框。
 pub fn pick_export_dest(window: &mut Window, cx: &mut Context<AppState>) {
     cx.spawn_in(window, async move |weak, async_cx| {
