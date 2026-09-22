@@ -20,7 +20,7 @@ use photo_engine::folder_db::{ExifCacheRow, FileEntry, FolderDb};
 use photo_engine::global_db::{GlobalDb, SpeciesRow};
 use photo_engine::scanner;
 
-use super::app_state::{AppState, SharedRecognizer};
+use super::app_state::{AppState, SharedRecognizer, StatsPhoto, ViewMode};
 
 /// 在监听器里安全触发一个「会同步 update AppState」的入口（扫描 / 识别 / 删除 …）。
 ///
@@ -107,12 +107,20 @@ pub fn start_scan(state_entity: Entity<AppState>, dir: PathBuf, recursive: bool,
                             state.items.len()
                         ));
 
-                        // 默认选中第一张
-                        if let Some(&first) = state.display_order.first() {
+                        // 选中：统计页跳转优先（按 pending 路径定位），否则默认第一张
+                        let pending = state.pending_select_path.take();
+                        let target = pending
+                            .as_ref()
+                            .and_then(|p| state.items.iter().position(|m| m.primary_path == *p));
+                        if let Some(idx) = target {
+                            state.select_single(idx);
+                        } else if let Some(&first) = state.display_order.first() {
                             state.select_single(first);
                         }
                     }
                     Err(e) => {
+                        // 扫描失败别留悬挂的跳转目标，否则下次扫描完成后会莫名选中
+                        state.pending_select_path = None;
                         state.set_status_message(format!("扫描失败: {e}"));
                     }
                 }
@@ -825,6 +833,87 @@ fn ensure_recognizer(
         }
     } else {
         Ok(())
+    }
+}
+
+// ── 统计页（全局物种统计 → 照片记录） ──
+
+/// 统计页右栏照片列表的展示上限：避免一次解析上千张的 fs metadata。
+/// 超过时 stats_photo_total 仍记真实总数，UI 提示「仅显示前 N 张」。
+const STATS_PHOTO_LIMIT: usize = 240;
+
+/// 选中统计页左栏某物种：从全局索引查它的照片记录，并解析各自文件夹的缩略图缓存路径。
+///
+/// 同步执行（前台）：一次全局索引查询 + 至多 STATS_PHOTO_LIMIT 次 metadata/哈希——
+/// 目录已在扫描时生成缩略图，这里只做「是否已就绪」的定位，不解码、不生成。
+pub fn select_stats_species(state: &mut AppState, species: &str) {
+    let Some(gdb) = state.global_db.clone() else {
+        state.stats_selected_species = Some(species.to_string());
+        state.stats_photos.clear();
+        state.stats_photo_total = 0;
+        return;
+    };
+    let all = gdb.photos_of_species(species).unwrap_or_default();
+    let total = all.len();
+    // 缩略图缓存目录按文件夹隔离：按文件夹复用一个只读 ImageManager
+    let mut per_folder: HashMap<String, ImageManager> = HashMap::new();
+    let photos: Vec<StatsPhoto> = all
+        .into_iter()
+        .take(STATS_PHOTO_LIMIT)
+        .map(|(folder, rel_path)| {
+            let thumb_path =
+                crate::image::cached_thumb_path_in_folder(&mut per_folder, &folder, &rel_path);
+            let full_path = Path::new(&folder).join(&rel_path);
+            StatsPhoto {
+                full_path,
+                thumb_path,
+                folder,
+                rel_path,
+            }
+        })
+        .collect();
+    state.stats_selected_species = Some(species.to_string());
+    state.stats_photos = photos;
+    state.stats_photo_total = total;
+}
+
+/// 统计页右栏点击某张照片：跳到它所在文件夹并选中（跨文件夹时先扫描）。
+///
+/// 跨文件夹不能直接改 items：先记 pending_select_path，扫完由 `start_scan` 完成后按路径定位。
+pub fn open_stats_photo(
+    state_entity: Entity<AppState>,
+    folder: String,
+    rel_path: String,
+    cx: &mut App,
+) {
+    let full = Path::new(&folder).join(&rel_path);
+    let same_dir = state_entity
+        .read(cx)
+        .current_dir
+        .as_deref()
+        .is_some_and(|d| d == Path::new(&folder));
+
+    if same_dir {
+        state_entity.update(cx, |state, cx| {
+            if let Some(idx) = state
+                .items
+                .iter()
+                .position(|m| Path::new(&m.primary_path) == full)
+            {
+                state.select_single(idx);
+            } else {
+                state.set_status_message(format!("当前目录里找不到该照片：{rel_path}"));
+            }
+            state.view_mode = ViewMode::Grid;
+            cx.notify();
+        });
+    } else {
+        state_entity.update(cx, |state, cx| {
+            state.pending_select_path = Some(full.to_string_lossy().to_string());
+            state.view_mode = ViewMode::Grid;
+            cx.notify();
+        });
+        start_scan(state_entity, PathBuf::from(&folder), false, cx);
     }
 }
 

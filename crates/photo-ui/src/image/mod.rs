@@ -47,6 +47,89 @@ pub fn source_file_of(meta: &CaptureMeta) -> Option<SourceFile> {
     })
 }
 
+/// 跨文件夹缩略图定位（统计页的跨文件夹照片列表用）。
+///
+/// 缩略图缓存**按照片目录隔离**（「目录/.pt/thumbs/{hash}.jpg」），且缓存键含
+/// path/size/file_size（见 ThumbnailCache::cache_key）——所以不能拿当前目录的
+/// ImageManager 去查别的文件夹。这里按文件夹各建一个只读查询用的实例并缓存复用。
+///
+/// cache 由调用方持有（一次列表解析内复用，避免逐张重建）；
+/// 返回 None = 该照片的缩略图尚未落盘（统计页显示占位）。
+pub fn cached_thumb_path_in_folder(
+    cache: &mut HashMap<String, ImageManager>,
+    folder: &str,
+    rel_path: &str,
+) -> Option<PathBuf> {
+    let full = std::path::Path::new(folder).join(rel_path);
+    let ext = full.extension().and_then(|e| e.to_str())?;
+    let format = DomainFormat::from_extension(ext)?;
+    // 缓存键含 file_size：必须取真实大小，否则键对不上（同名覆盖时也靠它失效）
+    let file_size = std::fs::metadata(&full).ok().map(|m| m.len());
+    let source = SourceFile {
+        path: full,
+        format,
+        file_size,
+    };
+    let manager = cache.entry(folder.to_string()).or_insert_with(|| {
+        ImageManager::new(Some(
+            std::path::Path::new(folder).join(".pt").join("thumbs"),
+        ))
+    });
+    manager.get_cached_thumb_path(&source, THUMB_SIZE_GRID)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use photo_engine::thumbnail::ThumbnailCache;
+
+    /// 跨文件夹缩略图定位：按**各照片目录自己的** .pt/thumbs 算键，
+    /// 且键含 file_size（对不上就找不到）。
+    #[test]
+    fn test_cached_thumb_path_in_folder_uses_per_folder_cache_and_size() {
+        let root = std::env::temp_dir().join(format!("pt_thumb_resolve_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let folder_a = root.join("A");
+        let folder_b = root.join("B");
+        std::fs::create_dir_all(folder_a.join(".pt").join("thumbs")).unwrap();
+        std::fs::create_dir_all(&folder_b).unwrap();
+        std::fs::write(folder_a.join("pic.jpg"), b"fake-jpeg-bytes").unwrap();
+
+        let folder_a_s = folder_a.to_string_lossy().to_string();
+        let folder_b_s = folder_b.to_string_lossy().to_string();
+
+        // 按管线的口径自己算一次键，写入「已就绪的缩略图」
+        let size = std::fs::metadata(folder_a.join("pic.jpg")).unwrap().len();
+        let source = SourceFile {
+            path: folder_a.join("pic.jpg"),
+            format: DomainFormat::Jpeg,
+            file_size: Some(size),
+        };
+        let cache = ThumbnailCache::new(folder_a.join(".pt").join("thumbs"));
+        let key = cache.cache_key(&source, THUMB_SIZE_GRID, "std");
+        let thumb = cache.cache_dir().join(&key);
+        std::fs::write(&thumb, b"thumb-bytes").unwrap();
+
+        let mut managers: HashMap<String, ImageManager> = HashMap::new();
+        assert_eq!(
+            cached_thumb_path_in_folder(&mut managers, &folder_a_s, "pic.jpg"),
+            Some(thumb.clone())
+        );
+        // 另一个文件夹（无缓存）→ None，且不会误用 A 的目录
+        assert_eq!(
+            cached_thumb_path_in_folder(&mut managers, &folder_b_s, "pic.jpg"),
+            None
+        );
+        // 同一文件夹内不存在的文件 → None
+        assert_eq!(
+            cached_thumb_path_in_folder(&mut managers, &folder_a_s, "missing.jpg"),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
 impl ImageManager {
     pub fn new(cache_dir: Option<PathBuf>) -> Self {
         let thumbnail_cache = cache_dir.map(ThumbnailCache::new);

@@ -171,6 +171,20 @@ pub fn build_font_options(current_font: &str, cx: &App) -> SearchableVec<ChoiceO
 /// 模型/名录路径在进程内固定，故不需要失效重建。
 pub type SharedRecognizer = Arc<parking_lot::Mutex<Option<photo_recognize::Recognizer>>>;
 
+/// 统计页右栏的一张照片记录（跨文件夹汇总）。
+/// 缩略图按**照片自己所在目录**的 .pt/thumbs 定位（缓存目录是按文件夹隔离的）。
+#[derive(Debug, Clone)]
+pub struct StatsPhoto {
+    /// 完整路径（folder + rel_path）：tooltip 与跳转用
+    pub full_path: PathBuf,
+    /// 已就绪的缩略图路径；None = 尚未生成（显示占位）
+    pub thumb_path: Option<PathBuf>,
+    /// 归属文件夹（跳转定位用）
+    pub folder: String,
+    /// 相对路径（跳转定位用）
+    pub rel_path: String,
+}
+
 /// 应用核心权威与派生状态
 pub struct AppState {
     pub settings_tab: SettingsTab,
@@ -229,6 +243,16 @@ pub struct AppState {
     pub region_bbox: Option<BBox>,
     /// 框选识别进行中（防重复触发 + 状态栏提示）
     pub region_recognizing: bool,
+
+    // ── 统计页右栏（全局物种统计：选中物种 → 照片记录） ──
+    /// 当前选中的物种名（None = 未选，右栏显示引导文案）
+    pub stats_selected_species: Option<String>,
+    /// 该物种的照片记录（已解析缩略图路径；可能被上限截断，见 stats_photo_total）
+    pub stats_photos: Vec<StatsPhoto>,
+    /// 该物种照片总数（> stats_photos.len() 表示列表被截断）
+    pub stats_photo_total: usize,
+    /// 待选中路径：跨文件夹跳转先记下，扫描完成后按此定位选中
+    pub pending_select_path: Option<String>,
 
     // ── 调整状态（ADR 0007：右栏「调整」tab，参数随图入库） ──
     /// 焦点图的调整参数（全零 = 无调整，走未调整母版）
@@ -643,6 +667,10 @@ impl AppState {
             region_drag_start: None,
             region_bbox: None,
             region_recognizing: false,
+            stats_selected_species: None,
+            stats_photos: Vec::new(),
+            stats_photo_total: 0,
+            pending_select_path: None,
 
             adjust: AdjustParams::default(),
             adjust_path: None,
