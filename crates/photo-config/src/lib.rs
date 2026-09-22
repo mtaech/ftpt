@@ -79,6 +79,10 @@ pub struct AppConfig {
     /// 导出预设列表（T1 批次：命名模板/长边/质量组合）。旧配置无此字段时为空。
     #[serde(default)]
     pub export_presets: Vec<ExportPreset>,
+    /// 上次使用的导出目标目录（导出对话框预填；None = 未设置，回退 `<当前目录>/exports`）。
+    /// 旧配置无此字段时为 None（serde 静默忽略）；导入目标目录仍不记忆（#14 另一半）。
+    #[serde(default)]
+    pub export_dir: Option<String>,
     /// 扫描是否包含子目录（递归扫描全部子层）。默认 false = 单层扫描（保持现状）。
     /// 布尔字段无需钳制；改动后需重新扫描生效（scan 编排处按此值选单层/递归）。
     #[serde(default)]
@@ -165,6 +169,7 @@ impl Default for AppConfig {
             detection_source: DetectionSource::default(),
             include_subdirectories: false,
             export_presets: vec![ExportPreset::default()],
+            export_dir: None,
             stack_mode: StackMode::default(),
             grid_columns: default_grid_columns(),
             ui_scale: default_ui_scale(),

@@ -5,6 +5,7 @@
 pub mod adjust;
 pub mod best_frame;
 pub mod burst;
+pub mod export;
 pub mod filter;
 pub mod preview_math;
 pub mod sort;
@@ -19,6 +20,9 @@ pub use adjust::{
 };
 pub use best_frame::{non_best_paths, pick_best_frame};
 pub use burst::{BurstEntry, BurstGroupMap, compute_burst_groups, parse_exif_date};
+pub use export::{
+    ExportDraft, LONG_EDGE_OPTIONS, QUALITY_OPTIONS, export_targets, unique_output_path,
+};
 pub use filter::{
     FilterCriteria, default_filter_criteria, filter_captures, has_active_filters,
     parse_focal_length_mm,

@@ -181,6 +181,18 @@ pub fn render_header(
                             ),
                     )
                 })
+                // ── 导出（Ctrl+E 同效）：当前筛选结果 / 已选照片 ──
+                .child(
+                    Button::new("header-export")
+                        .ghost()
+                        .small()
+                        .icon(IconName::ExternalLink)
+                        .disabled(state.items.is_empty() || state.is_exporting)
+                        .tooltip("导出当前筛选结果（Ctrl+E）")
+                        .on_click(cx.listener(|state, _, window, cx| {
+                            state.open_export_dialog(window, cx);
+                        })),
+                )
                 // ── 全部识别（Ctrl+B 同效）：常驻可见，不用先选中照片 ──
                 .child(
                     Button::new("header-recognize-all")

@@ -137,7 +137,50 @@ fn render_status_right(state: &AppState, cx: &mut Context<AppState>) -> impl Int
             .into_any_element();
     }
 
-    // 优先级 3: 缩略图后台生成中（不阻塞交互，只提示进度）
+    // 优先级 3: 导出中（进度条 + n/m + 当前文件名 + 取消）
+    if state.is_exporting {
+        /// 细进度条宽度（与识别分支同规格）
+        const BAR_W: f32 = 72.0;
+        let cancel = state.export_cancel.clone();
+        let total = state.export_total.max(1);
+        let done = state.export_done.min(total);
+        let ratio = done as f32 / total as f32;
+        return h_flex()
+            .items_center()
+            .gap_2()
+            .text_color(cx.theme().primary)
+            .child(Icon::new(IconName::ExternalLink).size(px(12.)))
+            .child(format!("导出中 {done}/{total}"))
+            .child(
+                div()
+                    .w(px(BAR_W))
+                    .h(px(4.))
+                    .rounded_full()
+                    .bg(cx.theme().muted)
+                    .overflow_hidden()
+                    .child(div().h_full().rounded_full().bg(cx.theme().primary).w(px(BAR_W * ratio))),
+            )
+            .child(
+                div()
+                    .max_w(px(180.))
+                    .truncate()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(state.export_current.clone()),
+            )
+            .child(
+                Button::new("cancel-export")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .tooltip("取消导出")
+                    .on_click(move |_, _window, _cx| {
+                        cancel.store(true, Ordering::Relaxed);
+                    }),
+            )
+            .into_any_element();
+    }
+
+    // 优先级 4: 缩略图后台生成中（不阻塞交互，只提示进度）
     if state.thumb_total > 0 {
         return h_flex()
             .items_center()

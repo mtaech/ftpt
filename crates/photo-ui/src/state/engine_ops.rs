@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use gpui_kit::{App, Entity};
+use gpui_kit::{App, Context, Entity, Window};
 use photo_domain::{
     AdjustParams, BBox, CaptureMeta, ColorLabel, FilterCriteria, Flag, ImageFormat, Rating,
     SourceFile,
@@ -1448,6 +1448,246 @@ fn decode_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
         .map_err(|e| e.to_string())?
         .to_rgba8();
     Ok((img.width(), img.height(), img.into_raw()))
+}
+
+/// 一个导出作业：源文件 + 已解析的调整参数 + 已排定的输出路径。
+struct ExportJob {
+    filename: String,
+    source: SourceFile,
+    params: AdjustParams,
+    output: PathBuf,
+}
+
+/// 导出结果（后台 worker → 前台）。
+enum ExportOutcome {
+    /// 单张完成：成功给出输出路径，失败给出真实错误文案
+    Done {
+        filename: String,
+        result: Result<String, String>,
+    },
+    /// 跑完 / 被取消都要送的收尾哨兵
+    Finished,
+}
+
+/// 批量导出（§9.10 / §10.6）：把当前目标集按草稿参数导出为 JPEG。
+///
+/// 与识别管线同构（CPU 密集不进前台执行器，否则进度条与「取消」都点不动）：
+/// 1. **前台**取快照——钳制草稿、建目标目录、算目标集（选中 ∩ 筛选结果 / 无选中 = 全量）、
+///    按模板渲染基名并逐批去重、读每张的调整参数（导出烘焙调整，ADR 0007）；
+/// 2. **后台线程**逐张 `convert::export_with_preset`（RAW 走全尺寸 16-bit 解码，单张 3–5s）；
+/// 3. **前台**每 250ms 收结果，推进 `export_done` 并 `cx.notify()`，收尾写状态栏文案。
+///
+/// 每个文件的失败原因记进 `state.export_results`（对话框展示真实错误）——
+/// 这条链路以前只报「已开始导出照片」就关窗，**不再谎报成功**。
+pub fn start_export(state_entity: Entity<AppState>, cx: &mut App) {
+    /// 前台收结果的节拍（与识别 / 缩略图管线同量级）
+    const TICK_MS: u64 = 250;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_flag = cancel.clone();
+    let draft = state_entity.read(cx).export.clone().clamped();
+
+    let jobs: Vec<ExportJob> = state_entity.update(cx, |state, cx| {
+        if state.is_exporting {
+            return Vec::new();
+        }
+        // 钳制后的草稿写回（越界质量 / 空模板不带到引擎）
+        state.export = draft.clone();
+        if !draft.is_ready() {
+            state.set_status_message("导出失败：未选择目标目录");
+            cx.notify();
+            return Vec::new();
+        }
+        let dest = PathBuf::from(draft.dest_dir.trim());
+        if let Err(e) = std::fs::create_dir_all(&dest) {
+            state.set_status_message(format!(
+                "导出失败：无法创建目标目录 {}（{e}）",
+                dest.display()
+            ));
+            cx.notify();
+            return Vec::new();
+        }
+
+        let targets =
+            crate::model::export::export_targets(&state.selected_indices, &state.display_order);
+        if targets.is_empty() {
+            state.set_status_message("导出失败：没有可导出的照片");
+            cx.notify();
+            return Vec::new();
+        }
+
+        // 目标集快照：模板渲染（{seq} 从 1 起）+ 输出路径去重 + 调整参数
+        let mut used = std::collections::HashSet::new();
+        let mut jobs: Vec<ExportJob> = Vec::with_capacity(targets.len());
+        for (n, idx) in targets.iter().enumerate() {
+            let Some(meta) = state.items.get(*idx) else {
+                continue;
+            };
+            let Some(source) = source_file_of(meta) else {
+                continue;
+            };
+            let ctx = photo_engine::template::NameTemplateContext {
+                name: meta.base_name.clone(),
+                species: meta.taxon_name.clone(),
+                date: meta.date_taken.clone(),
+                camera: meta.camera_model.clone(),
+                seq: (n + 1) as u32,
+            };
+            let base = photo_engine::template::render_name_template(&draft.template, &ctx);
+            let output = crate::model::export::unique_output_path(&dest, &base, "jpg", &mut used);
+            jobs.push(ExportJob {
+                filename: meta.display_name(),
+                source,
+                params: load_adjustments(state, &meta.primary_path),
+                output,
+            });
+        }
+
+        state.is_exporting = true;
+        state.export_cancel = cancel.clone();
+        state.export_done = 0;
+        state.export_total = jobs.len() as u32;
+        state.export_current.clear();
+        state.export_results.clear();
+        // 目标目录记忆（#14 导出侧）：与配置同一份，落盘失败不影响导出
+        state.app_config.export_dir = Some(draft.dest_dir.trim().to_string());
+        state.save_config();
+        cx.notify();
+        jobs
+    });
+
+    if jobs.is_empty() {
+        state_entity.update(cx, |state, cx| {
+            state.is_exporting = false;
+            cx.notify();
+        });
+        return;
+    }
+
+    // 后台 worker → 前台的结果队列（前台 try_recv 非阻塞，节拍到了就收）
+    let (tx, rx) = std::sync::mpsc::channel::<ExportOutcome>();
+
+    cx.spawn(async move |async_cx: &mut gpui_kit::AsyncApp| {
+        // ── 1. 后台线程：逐张烘焙 + 写盘（RAW 全尺寸解码，绝不放前台执行器） ──
+        async_cx
+            .background_executor()
+            .spawn(async move {
+                for job in jobs {
+                    if cancel_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let result = photo_engine::convert::export_with_preset(
+                        &job.source,
+                        &job.params,
+                        draft.long_edge,
+                        draft.quality,
+                        &job.output,
+                    )
+                    .map(|p| p.to_string_lossy().to_string())
+                    .map_err(|e| e.to_string());
+
+                    if tx
+                        .send(ExportOutcome::Done {
+                            filename: job.filename,
+                            result,
+                        })
+                        .is_err()
+                    {
+                        // 前台已经走了（实体回收）→ 直接收工
+                        return;
+                    }
+                }
+                // 跑完 / 被取消都要送结束哨兵，否则前台轮询等不到收尾条件
+                let _ = tx.send(ExportOutcome::Finished);
+            })
+            .detach();
+
+        // ── 2. 前台：按节拍收结果、更新进度并重绘（状态栏「导出中 n/m」靠这里刷新） ──
+        loop {
+            async_cx
+                .background_executor()
+                .timer(Duration::from_millis(TICK_MS))
+                .await;
+
+            let keep_running = async_cx.update(|cx| {
+                state_entity.update(cx, |state, cx| {
+                    let mut applied = 0usize;
+                    let mut finished = false;
+
+                    while let Ok(outcome) = rx.try_recv() {
+                        match outcome {
+                            ExportOutcome::Done { filename, result } => {
+                                state.export_done += 1;
+                                state.export_current = filename.clone();
+                                state.export_results.push((filename, result));
+                                applied += 1;
+                            }
+                            ExportOutcome::Finished => finished = true,
+                        }
+                    }
+
+                    // 跑完、被取消（对话框「取消」置的 cancel 标志让 worker 提前退出）都走这里收尾
+                    if finished || !state.is_exporting {
+                        let done = state.export_done as usize;
+                        let total = state.export_total as usize;
+                        let failed = state
+                            .export_results
+                            .iter()
+                            .filter(|(_, r)| r.is_err())
+                            .count();
+                        state.is_exporting = false;
+                        state.set_status_message(if done < total {
+                            format!("导出已取消：完成 {done}/{total}（失败 {failed}）")
+                        } else if failed > 0 {
+                            format!(
+                                "导出完成：成功 {} 张，失败 {failed} 张（详见导出面板）",
+                                done - failed
+                            )
+                        } else {
+                            format!("导出完成：{done} 张")
+                        });
+                        cx.notify();
+                        return false;
+                    }
+
+                    if applied > 0 {
+                        cx.notify();
+                    }
+                    true
+                })
+            });
+
+            if !keep_running {
+                break;
+            }
+        }
+    })
+    .detach();
+}
+
+/// 选择导出目标目录（系统目录对话框）→ 回填草稿与输入框。
+pub fn pick_export_dest(window: &mut Window, cx: &mut Context<AppState>) {
+    cx.spawn_in(window, async move |weak, async_cx| {
+        let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await else {
+            return;
+        };
+        let text = folder.path().to_string_lossy().to_string();
+        let _ = async_cx.update(|window, cx| {
+            let Some(entity) = weak.upgrade() else {
+                return;
+            };
+            entity.update(cx, |state, cx| {
+                state.export.dest_dir = text.clone();
+                if let Some(input) = state.export_dest_input.clone() {
+                    input.update(cx, |input_state, cx| {
+                        input_state.set_value(text.clone(), window, cx);
+                    });
+                }
+                cx.notify();
+            });
+        });
+    })
+    .detach();
 }
 
 #[cfg(test)]

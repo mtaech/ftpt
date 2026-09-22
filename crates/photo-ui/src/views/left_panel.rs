@@ -389,6 +389,18 @@ pub fn render_batch_ops_tab(
                             ));
                             cx.notify();
                         })),
+                )
+                // 导出不依赖「必须存在激活筛选」：未选 = 当前筛选结果全部
+                .child(
+                    Button::new("btn-batch-export")
+                        .secondary()
+                        .w_full()
+                        .icon(IconName::ExternalLink)
+                        .label("导出...")
+                        .disabled(state.items.is_empty() || state.is_exporting)
+                        .on_click(cx.listener(|state, _, window, cx| {
+                            state.open_export_dialog(window, cx);
+                        })),
                 ),
         )
 }

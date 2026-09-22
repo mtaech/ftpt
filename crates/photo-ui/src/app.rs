@@ -117,6 +117,13 @@ impl AppState {
         state.import_rename_input = Some(cx.new(|cx| {
             InputState::new(window, cx).placeholder("{name}_{date}_{seq}（留空 = 保留原名）")
         }));
+        // 导出弹窗输入框：目标目录 / 命名模板
+        state.export_dest_input = Some(cx.new(|cx| {
+            InputState::new(window, cx).placeholder("/导出目标目录（不存在时自动创建）")
+        }));
+        state.export_template_input = Some(cx.new(|cx| {
+            InputState::new(window, cx).placeholder("{name}_{species}_{seq}（占位符见弹窗内说明）")
+        }));
         // Dock 工作区：左右停靠区 + 中央主视图（建面板实体需要 window）
         state.init_dock(window, cx);
         state
@@ -178,6 +185,7 @@ impl AppState {
             KeyBinding::new("ctrl-]", ToggleRightPanel, None),
             KeyBinding::new("f5", Rescan, None),
             KeyBinding::new("ctrl-o", OpenDirectory, None),
+            KeyBinding::new("ctrl-e", Export, None),
             KeyBinding::new("ctrl-,", OpenSettings, None),
         ]);
     }
@@ -508,6 +516,9 @@ impl Render for AppState {
                 this.sync_font_select(window, cx);
                 this.active_dialog = Some(ActiveDialog::Settings);
                 cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &Export, window, cx| {
+                this.open_export_dialog(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleThemeMode, window, cx| {
                 this.toggle_theme(Some(window), cx);

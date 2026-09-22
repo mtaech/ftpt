@@ -56,6 +56,8 @@ actions!(
         Rescan,
         OpenDirectory,
         OpenSettings,
+        // 导出（Ctrl+E：打开导出弹窗，导出当前筛选结果 / 已选照片）
+        Export,
         ToggleThemeMode,
     ]
 );

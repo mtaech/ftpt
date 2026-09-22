@@ -27,6 +27,7 @@ use crate::model::adjust::{
     EXPOSURE_MAX, EXPOSURE_MIN, EXPOSURE_STEP, TONE_MAX, TONE_MIN, TONE_STEP, AdjustField,
 };
 use crate::model::best_frame::pick_best_frame;
+use crate::model::export::ExportDraft;
 use crate::model::burst::{BurstGroupMap, compute_burst_groups};
 use crate::model::filter::{FilterCriteria, default_filter_criteria};
 use crate::model::sort::apply_filter_and_sort;
@@ -339,6 +340,25 @@ pub struct AppState {
     pub import_dest_input: Option<Entity<InputState>>,
     /// 重命名模板输入框（创建需要 Window）
     pub import_rename_input: Option<Entity<InputState>>,
+
+    // ── 导出（Batch 1.1：engine + UI 接线）──
+    /// 导出草稿：目标目录 / 长边 / 质量 / 命名模板
+    pub export: ExportDraft,
+    /// 目标目录输入框（创建需要 Window）
+    pub export_dest_input: Option<Entity<InputState>>,
+    /// 命名模板输入框（创建需要 Window）
+    pub export_template_input: Option<Entity<InputState>>,
+    /// 质量滑杆（懒创建，需要 Window；1-100 步进 1）
+    pub export_quality_slider: Option<Entity<SliderState>>,
+    /// 质量滑杆 Change 订阅（持有保证持续接收）
+    pub _export_quality_sub: Option<Subscription>,
+    pub is_exporting: bool,
+    pub export_done: u32,
+    pub export_total: u32,
+    pub export_current: String,
+    pub export_cancel: Arc<AtomicBool>,
+    /// 逐文件结果（显示名 → 成功路径 / 失败真实错误）；导出完成后对话框展示
+    pub export_results: Vec<(String, Result<String, String>)>,
 }
 
 /// 调整 tab 的三条滑杆实体 + 事件订阅。
@@ -727,6 +747,17 @@ impl AppState {
             import: ImportState::default(),
             import_dest_input: None,
             import_rename_input: None,
+            export: ExportDraft::default(),
+            export_dest_input: None,
+            export_template_input: None,
+            export_quality_slider: None,
+            _export_quality_sub: None,
+            is_exporting: false,
+            export_done: 0,
+            export_total: 0,
+            export_current: String::new(),
+            export_cancel: Arc::new(AtomicBool::new(false)),
+            export_results: Vec::new(),
         }
     }
 
@@ -747,6 +778,95 @@ impl AppState {
         }
         self.active_dialog = Some(ActiveDialog::Import);
         cx.notify();
+    }
+
+    // ── 导出弹窗（§9.10：预设 / 长边 / 质量 / 命名模板 / 目标目录）──
+
+    /// 打开导出弹窗：预填目标目录（配置记忆 → 否则 `<当前目录>/exports`）与草稿参数。
+    /// 目录里一张照片都没有时只提示，不开空弹窗。
+    pub fn open_export_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.items.is_empty() {
+            self.set_status_message("导出失败：当前目录没有照片");
+            cx.notify();
+            return;
+        }
+        // 目标目录：上次用过的（配置）→ 否则当前目录下 exports/
+        if self.export.dest_dir.trim().is_empty() {
+            self.export.dest_dir = self
+                .app_config
+                .export_dir
+                .clone()
+                .or_else(|| {
+                    self.current_dir
+                        .as_ref()
+                        .map(|d| d.join("exports").to_string_lossy().to_string())
+                })
+                .unwrap_or_default();
+        }
+        // 上一批的逐文件结果不带到新一次导出里
+        self.export_results.clear();
+        self.ensure_export_quality_slider(window, cx);
+        self.sync_export_inputs(window, cx);
+        self.active_dialog = Some(ActiveDialog::Export);
+        cx.notify();
+    }
+
+    /// 懒创建质量滑杆（1-100 步进 1）并接 Change 事件——滑杆是真实控件，
+    /// 值直接落草稿（`{quality}` 只在执行时才钳制）。
+    pub fn ensure_export_quality_slider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.export_quality_slider.is_some() {
+            return;
+        }
+        let slider = cx.new(|_| SliderState::new().min(1.0).max(100.0).step(1.0));
+        let sub = cx.subscribe(&slider, |state, _, event, cx| {
+            if let SliderEvent::Change(value) = event {
+                let quality = value.start().round().clamp(1.0, 100.0) as u8;
+                if quality != state.export.quality {
+                    state.export.quality = quality;
+                    cx.notify();
+                }
+            }
+        });
+        self.export_quality_slider = Some(slider);
+        self._export_quality_sub = Some(sub);
+        self.sync_export_quality_slider(window, cx);
+    }
+
+    /// 把草稿的四个参数写进两个输入框与质量滑杆
+    ///（打开弹窗、点预设、或从配置重载后调用，避免控件显示与草稿不一致）。
+    pub fn sync_export_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dest = self.export.dest_dir.clone();
+        if let Some(input) = self.export_dest_input.clone() {
+            input.update(cx, |input_state, cx| {
+                input_state.set_value(dest, window, cx);
+            });
+        }
+        let template = self.export.template.clone();
+        if let Some(input) = self.export_template_input.clone() {
+            input.update(cx, |input_state, cx| {
+                input_state.set_value(template, window, cx);
+            });
+        }
+        self.sync_export_quality_slider(window, cx);
+    }
+
+    /// 把草稿质量写回滑杆。
+    pub fn sync_export_quality_slider(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(slider) = self.export_quality_slider.clone() else {
+            return;
+        };
+        let value = self.export.quality.clamp(1, 100) as f32;
+        slider.update(cx, |slider, cx| slider.set_value(value, window, cx));
+    }
+
+    /// 把两个输入框的当前文本同步进草稿（点「开始导出」前调用；滑杆走事件订阅）。
+    pub fn read_export_inputs(&mut self, cx: &mut Context<Self>) {
+        if let Some(input) = self.export_dest_input.clone() {
+            self.export.dest_dir = input.read(cx).value().to_string();
+        }
+        if let Some(input) = self.export_template_input.clone() {
+            self.export.template = input.read(cx).value().to_string();
+        }
     }
 
     // ── Dock 工作区（左右边栏可拖宽 / 可折叠）──
