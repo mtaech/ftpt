@@ -71,3 +71,9 @@ opt-level = 3
 
 [profile.dev.package.zune-core]
 opt-level = 3
+
+[profile.dev.package.matrixmultiply]
+opt-level = 3
+
+[profile.dev.package.photo-recognize]
+opt-level = 3
