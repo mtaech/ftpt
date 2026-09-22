@@ -3,7 +3,7 @@
 //! 24px 高，三段式：
 //! - 左：目录全路径（截断，tooltip）
 //! - 中：N 项 · M 已选（已选 > 0 用 pick 绿）
-//! - 右：状态区（扫描中 > 识别中 > 瞬态提示 > 就绪）
+//! - 右：状态区（扫描中 > 识别中 > 导出中 > 重复检测中 > 缩略图生成中 > 瞬态提示 > 就绪）
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -180,7 +180,42 @@ fn render_status_right(state: &AppState, cx: &mut Context<AppState>) -> impl Int
             .into_any_element();
     }
 
-    // 优先级 4: 缩略图后台生成中（不阻塞交互，只提示进度）
+    // 优先级 4: 重复检测中（进度条 + n/m + 取消；与识别/导出同规格）
+    if state.is_detecting_duplicates {
+        const BAR_W: f32 = 72.0;
+        let cancel = state.dup_cancel.clone();
+        let total = state.dup_total.max(1);
+        let done = state.dup_done.min(total);
+        let ratio = done as f32 / total as f32;
+        return h_flex()
+            .items_center()
+            .gap_2()
+            .text_color(cx.theme().primary)
+            .child(Icon::new(IconName::Copy).size(px(12.)))
+            .child(format!("重复检测中 {done}/{total}"))
+            .child(
+                div()
+                    .w(px(BAR_W))
+                    .h(px(4.))
+                    .rounded_full()
+                    .bg(cx.theme().muted)
+                    .overflow_hidden()
+                    .child(div().h_full().rounded_full().bg(cx.theme().primary).w(px(BAR_W * ratio))),
+            )
+            .child(
+                Button::new("cancel-duplicates")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .tooltip("取消重复检测")
+                    .on_click(move |_, _window, _cx| {
+                        cancel.store(true, Ordering::Relaxed);
+                    }),
+            )
+            .into_any_element();
+    }
+
+    // 优先级 5: 缩略图后台生成中（不阻塞交互，只提示进度）
     if state.thumb_total > 0 {
         return h_flex()
             .items_center()
@@ -191,7 +226,7 @@ fn render_status_right(state: &AppState, cx: &mut Context<AppState>) -> impl Int
             .into_any_element();
     }
 
-    // 优先级 4: 瞬态提示（4s 自动消失）
+    // 优先级 6: 瞬态提示（4s 自动消失）
     if let Some((msg, created_at)) = &state.status_message {
         if created_at.elapsed() < Duration::from_secs(4) {
             return h_flex()

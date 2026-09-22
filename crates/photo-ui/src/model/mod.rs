@@ -4,6 +4,7 @@
 
 pub mod adjust;
 pub mod best_frame;
+pub mod duplicates;
 pub mod burst;
 pub mod ebird;
 pub mod export;
@@ -20,6 +21,10 @@ pub use adjust::{
     format_exposure, format_tone, has_adjustments, quantize_exposure, quantize_tone, rel_path_of,
 };
 pub use best_frame::{non_best_paths, pick_best_frame};
+pub use duplicates::{
+    DEFAULT_THRESHOLD, DuplicateGroup, THRESHOLD_OPTIONS, duplicate_scope, group_views,
+    summarize, to_full_groups, to_rel_groups,
+};
 pub use burst::{BurstEntry, BurstGroupMap, compute_burst_groups, parse_exif_date};
 pub use ebird::ebird_candidates;
 pub use export::{

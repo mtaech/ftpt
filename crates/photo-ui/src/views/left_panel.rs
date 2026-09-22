@@ -284,8 +284,8 @@ pub fn render_file_tree_tab(
                 .icon(IconName::Copy)
                 .label("查找近重复照片...")
                 .on_click(cx.listener(|state, _, _, cx| {
-                    state.active_dialog = Some(ActiveDialog::Duplicates);
-                    cx.notify();
+                    // 走统一入口：先把上次落盘的结果读回来，再开窗
+                    state.open_duplicates_dialog(cx);
                 })),
         )
 }

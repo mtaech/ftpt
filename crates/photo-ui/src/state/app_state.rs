@@ -369,6 +369,23 @@ pub struct AppState {
     pub export_cancel: Arc<AtomicBool>,
     /// 逐文件结果（显示名 → 成功路径 / 失败真实错误）；导出完成后对话框展示
     pub export_results: Vec<(String, Result<String, String>)>,
+
+    // ── 重复/相似照片检测（docs/todo.md #2：引擎 phash 早已就绪，这里接线）──
+    /// 汉明距离阈值（对话框可调，落在 `model::duplicates::THRESHOLD_OPTIONS` 里）
+    pub dup_threshold: u32,
+    /// 检测进行中（后台计算 dHash + 聚类）
+    pub is_detecting_duplicates: bool,
+    pub dup_done: u32,
+    pub dup_total: u32,
+    pub dup_cancel: Arc<AtomicBool>,
+    /// 检测结果分组（组内完整路径，**首张为保留锚点**）；空 = 无结果
+    pub dup_groups: Vec<Vec<String>>,
+    /// 结果落库时间（读回自 folder_db；None = 从未检测）
+    pub dup_computed_at: Option<String>,
+    /// 分组列表滚动句柄
+    pub dup_scroll: ScrollHandle,
+    /// 正在二次确认「其余移入回收站」的组下标（None = 无待确认）
+    pub dup_pending_group: Option<usize>,
 }
 
 /// 调整 tab 的三条滑杆实体 + 事件订阅。
@@ -724,6 +741,7 @@ impl AppState {
             stats_photos_scroll: ScrollHandle::new(),
             import_scroll: ScrollHandle::new(),
             filmstrip_scroll: ScrollHandle::new(),
+            dup_scroll: ScrollHandle::new(),
             layout_save_generation: 0,
             _dock_subscription: None,
 
@@ -773,6 +791,15 @@ impl AppState {
             export_current: String::new(),
             export_cancel: Arc::new(AtomicBool::new(false)),
             export_results: Vec::new(),
+
+            dup_threshold: crate::model::duplicates::DEFAULT_THRESHOLD,
+            is_detecting_duplicates: false,
+            dup_done: 0,
+            dup_total: 0,
+            dup_cancel: Arc::new(AtomicBool::new(false)),
+            dup_groups: Vec::new(),
+            dup_computed_at: None,
+            dup_pending_group: None,
         }
     }
 
@@ -824,6 +851,55 @@ impl AppState {
         self.sync_export_inputs(window, cx);
         self.active_dialog = Some(ActiveDialog::Export);
         cx.notify();
+    }
+
+    // ── 重复/相似照片检测弹窗（§9.10 / §10.5）──
+
+    /// 打开重复检测弹窗：先把上次落盘的结果读回来（派生缓存，重启/切回目录不用重算）。
+    pub fn open_duplicates_dialog(&mut self, cx: &mut Context<Self>) {
+        self.reload_persisted_duplicates();
+        self.dup_pending_group = None;
+        self.active_dialog = Some(ActiveDialog::Duplicates);
+        cx.notify();
+    }
+
+    /// 从 folder_db 读回重复检测结果。没有目录 / 没有库 / 没有记录 / 读失败一律清空内存分组
+    /// （读失败只记日志，不打断弹窗——结果只是派生缓存，重跑即可）。
+    fn reload_persisted_duplicates(&mut self) {
+        self.dup_groups.clear();
+        self.dup_computed_at = None;
+        let Some(dir) = self.current_dir.clone() else {
+            return;
+        };
+        let loaded = self.folder_db.as_ref().map(|db| db.load_duplicates());
+        let Some(loaded) = loaded else {
+            return;
+        };
+        let rows = match loaded {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("读取重复检测结果失败: {e}");
+                return;
+            }
+        };
+        if rows.is_empty() {
+            return;
+        }
+        // 行序 = group_index, keeper DESC, rel_path（见 load_duplicates）→ 直接顺序聚合
+        let mut rel_groups: Vec<Vec<String>> = Vec::new();
+        let mut current: Option<i64> = None;
+        for r in rows {
+            if current != Some(r.group_index) {
+                rel_groups.push(Vec::new());
+                current = Some(r.group_index);
+            }
+            if let Some(g) = rel_groups.last_mut() {
+                g.push(r.rel_path.clone());
+            }
+            self.dup_computed_at = Some(r.computed_at.clone());
+            self.dup_threshold = r.threshold;
+        }
+        self.dup_groups = crate::model::duplicates::to_full_groups(&dir, &rel_groups);
     }
 
     /// 懒创建质量滑杆（1-100 步进 1）并接 Change 事件——滑杆是真实控件，
@@ -1288,6 +1364,11 @@ impl AppState {
         // 2. 弹窗打开 -> 关弹窗（除导入有状态外）
         if let Some(dialog) = &self.active_dialog {
             if *dialog != ActiveDialog::Import {
+                // 重复检测进行中：关窗要顺手取消——否则弹窗没了，用户再没有取消入口，
+                // 而检测结果本身也不该在用户离场后继续落库（取消 = 不落库）
+                if *dialog == ActiveDialog::Duplicates && self.is_detecting_duplicates {
+                    self.dup_cancel.store(true, Ordering::Relaxed);
+                }
                 self.active_dialog = None;
                 return true;
             }

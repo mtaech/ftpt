@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use gpui_kit::{App, Context, Entity, Window};
@@ -1835,6 +1835,197 @@ pub fn pick_export_dest(window: &mut Window, cx: &mut Context<AppState>) {
         });
     })
     .detach();
+}
+
+// ── 重复/相似照片检测（docs/todo.md #2）──
+
+/// 取消哨兵：worker 侧用 `Err` 通道区分「用户取消」与「真失败」
+const DUP_CANCELLED: &str = "__duplicates_cancelled__";
+
+/// 后台跑一次近重复检测：dHash（`phash::compute_hashes`）→ 贪心聚类
+/// （`phash::group_duplicates`）→ 前台落内存 + `folder_db.duplicates`。
+///
+/// 作用域 = `model::duplicates::duplicate_scope`（当前目录全部照片，剔除同 stem 多格式组），
+/// 与当前筛选无关——重复检测是目录级体检，不该被筛选栏的临时视图削掉一半。
+/// 用户中途换目录时结果按「目录已变」丢弃（同 `start_scan` 的代际思路）。
+pub fn start_duplicates(state_entity: Entity<AppState>, cx: &mut App) {
+    /// 前台收进度的节拍
+    const TICK_MS: u64 = 200;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_bg = cancel.clone();
+
+    // 前台取快照：作用域 / 阈值 / 目录
+    let prepared = state_entity.update(cx, |state, cx| {
+        if state.is_detecting_duplicates {
+            return None;
+        }
+        let Some(dir) = state.current_dir.clone() else {
+            state.set_status_message("重复检测失败：当前没有打开的目录");
+            cx.notify();
+            return None;
+        };
+        let scope = crate::model::duplicates::duplicate_scope(&state.items);
+        if scope.is_empty() {
+            state.set_status_message("重复检测：当前目录没有可检测的照片");
+            cx.notify();
+            return None;
+        }
+        let threshold = state.dup_threshold;
+        state.is_detecting_duplicates = true;
+        state.dup_cancel = cancel.clone();
+        state.dup_done = 0;
+        state.dup_total = scope.len() as u32;
+        cx.notify();
+        Some((dir, scope, threshold))
+    });
+    let Some((dir, scope, threshold)) = prepared else {
+        return;
+    };
+
+    let cache = photo_engine::thumbnail::ThumbnailCache::new(dir.join(".pt").join("thumbs"));
+    let progress = Arc::new(AtomicU32::new(0));
+    let progress_bg = progress.clone();
+    let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<Vec<String>>, String>>();
+
+    cx.spawn(async move |async_cx: &mut gpui_kit::AsyncApp| {
+        // ── 1. 后台：逐张 dHash + 聚类（CPU/IO 密集，绝不放前台执行器）──
+        async_cx
+            .background_executor()
+            .spawn(async move {
+                let hashed = photo_engine::phash::compute_hashes(
+                    &cache,
+                    &scope,
+                    |done| progress_bg.store(done, Ordering::Relaxed),
+                    || cancel_bg.load(Ordering::Relaxed),
+                );
+                let outcome = match hashed {
+                    // 取消：不落库（残缺分组比没有更糟），前台只报「已取消」
+                    Ok(None) => Err(DUP_CANCELLED.to_string()),
+                    Ok(Some(pairs)) => Ok(photo_engine::phash::group_duplicates(pairs, threshold)),
+                    Err(e) => Err(e.to_string()),
+                };
+                let _ = tx.send(outcome);
+            })
+            .detach();
+
+        // ── 2. 前台：按节拍刷进度、收结果 ──
+        loop {
+            async_cx
+                .background_executor()
+                .timer(Duration::from_millis(TICK_MS))
+                .await;
+
+            let keep_running = async_cx.update(|cx| {
+                state_entity.update(cx, |state, cx| {
+                    let done = progress.load(Ordering::Relaxed);
+                    if done != state.dup_done {
+                        state.dup_done = done;
+                        cx.notify();
+                    }
+
+                    match rx.try_recv() {
+                        Ok(Ok(groups)) => {
+                            finish_duplicates(state, &dir, groups, threshold);
+                            cx.notify();
+                            false
+                        }
+                        Ok(Err(msg)) if msg == DUP_CANCELLED => {
+                            state.is_detecting_duplicates = false;
+                            state.set_status_message("重复检测已取消");
+                            cx.notify();
+                            false
+                        }
+                        Ok(Err(e)) => {
+                            state.is_detecting_duplicates = false;
+                            state.set_status_message(format!("重复检测失败：{e}"));
+                            cx.notify();
+                            false
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => true,
+                        // worker 没了（实体回收等）→ 收工，别空转
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            state.is_detecting_duplicates = false;
+                            cx.notify();
+                            false
+                        }
+                    }
+                })
+            });
+
+            if !keep_running {
+                break;
+            }
+        }
+    })
+    .detach();
+}
+
+/// 检测收尾（**只在前台调用**）：目录没变才落内存 + 落库；变了就丢弃（结果属于旧目录）。
+fn finish_duplicates(state: &mut AppState, dir: &Path, groups: Vec<Vec<String>>, threshold: u32) {
+    state.is_detecting_duplicates = false;
+    state.dup_done = state.dup_total;
+    if state.current_dir.as_deref() != Some(dir) {
+        state.set_status_message("重复检测完成，但目录已切换，结果已丢弃");
+        return;
+    }
+    let computed_at = chrono::Local::now().to_rfc3339();
+    persist_duplicates(state, dir, &groups, threshold, &computed_at);
+    let (group_count, extra_count) = crate::model::duplicates::summarize(&groups);
+    state.dup_groups = groups;
+    state.dup_computed_at = Some(computed_at);
+    state.set_status_message(if group_count == 0 {
+        format!("重复检测完成：没有发现相似照片（阈值 {threshold}）")
+    } else {
+        format!("重复检测完成：{group_count} 组、{extra_count} 张多余（阈值 {threshold}）")
+    });
+}
+
+/// 把分组写进 `folder_db.duplicates`（派生缓存；读失败/无库只记日志，不影响内存结果）。
+fn persist_duplicates(
+    state: &AppState,
+    dir: &Path,
+    groups: &[Vec<String>],
+    threshold: u32,
+    computed_at: &str,
+) {
+    let Some(db) = state.folder_db.as_ref() else {
+        return;
+    };
+    let rel_groups = crate::model::duplicates::to_rel_groups(dir, groups);
+    if let Err(e) = db.replace_duplicates(&rel_groups, threshold, computed_at) {
+        tracing::warn!("重复检测结果落库失败: {e}");
+    }
+}
+
+/// 把某组「除保留锚点外的照片」移入回收站（复用 `delete_paths`：trash + 重扫）。
+///
+/// 调用方（重复检测弹窗）已做二次确认，这里只做两件事：内存分组里剪掉这批路径、
+/// 把落库结果同步成剩余分组——别让弹窗继续展示已经进回收站的照片。
+pub fn delete_duplicate_extras(state_entity: Entity<AppState>, paths: Vec<PathBuf>, cx: &mut App) {
+    if paths.is_empty() {
+        return;
+    }
+    let removed: std::collections::HashSet<String> = paths
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    state_entity.update(cx, |state, _| {
+        for group in state.dup_groups.iter_mut() {
+            group.retain(|p| !removed.contains(p));
+        }
+        // 只剩一张（或空）的组不再是「重复」，直接从视图里去掉
+        state.dup_groups.retain(|g| g.len() >= 2);
+        if let Some(dir) = state.current_dir.clone() {
+            let threshold = state.dup_threshold;
+            let computed_at = state
+                .dup_computed_at
+                .clone()
+                .unwrap_or_else(|| chrono::Local::now().to_rfc3339());
+            persist_duplicates(state, &dir, &state.dup_groups, threshold, &computed_at);
+        }
+    });
+    delete_paths(state_entity, paths, cx);
 }
 
 #[cfg(test)]

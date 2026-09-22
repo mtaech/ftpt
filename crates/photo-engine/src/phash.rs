@@ -75,22 +75,29 @@ pub fn group_duplicates(pairs: Vec<(String, u64)>, threshold: u32) -> Vec<Vec<St
 /// `ThumbnailCache::get_or_generate` 生成（常规图 DCT 缩放 / RAW 母版解码派生，
 /// 生成结果落盘复用）。
 /// 单张失败（文件被删/解码异常）跳过并记日志，不中止整体；返回
-/// (完整路径, 64bit dHash) 成功列表（保持 paths 顺序）。progress_cb 每张完成后
+/// `Ok(Some(完整路径, 64bit dHash))` 成功列表（保持 paths 顺序）。progress_cb 每张完成后
 /// 回调 1..=paths.len()。
+///
+/// `should_cancel` 在每张开始前询问一次；一旦为真立即返回 `Ok(None)`——**不返回半份
+/// 结果**，调用方据此把整轮检测当没发生过（取消后落库的是残缺分组，比没有更糟）。
 pub fn compute_hashes(
     cache: &ThumbnailCache,
     paths: &[String],
     progress_cb: impl Fn(u32) + Send,
-) -> Result<Vec<(String, u64)>, ThumbnailError> {
+    should_cancel: impl Fn() -> bool + Send,
+) -> Result<Option<Vec<(String, u64)>>, ThumbnailError> {
     let mut out = Vec::with_capacity(paths.len());
     for (i, path) in paths.iter().enumerate() {
+        if should_cancel() {
+            return Ok(None);
+        }
         match hash_one(cache, Path::new(path)) {
             Ok(hash) => out.push((path.clone(), hash)),
             Err(_) => tracing::warn!("近重复哈希计算失败，跳过: {path}"),
         }
         progress_cb((i + 1) as u32);
     }
-    Ok(out)
+    Ok(Some(out))
 }
 
 /// 单张路径 → dHash。读缓存命中零解码；未命中走生成函数。
@@ -289,6 +296,27 @@ mod tests {
         assert_eq!(g1.len(), 2);
         assert_eq!(g1[0], vec!["a", "b", "c"]);
         assert_eq!(g1[1], vec!["d", "e"]);
+    }
+
+    /// 取消语义：立刻取消 → Ok(None)（不返回半份结果）；不取消 → Some(全部)。
+    #[test]
+    fn test_compute_hashes_cancelled_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = Vec::new();
+        for i in 0..3 {
+            let p = dir.path().join(format!("img_{i}.jpg"));
+            std::fs::write(&p, encode_jpeg(&scene(160, 120))).unwrap();
+            paths.push(p.to_string_lossy().to_string());
+        }
+        let cache = ThumbnailCache::new(dir.path().join(".pt").join("thumbs"));
+
+        // 一上来就取消：不返回任何结果
+        let cancelled = compute_hashes(&cache, &paths, |_| {}, || true).unwrap();
+        assert!(cancelled.is_none());
+
+        // 不取消：三张全部返回
+        let done = compute_hashes(&cache, &paths, |_| {}, || false).unwrap().unwrap();
+        assert_eq!(done.len(), 3);
     }
 
     #[test]

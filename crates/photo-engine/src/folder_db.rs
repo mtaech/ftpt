@@ -3,6 +3,11 @@
 //! - **exif_cache**：缓存表，EXIF 元数据的 LRU 风格缓存。
 //!   缓存表**可被清除**（清空释放空间）——丢失后只会触发重新提取。
 //!
+//! - **adjustments**：调整参数（用户手动编辑，属真相表）。
+//!
+//! - **duplicates**：近重复检测结果（**派生数据**，重跑检测即覆盖）。
+//!   与 exif_cache 同类，可整表清空；`load_duplicates` 顺手清磁盘上已不存在的行。
+//!
 //! - **xmp_meta** / **recognition** / **keywords**：真相表，存储 XMP 元数据、物种识别结果
 //!   与用户关键词标签。
 //!   **任何清理缓存的操作都不得触碰 xmp_meta、recognition 与 keywords 表**——
@@ -117,6 +122,18 @@ fn folder_migrations() -> Migrations<'static> {
         // 多主体：识别结论从「一张图一个」扩展为「每主体一个」，
         // 完整主体列表以 JSON 存 subjects 列（顶层列仍是主主体，兼容旧展示）。
         M::up("ALTER TABLE recognition ADD COLUMN subjects TEXT;"),
+        // 近重复检测结果（**派生数据，可重算**）：每行 = 一张入组照片，组内首张 keeper=1。
+        // 键为相对路径（与 recognition / adjustments 同约定）；阈值与计算时间随行存储，
+        // 供 UI 展示「这组是什么时候用什么阈值算出来的」。清理缓存时可整表清空。
+        M::up(
+            "CREATE TABLE IF NOT EXISTS duplicates (
+                rel_path    TEXT PRIMARY KEY,
+                group_index INTEGER NOT NULL,
+                keeper      INTEGER NOT NULL DEFAULT 0,
+                threshold   INTEGER NOT NULL,
+                computed_at TEXT NOT NULL
+            );",
+        ),
     ])
 }
 
@@ -710,6 +727,100 @@ impl FolderDb {
         }
         Ok(())
     }
+
+    // ── 近重复检测结果（派生缓存：可重算、可整表清空）──
+
+    /// 整体替换重复检测结果（重跑即覆盖；`groups` 为空 = 清空）。
+    ///
+    /// `groups` 是**相对路径（正斜杠）**分组，组内第 0 个即保留锚点（keeper=1）。
+    /// `threshold` / `computed_at` 随行存储，供 UI 展示与后续阈值对比。
+    pub fn replace_duplicates(
+        &self,
+        groups: &[Vec<String>],
+        threshold: u32,
+        computed_at: &str,
+    ) -> Result<(), FolderDbError> {
+        let conn = self.conn.lock();
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM duplicates", [])?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT OR REPLACE INTO duplicates
+                    (rel_path, group_index, keeper, threshold, computed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for (gi, group) in groups.iter().enumerate() {
+                for (mi, rel) in group.iter().enumerate() {
+                    stmt.execute(rusqlite::params![
+                        rel.replace('\\', "/"),
+                        gi as i64,
+                        i64::from(mi == 0),
+                        threshold as i64,
+                        computed_at
+                    ])?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 读取全部重复检测结果（按组序 + keeper 优先 + 路径序，结果确定）。
+    ///
+    /// 磁盘上已不存在的行顺手清掉（删照片后没重跑检测也不至于把幽灵条目喂给 UI），
+    /// 与 sync_with_scan 的孤儿清理同一口径：**只在文件确实不存在时删**。
+    pub fn load_duplicates(&self) -> Result<Vec<DuplicateRow>, FolderDbError> {
+        let conn = self.conn.lock();
+        let rows: Vec<DuplicateRow> = {
+            let mut stmt = conn.prepare_cached(
+                "SELECT rel_path, group_index, keeper, threshold, computed_at
+                 FROM duplicates ORDER BY group_index, keeper DESC, rel_path",
+            )?;
+            let mapped = stmt.query_map([], |row| {
+                let threshold: i64 = row.get(3)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)? != 0,
+                    threshold,
+                    row.get::<_, String>(4)?,
+                ))
+            })?;
+            let mut out = Vec::new();
+            for r in mapped {
+                let (rel_path, group_index, keeper, threshold, computed_at) = r?;
+                let threshold = u32::try_from(threshold)
+                    .map_err(|_| FolderDbError::ValueOutOfRange("duplicates.threshold"))?;
+                out.push(DuplicateRow { rel_path, group_index, keeper, threshold, computed_at });
+            }
+            out
+        };
+        drop(conn);
+        let mut live = Vec::with_capacity(rows.len());
+        let mut stale: Vec<String> = Vec::new();
+        for r in rows {
+            if self.full_path_of_rel(&r.rel_path).exists() {
+                live.push(r);
+            } else {
+                stale.push(r.rel_path);
+            }
+        }
+        if !stale.is_empty() {
+            let conn = self.conn.lock();
+            let mut stmt = conn.prepare_cached("DELETE FROM duplicates WHERE rel_path = ?1")?;
+            for rel in &stale {
+                stmt.execute(rusqlite::params![rel])?;
+            }
+        }
+        Ok(live)
+    }
+
+    /// 清空重复检测结果（重跑检测前 / 换目录时调用）。
+    pub fn clear_duplicates(&self) -> Result<(), FolderDbError> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM duplicates", [])?;
+        Ok(())
+    }
 }
 /// exif_cache 单行：指纹 + 解析后的 EXIF（供扫描批量载入后内存校验/查表）。
 pub struct ExifCacheRow {
@@ -717,6 +828,21 @@ pub struct ExifCacheRow {
     pub file_size: i64,
     pub mtime_ns: i64,
     pub exif: ExifMetadata,
+}
+
+/// 近重复检测结果单行（派生缓存，可重算）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicateRow {
+    /// 相对目录的正斜杠路径（duplicates 表主键）
+    pub rel_path: String,
+    /// 组序号（同一组内相同；越小越靠前）
+    pub group_index: i64,
+    /// 是否为该组保留锚点（组内首张）
+    pub keeper: bool,
+    /// 计算该结果时用的汉明距离阈值
+    pub threshold: u32,
+    /// 检测时间（RFC3339 字符串，UI 直接展示）
+    pub computed_at: String,
 }
 
 /// 文件条目信息（由 app 层扫描产生，传给 sync_with_scan 做三表同步）。
@@ -1860,5 +1986,74 @@ mod tests {
         assert!(db.get_recognition("sub/deep/bird.jpg").unwrap().is_some());
         assert!(db.get_adjustments("sub/deep/bird.jpg").unwrap().is_some());
         assert!(db.get_recognition("gone/nested.jpg").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_duplicates_roundtrip_keeper_and_threshold() {
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        for name in ["a.jpg", "b.jpg", "c.jpg"] {
+            std::fs::write(tmp.path().join(name), b"x").unwrap();
+        }
+        let groups = vec![
+            vec!["a.jpg".to_string(), "b.jpg".to_string()],
+            vec!["c.jpg".to_string()],
+        ];
+        // 单张不成组的组也别落库（调用方在 UI 侧已过滤；这里按传入原样存，明确定义）
+        db.replace_duplicates(&groups, 10, "2026-09-23T10:00:00Z").unwrap();
+
+        let rows = db.load_duplicates().unwrap();
+        assert_eq!(rows.len(), 3);
+        // 组序 + 组内 keeper 优先
+        assert_eq!(rows[0].rel_path, "a.jpg");
+        assert!(rows[0].keeper);
+        assert_eq!(rows[0].group_index, 0);
+        assert_eq!(rows[1].rel_path, "b.jpg");
+        assert!(!rows[1].keeper);
+        assert_eq!(rows[2].rel_path, "c.jpg");
+        assert!(rows[2].keeper);
+        assert_eq!(rows[2].group_index, 1);
+        assert!(rows.iter().all(|r| r.threshold == 10));
+        assert_eq!(rows[0].computed_at, "2026-09-23T10:00:00Z");
+    }
+
+    #[test]
+    fn test_duplicates_replace_overwrites_and_empty_clears() {
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        for name in ["a.jpg", "b.jpg", "old.jpg"] {
+            std::fs::write(tmp.path().join(name), b"x").unwrap();
+        }
+        db.replace_duplicates(&[vec!["old.jpg".into()]], 8, "t1").unwrap();
+        // 重跑检测（新阈值、新分组）→ 旧结果整体消失
+        db.replace_duplicates(&[vec!["a.jpg".into(), "b.jpg".into()]], 12, "t2").unwrap();
+        let rows = db.load_duplicates().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.threshold == 12 && r.computed_at == "t2"));
+        // 空组 = 清空
+        db.replace_duplicates(&[], 12, "t3").unwrap();
+        assert!(db.load_duplicates().unwrap().is_empty());
+        db.replace_duplicates(&[vec!["a.jpg".into(), "b.jpg".into()]], 12, "t4").unwrap();
+        db.clear_duplicates().unwrap();
+        assert!(db.load_duplicates().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_duplicates_load_drops_missing_files_only() {
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        std::fs::write(tmp.path().join("alive.jpg"), b"x").unwrap();
+        // ghost.jpg 从未落盘 → 读回时应被剔除并清行
+        db.replace_duplicates(
+            &[vec!["alive.jpg".into(), "ghost.jpg".into()]],
+            10,
+            "t",
+        )
+        .unwrap();
+        let rows = db.load_duplicates().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].rel_path, "alive.jpg");
+        // 幽灵行已被清掉（第二次读回同样只有 1 行）
+        assert_eq!(db.load_duplicates().unwrap().len(), 1);
     }
 }

@@ -5,7 +5,7 @@
 Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览、标记、识别和转换照片。Cargo workspace 含 6 个成员：
 
 - `photo-domain` — 纯类型叶子 crate（Capture, ExifMetadata, XmpMetadata, Recognition 类型, 枚举），依赖仅 serde + chrono
-- `photo-engine` — 文件操作引擎（scanner, ops, exif, thumbnail, convert, folder_db, batch_ops, global_db 跨文件夹鸟种索引, histogram 直方图/剪切, import SD 卡导入, template 命名模板, undo 批量撤销日志），**全同步**
+- `photo-engine` — 文件操作引擎（scanner, ops, exif, thumbnail, convert, folder_db, batch_ops, global_db 跨文件夹鸟种索引, histogram 直方图/剪切, phash 近重复检测 dHash/聚类, import SD 卡导入, template 命名模板, undo 批量撤销日志），**全同步**
 - `photo-recognize` — 物种识别管线（org_det 通用检测 → **BioCLIP 全物种零样本分类** → 名录补充，ONNX Runtime），**全同步**
 - `photo-config` — 配置读写（TOML + SQLite 持久化）
 - `photo-ui` — **GPUI 桌面前端**（gpui-kit 0.6.1：Dock 三栏 + 网格/预览/幻灯片/统计 + 导入/设置，Material You 主题），2026-09 起是唯一前端（原 Tauri v2 + Vue 3 版 `crates/photo-tauri` 已删除）
@@ -67,15 +67,15 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 
 |---|---|
 |`crates/photo-domain/src/domain.rs`|纯类型（Capture, ExifMetadata, XmpMetadata, 枚举），零外部 crate 依赖；`specta::Type` derive 经 feature 门控（`cfg_attr(feature = "specta", ...)`）|
-|`crates/photo-engine/src/`|文件机械：scanner, ops, exif, thumbnail, convert, folder_db, batch_ops, adjustments（全部同步）|
-|`crates/photo-engine/src/folder_db.rs`|文件夹级 SQLite（`.pt/data.db`）：exif_cache / xmp_meta / recognition / adjustments 四表，rusqlite_migration 版本化|
+|`crates/photo-engine/src/`|文件机械：scanner, ops, exif, thumbnail, convert, folder_db, batch_ops, adjustments, phash（全部同步）|
+|`crates/photo-engine/src/folder_db.rs`|文件夹级 SQLite（`.pt/data.db`）：exif_cache / xmp_meta / recognition / adjustments / keywords / **duplicates**（近重复结果，派生可重算）六表，rusqlite_migration 版本化|
 |`crates/photo-recognize/src/`|识别管线：lib.rs(Recognizer 门面+BioCLIP 装配), classifier(后端 trait + Classified), bioclip(BioCLIP 图像塔+余弦检索), detect(org_det 输出解码), catalog(名录查询+按学名查), pipeline|
 |`crates/photo-config/src/lib.rs`|配置读写（TOML + SQLite 持久化）；AppConfig 含 favorite_dirs/recent_directories/theme(默认 Light)/leftPanelWidth/rightPanelWidth/thumbnailSize/detectionSource/stackMode(默认 None 不堆叠)/exportPresets/exportDir(导出目标目录记忆) 等|
 |`crates/photo-ui/src/app.rs`|GPUI 应用装配：窗口、键位表（47 个 `KeyBinding`）、action 分发、Dock 工作区创建|
 |`crates/photo-ui/src/views/dock_panels.rs`|gpui-kit Dock 工作区：左右停靠区 + 中央主视图；`DockPanel` 的 `panel_name`/`closable`/`zoomable`/`zoom_control` 语义在这里|
 |`crates/photo-ui/src/views/`|grid / preview / slideshow / stats / filmstrip / info_panel / left_panel / filter_bar / header / status_bar / scroll_area（带滚动条的滚动区）/ dialogs/|
 |`crates/photo-ui/src/state/`|`AppState`（单实体）/ `import.rs`（导入状态机）/ `engine_ops.rs`（调同步引擎的唯一桥）|
-|`crates/photo-ui/src/model/`|adjust / ebird / export / filter / sort / stacks / burst / preview_math / best_frame（纯逻辑 + 内联单测）|
+|`crates/photo-ui/src/model/`|adjust / duplicates / ebird / export / filter / sort / stacks / burst / preview_math / best_frame（纯逻辑 + 内联单测）|
 |`crates/photo-ui/src/theme/`|Material You 动态取色：`material.rs`（HCT/CAM16）+ `scheme.rs`（seed → 亮/暗语义色）|
 |`docs/todo.md`|**待办总账**（P0–P3，每条带可核实证据与估工）+ 建议顺序与维护约定；与 `docs/open-questions.md`（需拍板项）配套|
 |`docs/exiftool-update.md`|ExifTool 本地运行时更新指引（EXIF 后端依赖，进 git）|
@@ -92,7 +92,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 |运行核心测试|`cargo test -p photo-engine -p photo-recognize -p photo-domain -p photo-config`|
 |前端单测|`cargo test -p photo-ui`（`src/model/` 纯逻辑 + `theme/` 色彩用例）|
 |开发运行（GPUI 桌面窗口）|`cargo run -p photo-ui`|
-|无头冒烟|`XDG_CONFIG_HOME=/tmp/ptlease-config xvfb-run -a cargo run -p photo-ui --example lease_smoke`（另有 `preview_full_smoke`、`clipboard_smoke`、`adjust_smoke`、`grid_scroll_smoke`、`filter_bar_smoke`、`export_smoke`、`recognize_smoke`、`region_smoke`、`stats_smoke`、`master_bench`）|
+|无头冒烟|`XDG_CONFIG_HOME=/tmp/ptlease-config xvfb-run -a cargo run -p photo-ui --example lease_smoke`（另有 `preview_full_smoke`、`clipboard_smoke`、`adjust_smoke`、`grid_scroll_smoke`、`filter_bar_smoke`、`export_smoke`、`duplicates_smoke`、`recognize_smoke`、`region_smoke`、`stats_smoke`、`master_bench`）|
 |EXIF 提取验证|`cargo run -p photo-engine --example focus_check -- <图片>`（打印 ExifMetadata + 对焦点；exiftool 不可用或残留进程时先 `taskkill //F //IM perl.exe`）|
 
 ---
@@ -102,7 +102,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 ### 模块组织
 
 - `photo-domain/src/lib.rs` 声明 `pub mod domain` + `pub use domain::*`（re-export 让消费者直接 `photo_domain::Capture`）
-- `photo-engine/src/lib.rs` 声明 `pub mod`（scanner, ops, exif, thumbnail, convert, folder_db, batch_ops, adjustments）；XMP 读写实现在 folder_db 的 xmp_meta 表，无独立 xmp.rs
+- `photo-engine/src/lib.rs` 声明 `pub mod`（scanner, ops, exif, thumbnail, convert, folder_db, batch_ops, adjustments, phash）；XMP 读写实现在 folder_db 的 xmp_meta 表，无独立 xmp.rs
 - `photo-config/src/lib.rs` 即库根——config 模块就是 lib.rs 本身
 - `photo-ui`：`main.rs` 起 GPUI 应用（`logging::init` → `AppState` → 开窗）；`app.rs` 注册键位与 action，`views/` 组装界面，`state/engine_ops.rs` 是调同步引擎的唯一桥
 - 消费者写全路径：`photo_engine::scanner::scan_directory`
@@ -132,13 +132,13 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 ### 已知陷阱
 
 - **dev 构建必须给密集计算的 crate 开 `opt-level = 3`**：根 `Cargo.toml` 的 `[profile.dev.package.*]` 需覆盖 `image`/`rawlib`/`rusqlite`/`photo-engine`/`jpeg-decoder`/`zune-jpeg`/`zune-core`，**以及 `matrixmultiply`/`photo-recognize`**。两处实测：① 生成 39MP JPEG 的 2560 预览母版 **debug 7.45s vs release 0.55s**（漏开就是「点开一张图卡 7 秒」）；② 单张识别 **debug 2123ms vs release 294ms**——元凶是 `matrixmultiply`（BioCLIP 余弦检索的 sgemm 内核，名录子集 93,452 类 × 768 维），漏开就是「识别一张等 2 秒」，加上两个 crate 后降到 504ms。**排查手法**：`perf` 在本环境不可用，用 `gdb -batch -p <pid> -ex 'thread apply all bt'` 连续 attach 采样、按 crate 聚合帧数即可定位（别只靠一两次 A/B 就下「瓶颈在别的运行时」的结论）
-- `quick-xml` 在根 `Cargo.toml` 的 `[workspace.dependencies]` 中声明但各 crate src 无引用
+- ~~`quick-xml` 在根 `Cargo.toml` 的 `[workspace.dependencies]` 中声明但各 crate src 无引用~~（2026-09-22 核实：根 `Cargo.toml` 里**没有**这条声明；`Cargo.lock` 的 `quick-xml 0.41` 只是 `wayland-scanner`/`xcb` 的传递依赖）
 - **exiftool `-stay_open` 长驻进程不能加 `-q`**：`-q` 同时抑制 `{ready}` 标记，导致 execute 读不到结果边界挂起
 - **Windows 官方 exiftool(-k).exe 内嵌 `-k`（每命令后等 ENTER）**：程序化调用必须用 `perl.exe exiftool.pl`（photo-engine 已自动处理）；开发时残留 perl.exe 进程会让后续 cargo 命令假死，`taskkill //F //IM perl.exe` 清理（cfg(test) 已跳过真实 spawn；正常退出由 `photo-ui` 的 `main` 调 `shutdown_provider`，仅手动 example 需注意）
 - **exiftool 定位优先级**：`PHOTO_EXIFTOOL` env → exe 同级 `exiftool/`（打包）→ 仓库 `local-lib/exiftool/`（开发）→ PATH；升级版本见 `docs/exiftool-update.md`
 - **配置目录定位（`photo_config::config_dir()`）**：`PHOTO_CONFIG_DIR`（值就是目录本身）→ `XDG_CONFIG_HOME`（取 `pt/` 子目录）→ `~/.config/pt`；空串按未设置。刻意不用 `dirs::config_dir()`（它在 Windows 给 `%APPDATA%`，会破坏全平台同一相对布局）。`config.toml` 与 `logs/` 都在这个目录下（`logging::init` 从 `determine_config_path()` 的父目录派生）。**无头冒烟的 `XDG_CONFIG_HOME=...` 隔离靠这条生效**：2026-09-19 之前这里硬编码 home，冒烟其实一直读写用户真实配置，`lease_smoke` 的「左停靠区宽度来自配置」检查因此在左栏被拖宽过的机器上假失败。
 - **arboard 剪贴板必须留常驻持有者（X11）**：X11 剪贴板的数据是进程应答 X 请求时才提供的，`arboard::Clipboard` 一 drop，选择所有权就没了——「复制图片到剪贴板」会静默变成什么都没复制。`engine_ops` 用 `CLIPBOARD_OWNER` 静态把实例持有到进程退出（Wayland 的 data-control 由合成器接管，不受影响）。`clipboard_smoke` 长期没抓到这条：它以前跑在用户的 Wayland 会话上（窗口根本没落到 Xvfb），读回的是合成器接管的那份数据。
-- **无头冒烟必须钉住 X11 后端**：GPUI 选后端只看环境变量（`platform::guess_compositor()`）：`WAYLAND_DISPLAY` 非空 → Wayland，其次 `DISPLAY` → X11。而 `xvfb-run` 只准备 X 显示：在 Wayland 会话里跑冒烟时窗口会落到**用户真实桌面**，帧由真实合成器决定（被遮挡/最小化时不产帧），于是**渲染驱动的行为根本没被测**——渲染驱动的检查（如「对比窗格加载母版」）就因此同一份代码一会儿 13/13 一会儿 12/13（母版加载只在视图真的渲染时才发起；`compare_smoke` 当年就是这样抓出来的，该视图已移除）。所以 10 个 GPUI 冒烟都在 `gpui_kit::application()` 之前调 `photo_ui::app::prepare_headless_smoke()`（把 `WAYLAND_DISPLAY` 置空，GPUI 判空即视为未设置）；要真机 Wayland 目检时设 `PHOTO_SMOKE_ALLOW_WAYLAND=1`。
+- **无头冒烟必须钉住 X11 后端**：GPUI 选后端只看环境变量（`platform::guess_compositor()`）：`WAYLAND_DISPLAY` 非空 → Wayland，其次 `DISPLAY` → X11。而 `xvfb-run` 只准备 X 显示：在 Wayland 会话里跑冒烟时窗口会落到**用户真实桌面**，帧由真实合成器决定（被遮挡/最小化时不产帧），于是**渲染驱动的行为根本没被测**——渲染驱动的检查（如「对比窗格加载母版」）就因此同一份代码一会儿 13/13 一会儿 12/13（母版加载只在视图真的渲染时才发起；`compare_smoke` 当年就是这样抓出来的，该视图已移除）。所以 11 个 GPUI 冒烟都在 `gpui_kit::application()` 之前调 `photo_ui::app::prepare_headless_smoke()`（把 `WAYLAND_DISPLAY` 置空，GPUI 判空即视为未设置）；要真机 Wayland 目检时设 `PHOTO_SMOKE_ALLOW_WAYLAND=1`。
 - **模型/名录库/全局索引库定位（`data_root()`，lib.rs）**：`PHOTO_DATA_DIR` env → exe 同级 `models/`+`data/`（打包便携）→ 仓库根（开发回退，从 CARGO_MANIFEST_DIR/cwd 向上找同时含 `models/` 与 `data/bird_catalog.db` 的目录）；`cargo run -p photo-ui` 下模型在仓库根，否则会报「检测模型文件不存在: <target>/debug/models/org_det.onnx」
 - **识别资产（随包分发，均不入 git）**：`models/org_det.onnx`（通用主体检测）+ `models/bioclip2_model_int8.onnx` + `data/bird_catalog.db`（已瘦身为 `animal_info(id, latin_name, cn_name)` 三列，2026-09-22）+ `data/taxon/`（名录子集包：`txt_emb_bioclip-2.{npy,json}` + `zh_names.json` + `VERSION`）。BioCLIP 的资产目录固定在**名录库同级**的 `taxon/`（即 `data_root()/data/taxon/`）。缺哪个就在 `Recognizer::new` 报对应的 `ModelLoad`，状态栏透传。`bird_model.onnx`（26MB）/ `eye.onnx`（19MB）/ `detect.onnx`（19MB）已删除（备份 /tmp/pt-asset-backup/）；`data/global.db` 是派生索引，删除后重扫自动重建
 - 使用了 let-chains（edition 2024 特性），如 `photo-config/config.rs` 便携路径判断
@@ -150,9 +150,9 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 
 ## 测试与 QA
 
-- Rust：`#[test]` 分布在 5 个 crate 的源文件内联 `#[cfg(test)] mod tests`（domain 34 / config 18 / engine 185 / recognize 27 / photo-ui 74），另有 1 个 `#[ignore]` 真机冒烟
+- Rust：`#[test]` 分布在 5 个 crate 的源文件内联 `#[cfg(test)] mod tests`（domain 34 / config 18 / engine 189 / recognize 27 / photo-ui 79），另有 1 个 `#[ignore]` 真机冒烟
 - 真机识别冒烟：`cargo test -p photo-recognize -- --ignored`（需 worktree/发布根有 `models/` 与 `data/bird_catalog.db`）；单文件手动识别工具：`cargo run -p photo-recognize --example recognize_file -- <图片路径> [models_dir] [catalog_db]`
-- 无头冒烟：`lease_smoke` 15 项 / `preview_full_smoke` 5 项 / `clipboard_smoke`（派发 CopyImage 动作 → 解码 → arboard 写剪贴板 → 读回校验尺寸）/ `adjust_smoke` 16 项（自建 1200×800 JPEG：预览装载参数 / 三条滑杆实体 / 面板可渲染 / 滑杆 Change 事件量化 0.37→0.35 / +1 EV 后预览更亮 149.0→202.9 / 350ms 去抖落库 / 原文件字节不变 / 重置回原图并复位）/ `grid_scroll_smoke` 4 项（自建 48 张 JPEG：网格滚动句柄拿到真实视口 / 内容高于视口 / 写句柄偏移跨帧保留；另支持 `PHOTO_SMOKE_HOLD_MS` 保持窗口供 Xvfb 外部截图目检、`PHOTO_SMOKE_HIDE_PANELS=1` 收起左右侧栏、`PHOTO_SMOKE_COLS=N` 指定列数、`PHOTO_SMOKE_WINDOW=WxH` 指定窗口尺寸、`PHOTO_SMOKE_HOLD_STILL=1` 保持画面静止（注入鼠标做交互验证时要逐像素对比，默认会轻推偏移让滚动条 thumb 停在可见态），并打印 `[diag] 窗口宽/列数/实测容器/列表视口宽`）/ `filter_bar_smoke` 8 项（筛选栏两个下拉：已创建 / 初始选中项与状态一致 / emit `SelectEvent::Confirm` 走真实订阅改排序与列数 / 列数写回配置 / 设置页改列数后下拉同步；不需素材）/ `export_smoke` 27 项（**不需模型**：顶栏 / Ctrl+E 的 action 真的打开弹窗 / 输入框文本→草稿 / 已选口径只导出 1 张 vs 取消选择导出筛选结果全部 5 张 / `{seq}` 补零渲染 / 同 stem 不同扩展自动 `_1` 去重 / 长边 600 真的生效 / 质量 95 体积大于 85 / 原文件字节不变 / 目标目录写回配置 / 目标目录不可创建时给真实错误 / **eBird CSV（#9）**：造识别记录 → 门控放行 → 落盘 + BOM 表头 + 物种聚合行；配置目录由冒烟自己钉 `PHOTO_CONFIG_DIR` 隔离）/ `recognize_smoke` 5 项（需 models/：扫描素材 / 识别途中能观察到中间进度 / 跑完 done==total 且每张有状态 / 取消 5s 内生效）/ `region_smoke` 11 项（需 models/：扫描素材 / 框选模式开关 / **识别器懒装配与常驻**（冷装配→热复用两段计时）/ 首次框选建结论 / 二次框选**追加**为主体 / `folder_db` 持久化同步 / 全局索引落行 / 批量识别复用同一实例 + 清临时行）/ `stats_smoke` 15 项（**不需模型**：扫描+缩略图管线 / 全局索引写行 / 选中物种取记录 / 缩略图按各自目录解析 / 统计视图渲染 / 点击跳转选中 / **滚动条（#4/#3）**：物种榜 max_offset 850 / 照片网格 1531 / 偏移跨帧保留 / 胶片条横向 862 / 导入弹窗视口 502 / 清临时行）/ `master_bench` 计时；10 个 GPUI 冒烟都先调 `app::prepare_headless_smoke()` 把后端钉在 Xvfb 的 X11 上（否则 Wayland 会话下窗口落到真实桌面、渲染帧不可控），`xvfb-run` 下无需真实显示器（见开发命令）
+- 无头冒烟：`lease_smoke` 15 项 / `preview_full_smoke` 5 项 / `clipboard_smoke`（派发 CopyImage 动作 → 解码 → arboard 写剪贴板 → 读回校验尺寸）/ `adjust_smoke` 16 项（自建 1200×800 JPEG：预览装载参数 / 三条滑杆实体 / 面板可渲染 / 滑杆 Change 事件量化 0.37→0.35 / +1 EV 后预览更亮 149.0→202.9 / 350ms 去抖落库 / 原文件字节不变 / 重置回原图并复位）/ `grid_scroll_smoke` 4 项（自建 48 张 JPEG：网格滚动句柄拿到真实视口 / 内容高于视口 / 写句柄偏移跨帧保留；另支持 `PHOTO_SMOKE_HOLD_MS` 保持窗口供 Xvfb 外部截图目检、`PHOTO_SMOKE_HIDE_PANELS=1` 收起左右侧栏、`PHOTO_SMOKE_COLS=N` 指定列数、`PHOTO_SMOKE_WINDOW=WxH` 指定窗口尺寸、`PHOTO_SMOKE_HOLD_STILL=1` 保持画面静止（注入鼠标做交互验证时要逐像素对比，默认会轻推偏移让滚动条 thumb 停在可见态），并打印 `[diag] 窗口宽/列数/实测容器/列表视口宽`）/ `filter_bar_smoke` 8 项（筛选栏两个下拉：已创建 / 初始选中项与状态一致 / emit `SelectEvent::Confirm` 走真实订阅改排序与列数 / 列数写回配置 / 设置页改列数后下拉同步；不需素材）/ `export_smoke` 27 项（**不需模型**：顶栏 / Ctrl+E 的 action 真的打开弹窗 / 输入框文本→草稿 / 已选口径只导出 1 张 vs 取消选择导出筛选结果全部 5 张 / `{seq}` 补零渲染 / 同 stem 不同扩展自动 `_1` 去重 / 长边 600 真的生效 / 质量 95 体积大于 85 / 原文件字节不变 / 目标目录写回配置 / 目标目录不可创建时给真实错误 / **eBird CSV（#9）**：造识别记录 → 门控放行 → 落盘 + BOM 表头 + 物种聚合行；配置目录由冒烟自己钉 `PHOTO_CONFIG_DIR` 隔离）/ `recognize_smoke` 5 项（需 models/：扫描素材 / 识别途中能观察到中间进度 / 跑完 done==total 且每张有状态 / 取消 5s 内生效）/ `region_smoke` 11 项（需 models/：扫描素材 / 框选模式开关 / **识别器懒装配与常驻**（冷装配→热复用两段计时）/ 首次框选建结论 / 二次框选**追加**为主体 / `folder_db` 持久化同步 / 全局索引落行 / 批量识别复用同一实例 + 清临时行）/ `stats_smoke` 15 项（**不需模型**：扫描+缩略图管线 / 全局索引写行 / 选中物种取记录 / 缩略图按各自目录解析 / 统计视图渲染 / 点击跳转选中 / **滚动条（#4/#3）**：物种榜 max_offset 850 / 照片网格 1531 / 偏移跨帧保留 / 胶片条横向 862 / 导入弹窗视口 502 / 清临时行）/ `duplicates_smoke` **21 项**（**不需模型**、自建位模式素材：入口开窗 / 作用域 8 张 / 2 组各 2 张 / 无关照片不误报 / keeper = 路径首张 / 落库阈值 + keeper + 时间 / 标 Rejected 不动文件且同步 xmp / 重开弹窗读回落库结果 / 同 stem 多格式被排除 / 渲染多帧不 panic；支持 `PHOTO_SMOKE_HOLD_MS` 保持窗口截图目检）/ `master_bench` 计时；11 个 GPUI 冒烟都先调 `app::prepare_headless_smoke()` 把后端钉在 Xvfb 的 X11 上（否则 Wayland 会话下窗口落到真实桌面、渲染帧不可控），`xvfb-run` 下无需真实显示器（见开发命令）
 
 ### 测试分布
 
@@ -160,9 +160,9 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 |---|---|---|
 |`photo-domain::domain.rs`|34|扩展名解析、RAW 白名单、enrich_with_xmp/recognition、ExifMetadata 摘要、XmpMetadata 枚举转换、BBox/RecognitionStatus/RecognitionFilter 序列化与状态映射、SortBy 序列化、GPS DMS 转换|
 |`photo-config::lib.rs`|18|默认值、TOML 保存/加载往返、配置路径、AppConfig 字段钳制（含 include_subdirectories、export_presets）|
-|`photo-engine`|185 + 1 ignore|scanner 单层/递归、ops 移动/复制/重命名/删除（含 sidecar）、识别行同步、thumbnail 缓存键、exif 摘要、convert、folder_db 建表/迁移/upsert/rename 同步/多表清理、adjustments、global_db 索引、histogram 直方图/剪切、import 分组/去重/复制移动、template 占位符渲染、undo 三类逆操作、keywords 表|
+|`photo-engine`|189 + 1 ignore|scanner 单层/递归、ops 移动/复制/重命名/删除（含 sidecar）、识别行同步、thumbnail 缓存键、exif 摘要、convert、folder_db 建表/迁移/upsert/rename 同步/多表清理、adjustments、global_db 索引、histogram 直方图/剪切、**phash dHash/汉明距离/聚类/取消语义与 duplicates 表读写**、import 分组/去重/复制移动、template 占位符渲染、undo 三类逆操作、keywords 表|
 |`photo-recognize`|27 + 1 ignore|阶段→状态映射、输入源解析（JPEG/RAW）、org_det 输出解码（布局/近满幅让位/越界夹紧）、BioCLIP 后端（npy 解析/species_of/中文名三级回落/top-k 检索）、按学名查名录、进度回调|
-|`photo-ui`|74|筛选/排序/堆叠/连拍/预览数学/调整参数（量化、chip 文案、相对路径、字段操作）/导出草稿（钳制、预设套用、目标集口径、输出名去重）/eBird 门控纯逻辑（`src/model/`）、Material You 色彩（`theme/`）、剪贴板解码、全局索引日期回写（`rewrite_folder_index_dates`）|
+|`photo-ui`|79|筛选/排序/堆叠/连拍/预览数学/调整参数（量化、chip 文案、相对路径、字段操作）/导出草稿（钳制、预设套用、目标集口径、输出名去重）/eBird 门控纯逻辑/**近重复检测纯逻辑**（作用域剔除同 stem 多格式、keeper 分组、相对/完整路径互转，`src/model/`）、Material You 色彩（`theme/`）、剪贴板解码、全局索引日期回写（`rewrite_folder_index_dates`）|
 
 ---
 
@@ -176,7 +176,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 - **状态中心**：`AppState` 是唯一的 GPUI 实体，各视图 `cx.observe(&app)` 后重绘；`state/engine_ops.rs` 是调同步引擎的唯一桥，没有 command/事件/IPC 那一层
 - **工作区**：`views/dock_panels.rs` 用 gpui-kit Dock 组装左右停靠区与中央主视图；面板靠 `panel_name` 持久化，`set_locked(true)` 锁重排不锁拖宽；边缘宽度写回 `AppConfig.leftPanelWidth/rightPanelWidth`
 - **主视图**：`ViewMode` 驱动 grid / preview / slideshow / stats；`views/` 下另有 filmstrip、filter_bar、info_panel、left_panel、header、status_bar、dialogs/
-- **纯逻辑**：`model/`（adjust / filter / sort / stacks / burst / preview_math / best_frame）不依赖 GPUI，内联单测——筛选/排序/堆叠/连拍/预览数学/调整换算都在这里
+- **纯逻辑**：`model/`（adjust / duplicates / filter / sort / stacks / burst / preview_math / best_frame）不依赖 GPUI，内联单测——筛选/排序/堆叠/连拍/预览数学/调整换算都在这里
 - **图片**：`image/`（`ImageManager` 进程内解码 + 缓存：缩略图 → 2560 显示母版 → 1:1 全分辨率）；**复制到剪贴板**（Ctrl+C / 预览工具条「复制」）在 `state/engine_ops.rs` 解码全尺寸 RGBA 后走 `arboard`——GPUI 自带的剪贴板在 Linux 只写文本，图片项会被静默丢弃
 - **交互**：`actions.rs` 定义 action，`app.rs` 注册 47 条 `KeyBinding` 并分发（评分/旗标/色标/识别/视图切换/幻灯片/缩放/剪贴板复制等）
 - **主题**：`theme/`（Material You HCT 动态取色，seed 来自配置；`theme_config` → GPUI `ThemeConfig`）
@@ -191,6 +191,14 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 
 ## 近期修复记录
 
+- **2026-09-22 feat(photo-ui)：重复/相似照片检测接线（`docs/todo.md` #2 / #1b）**：引擎侧 `photo-engine/src/phash.rs`（2026-08-30 起就有 dHash / 汉明距离 / 贪心聚类 + 9 个单测，还做了「命中缩略图缓存则零解码」）**全仓 0 调用方**，而左栏入口打开的 `duplicates_dialog.rs` 是**纯占位**——`_state`/`_window` 两个参数都不用，点「开始检测当前目录」只 `set_status_message("正在进行相似照片检测...")` 就关窗（与 #1 导出按钮同一种「谎报成功」）。本次纯接线 + 补弹窗，同时把「同 stem 多格式」这类假重复挡在作用域外。
+  ① **引擎**：`phash::compute_hashes` 加 `should_cancel` 参数——取消返回 `Ok(None)`，**不返回半份结果**（残缺分组比没有更糟，调用方据此不落库）；`folder_db` 新增 **`duplicates` 表**（migration 10：`rel_path` 主键 + `group_index`/`keeper`/`threshold`/`computed_at`）与 `replace_duplicates`（整体替换，重跑即覆盖）/ `load_duplicates`（组序 + keeper 优先，**顺手清磁盘上已不存在的幽灵行**）/ `clear_duplicates`。
+  ② **UI 纯逻辑**（新增 `model/duplicates.rs`）：`duplicate_scope` = 当前目录全部照片，**剔除同 stem 多格式组**——本仓库的堆叠语义把同 stem 的 JPEG/RAW 当「同一画面多格式」（`model/stacks.rs` 的 ByFileName），它们的 dHash 天然几乎相同，参与检测只会每张都凑出一组假重复；`group_views`（组内首张 = 保留锚点）、`summarize`、`to_rel_groups`/`to_full_groups`（落库键互转，不在目录下的路径整组丢弃）。
+  ③ **引擎桥**：`engine_ops::start_duplicates`（前台取作用域 + 阈值快照 → 后台逐张 dHash + 聚类 → 200ms 进度 → 落内存 + 落 `folder_db`；检测途中切目录按「目录已变」丢弃结果）+ `delete_duplicate_extras`（复用 `delete_paths`：回收站 + 重扫）。
+  ④ **弹窗**（`views/dialogs/duplicates_dialog.rs` 从占位改真件）：阈值档位 6/8/10/12/16（手册 §9.10 档位，默认 10）+ 进度条 + 取消 + 汇总行（组数 / 多余张数 / 阈值 / 时间）+ 分组卡片（组内缩略图取已生成缓存，首张带「保留」徽标）+ 两个动作：**「其余标 Rejected」**（非破坏性，手册原始规格，`set_flag_for_paths` 同步 folder_db 的 xmp）与 **「保留首张，其余移入回收站」**（二次确认后 `delete_paths`）。
+  ⑤ **入口 / 状态**：左栏入口改走 `open_duplicates_dialog`（先把落库结果读回来，重启免重算）；`Esc` 关窗时若检测进行中顺手取消（否则弹窗没了、用户再没有取消入口）；状态栏加重复检测分支（进度 + 取消），`handle_escape` 的弹窗优先级链保持不变。
+  **阈值标定（todo #2 第 ④ 条）**：新增工具 `cargo run -p photo-engine --example dup_calibrate -- <目录>`（最近邻距离直方图 + 各阈值分组统计 + 距离最小对样例，`--groups <阈值>` 打组明细）。在 654 张真实鸟照上量得：最近邻距离 0-7 段 54 张 / 8-11 段 39 / 12-15 段 157 / **16-19 段 330（无关照片主峰）** / 20+ 段 74 → 两峰之间**没有干净低谷**；阈值 10 得 30 组 / 75 张入组 / 最大组 8。人工核对：真重复（`- 副本`、`_1`、`已增强-降噪` 与原图同画面）**全部命中**，但也出现**同构图连拍串链**（最大组 8 张横跨两年）——结论：默认 10 可留，但「其余」的默认动作**必须显式确认、不能自动删**（实现即如此，并另给非破坏性的标 Rejected）。**方法**：这条也解释了为什么冒烟素材用「直接构造 dHash 位模式」的合成图——自然感素材（渐变 + 亮块）彼此距离只有个位数，根本造不出互不相关的对照组。
+  **验证**：`cargo check --workspace --all-targets` 0 warning；`cargo test` 全绿（photo-engine 185→**189**：phash 取消 1 + duplicates 表读写 3；photo-ui 74→**79**：`model/duplicates` 5）；新增无头冒烟 **`duplicates_smoke` 21 项**全过（入口开窗 / 作用域 8 张 / 2 组各 2 张 / 无关照片不误报 / keeper = 路径首张 / 落库阈值 + keeper + 时间 / 标 Rejected 不动文件且同步 xmp / 重开弹窗读回落库结果 / 同 stem 多格式被排除 / 渲染多帧不 panic）；Xvfb 截图目检到阈值 chips、汇总行「2 组 · 2 张多余 · 阈值 10 · 2026-09-22 18:26:20」与两张分组卡片；`lease_smoke` / `stats_smoke` / `export_smoke` / `grid_scroll_smoke` / `filter_bar_smoke` / `adjust_smoke` 回归全过。**遗留**：① 分组是贪心锚点单链聚类，同构图连拍会串成大组（要更准见 todo #16 的多框交叉验证思路）；② 结果按目录落库、不跨目录共享；③ 递归扫描模式的子目录照片不参与（扫描器单层）。
 - **2026-09-22 feat(photo-ui)：eBird 记录导出入口（`docs/todo.md` #9 / 手册 §10.6「导出记录 → CSV」）**：引擎侧 `export_ebird::{build_rows, write_csv}` 早已就绪并带单测，但 `crates/photo-ui/` **0 引用**——整个 eBird 导出连入口都没有（与 #1 同属「链路断在 UI」）。① **入口**：统计页顶栏「导出记录 (CSV)」（手册规定的位置），`engine_ops::start_ebird_export` 走「前台取快照 → 后台干活 → 前台报结果」：目标目录复用 #1 记住的 `AppConfig.export_dir`（无则 `<当前目录>/exports`），文件名 `ebird_YYYYMMDD.csv`（同日重复导出走 `_1` 去重，不覆盖），后台跑 `build_rows`（读 folder_db 汇总 物种×日期）+ `write_csv`（UTF-8 BOM + RFC 4180），状态栏报「已导出观鸟记录 N 条 → 路径」。② **门控**：新增纯逻辑 `model/ebird.rs::ebird_candidates`（Confirmed/NeedsReview 且带物种名，与引擎计入口径一致），按钮在有候选时才可点。
   **为什么门控不是「按类群」**：`recognition` 表**不持久化类群**（七级分类 `ranks` 见 #11，已暂缓），UI 无法可靠区分鸟与非鸟；所以退一步按「有物种结论」放行，tooltip 与 `docs/open-questions.md` §7 都写明「引擎汇总全部有结论的物种，非鸟记录请自行剔除」。**要真按类群门控，前置是把类群/`ranks` 落库**（与 #10 / #11 合并做一次 migration）——这条已同步进 open-questions 供拍板。
   **验证**：`cargo check --workspace --all-targets` 0 warning；`cargo test` 全绿（photo-ui 72→74，新增 2 个门控单测）；`export_smoke` 21 → **27 项**全过（造识别记录（内存摘要 + folder_db）→ 门控放行 1 张 → CSV 落盘在导出目录 / 带 BOM + 表头 / 物种聚合行 `大嘴乌鸦,Corvus macrorhynchos,1,2026-09-22,,,` / 状态栏文案）；`lease_smoke` 15 / `adjust_smoke` 16 / `grid_scroll_smoke` 4 / `filter_bar_smoke` 8 / `stats_smoke` 15 回归全过。**遗留**：类群门控待拍板；导出作用域 = 当前目录（引擎契约），统计页跨文件夹的全局记录暂不支持导出。
