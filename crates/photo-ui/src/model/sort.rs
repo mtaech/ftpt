@@ -1,19 +1,13 @@
 //! 排序比较纯逻辑（对应 §4.2）。
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
 
 use photo_domain::{CaptureMeta, SortBy, SortDirection};
 
 use super::filter::{FilterCriteria, filter_captures, rating_value};
 
 /// 两条拍摄记录的比较器
-pub fn compare_captures(
-    sort_by: SortBy,
-    a: &CaptureMeta,
-    b: &CaptureMeta,
-    quality_scores: Option<&HashMap<String, f64>>,
-) -> Ordering {
+pub fn compare_captures(sort_by: SortBy, a: &CaptureMeta, b: &CaptureMeta) -> Ordering {
     match sort_by {
         SortBy::FileName => a.base_name.to_lowercase().cmp(&b.base_name.to_lowercase()),
         SortBy::DateTaken => {
@@ -33,22 +27,6 @@ pub fn compare_captures(
             (Some(_), None) => Ordering::Greater,
             (Some(ta), Some(tb)) => ta.cmp(tb),
         },
-        SortBy::EyeSharpness => match (a.eye_sharpness, b.eye_sharpness) {
-            (None, None) => Ordering::Equal,
-            (None, Some(_)) => Ordering::Less, // null 排最前
-            (Some(_), None) => Ordering::Greater,
-            (Some(sa), Some(sb)) => sa.partial_cmp(&sb).unwrap_or(Ordering::Equal),
-        },
-        SortBy::Quality => {
-            let sa = quality_scores.and_then(|m| m.get(&a.primary_path).copied());
-            let sb = quality_scores.and_then(|m| m.get(&b.primary_path).copied());
-            match (sa, sb) {
-                (None, None) => Ordering::Equal,
-                (None, Some(_)) => Ordering::Greater, // null 排最后（未评分照片不参与机筛排序）
-                (Some(_), None) => Ordering::Less,
-                (Some(va), Some(vb)) => va.partial_cmp(&vb).unwrap_or(Ordering::Equal),
-            }
-        }
     }
 }
 
@@ -58,13 +36,12 @@ pub fn apply_filter_and_sort(
     criteria: &FilterCriteria,
     sort_by: SortBy,
     sort_direction: SortDirection,
-    quality_scores: Option<&HashMap<String, f64>>,
 ) -> Vec<usize> {
     let mut indices = filter_captures(items, criteria);
 
     // 稳定排序（同键保持 display 原序）
     indices.sort_by(|&a, &b| {
-        let cmp = compare_captures(sort_by, &items[a], &items[b], quality_scores);
+        let cmp = compare_captures(sort_by, &items[a], &items[b]);
         match sort_direction {
             SortDirection::Ascending => cmp,
             SortDirection::Descending => cmp.reverse(),
@@ -72,4 +49,50 @@ pub fn apply_filter_and_sort(
     });
 
     indices
+}
+// ── 筛选栏下拉选项（排序方式 / 网格列数）──
+
+/// 排序方式下拉选项：(value = 机器可读稳定值，label = 中文名)。
+/// 顺序 = 下拉里的显示顺序。
+pub const SORT_OPTIONS: [(&str, &str); 5] = [
+    ("file_name", "文件名"),
+    ("date_taken", "拍摄时间"),
+    ("file_size", "文件大小"),
+    ("rating", "星级评分"),
+    ("modified", "修改时间"),
+];
+
+/// 排序方式 → 下拉 value
+pub fn sort_by_value(sort: SortBy) -> &'static str {
+    match sort {
+        SortBy::FileName => "file_name",
+        SortBy::DateTaken => "date_taken",
+        SortBy::FileSize => "file_size",
+        SortBy::Rating => "rating",
+        SortBy::Modified => "modified",
+    }
+}
+
+/// 下拉 value → 排序方式；未知值回退「文件名」（下拉数据坏掉也不至于乱排）
+pub fn sort_by_from_value(value: &str) -> SortBy {
+    SORT_OPTIONS
+        .iter()
+        .find(|(v, _)| *v == value)
+        .map(|(v, _)| match *v {
+            "date_taken" => SortBy::DateTaken,
+            "file_size" => SortBy::FileSize,
+            "rating" => SortBy::Rating,
+            "modified" => SortBy::Modified,
+            _ => SortBy::FileName,
+        })
+        .unwrap_or(SortBy::FileName)
+}
+
+/// 网格列数下拉选项（value = 列数字符串，label = "N 列"）
+pub const GRID_COL_OPTIONS: [(&str, &str); 4] =
+    [("2", "2 列"), ("3", "3 列"), ("4", "4 列"), ("5", "5 列")];
+
+/// 下拉 value → 列数；钳制到 2–5，非法值回退 4
+pub fn grid_columns_from_value(value: &str) -> usize {
+    value.parse::<usize>().map(|c| c.clamp(2, 5)).unwrap_or(4)
 }

@@ -61,7 +61,7 @@ impl AppState {
             &font_select,
             |this,
              _entity,
-             event: &SelectEvent<SearchableVec<crate::state::app_state::FontOption>>,
+             event: &SelectEvent<SearchableVec<crate::state::app_state::ChoiceOption>>,
              cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
                     let val_str = value.as_ref();
@@ -73,6 +73,42 @@ impl AppState {
         );
         state.font_select = Some(font_select);
         state._font_select_sub = Some(font_select_sub);
+
+        // 筛选栏下拉：排序方式 / 每行列数（静态选项，确认即生效；换掉了原来的「点击循环」按钮）
+        let sort_options = crate::state::app_state::choice_options(&crate::model::SORT_OPTIONS);
+        let sort_value: SharedString = crate::model::sort_by_value(state.sort_by).into();
+        let sort_ix = sort_options.position(&sort_value);
+        let sort_select = cx.new(|cx| SelectState::new(sort_options, sort_ix, window, cx));
+        let sort_select_sub = cx.subscribe(
+            &sort_select,
+            |this,
+             _entity,
+             event: &SelectEvent<SearchableVec<crate::state::app_state::ChoiceOption>>,
+             cx| {
+                if let SelectEvent::Confirm(Some(value)) = event {
+                    this.set_sort_by(crate::model::sort_by_from_value(value.as_ref()), cx);
+                }
+            },
+        );
+        let cols_options = crate::state::app_state::choice_options(&crate::model::GRID_COL_OPTIONS);
+        let cols_value: SharedString = state.grid_columns.to_string().into();
+        let cols_ix = cols_options.position(&cols_value);
+        let cols_select = cx.new(|cx| SelectState::new(cols_options, cols_ix, window, cx));
+        let cols_select_sub = cx.subscribe(
+            &cols_select,
+            |this,
+             _entity,
+             event: &SelectEvent<SearchableVec<crate::state::app_state::ChoiceOption>>,
+             cx| {
+                if let SelectEvent::Confirm(Some(value)) = event {
+                    this.set_grid_columns(crate::model::grid_columns_from_value(value.as_ref()), cx);
+                }
+            },
+        );
+        state.sort_select = Some(sort_select);
+        state.grid_cols_select = Some(cols_select);
+        state._sort_select_sub = Some(sort_select_sub);
+        state._grid_cols_select_sub = Some(cols_select_sub);
         // 导入弹窗输入框：目标根目录 / 重命名模板
         state.import_dest_input =
             Some(cx.new(|cx| {
@@ -550,9 +586,6 @@ impl Render for AppState {
                     }
                     ActiveDialog::Duplicates => {
                         render_duplicates_dialog(self, window, cx).into_any_element()
-                    }
-                    ActiveDialog::Correct(idx) => {
-                        render_correct_dialog(self, idx, window, cx).into_any_element()
                     }
                     ActiveDialog::BurstConfirm => {
                         render_burst_confirm_dialog(self, window, cx).into_any_element()

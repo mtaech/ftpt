@@ -65,7 +65,8 @@ fn main() {
     // 这里按同一条约定先探一下，缺模型就跳过（真机识别冒烟本来就是可选的）。
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let has_models = std::env::var("PHOTO_DATA_DIR").is_ok()
-        || (repo_root.join("models/detect.onnx").exists()
+        || (repo_root.join("models/org_det.onnx").exists()
+            && repo_root.join("models/bioclip2_model_int8.onnx").exists()
             && repo_root.join("data/bird_catalog.db").exists());
     if !has_models {
         eprintln!("跳过：未找到 models/ 与 data/bird_catalog.db（设 PHOTO_DATA_DIR 或从仓库根跑）");

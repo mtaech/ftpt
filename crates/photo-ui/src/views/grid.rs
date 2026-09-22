@@ -13,7 +13,9 @@ use gpui_kit::component::{
     rating::Rating as ComponentRating,
     v_flex,
 };
-use gpui_kit::component::scroll::Scrollbar;
+use gpui_kit::base::ElementExt as _;
+use gpui_kit::component::dock::DockPlacement;
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarHandle as _};
 use gpui_kit::{Context, IntoElement, MouseButton, Window, div, img, prelude::*, px, uniform_list};
 use photo_domain::{ColorLabel, Flag, Rating};
 
@@ -27,7 +29,7 @@ use crate::theme::{
 
 pub fn render_photo_grid(
     state: &AppState,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<AppState>,
 ) -> impl IntoElement + use<> {
     // ── 1. 空态：尚未打开目录 ──
@@ -45,15 +47,55 @@ pub fn render_photo_grid(
     let total_groups = state.stack_groups.len();
     let row_count = (total_groups + cols - 1) / cols;
 
+    // 缩略图区边长 = cell 的实际宽度（正方形，§9.5「object-cover 正方裁切」）。
+    // 必须给确定像素高度——uniform_list 假定每行等高，让高度反过来跟宽度联动
+    // （aspect-ratio）会被它测量歪，行内容直接被裁掉。
+    // 宽度优先用**列表自己的视口宽度**（与滚动条同源、就是 cell 摊开的那个宽度）；
+    // 拿不到时退回「容器实测宽 − 内边距」，再退到按窗口估算。
+    let list_vw = f32::from(state.grid_scroll.viewport_bounds().size.width);
+    let container_w = state
+        .grid_viewport_size
+        .map(|(w, _)| w as f32)
+        .unwrap_or_else(|| estimate_grid_width(state, window, cx));
+    let content_w = if list_vw > 10.0 {
+        list_vw
+    } else {
+        (container_w - 16.0).max(0.0)
+    };
+    let thumb_edge = thumb_edge_for(content_w, cols);
+
     // 滚动条：GPUI 的溢出滚动容器只负责滚、不负责画——必须把 uniform_list 绑到
     // AppState 的句柄上（跨帧保留滚动位置），再把 Scrollbar 叠在同一个视口里。
     let scroll_handle = state.grid_scroll.clone();
 
     div()
+        .id("photo-grid-viewport")
         .w_full()
         .h_full()
         .bg(cx.theme().background)
         .p(px(8.))
+        // 实测容器宽度回填 AppState（post-layout）；只有变化才 notify，避免自激重绘
+        .on_prepaint({
+            let entity = cx.entity().clone();
+            move |bounds, _window, cx| {
+                let w = f32::from(bounds.size.width) as f64;
+                let h = f32::from(bounds.size.height) as f64;
+                if w > 10.0 && h > 10.0 {
+                    entity.update(cx, |state, cx| {
+                        let changed = match state.grid_viewport_size {
+                            Some((cur_w, cur_h)) => {
+                                (cur_w - w).abs() >= 1.0 || (cur_h - h).abs() >= 1.0
+                            }
+                            None => true,
+                        };
+                        if changed {
+                            state.grid_viewport_size = Some((w, h));
+                            cx.notify();
+                        }
+                    });
+                }
+            }
+        })
         .child(
             div()
                 .relative()
@@ -77,7 +119,7 @@ pub fn render_photo_grid(
                                             .children(groups_in_row.iter().enumerate().map(
                                                 |(c_idx, group)| {
                                                     let global_group_idx = start + c_idx;
-                                                    render_grid_cell(state, group, global_group_idx, cx)
+                                                    render_grid_cell(state, group, global_group_idx, thumb_edge, cx)
                                                 },
                                             ))
                                             .when(groups_in_row.len() < cols, |this| {
@@ -204,10 +246,43 @@ fn render_no_match_state(cx: &Context<AppState>) -> impl IntoElement {
         )
 }
 
+/// cell 内图片区边长（正方形）=（内容宽 − 列间距）/ 列数。
+///
+/// 不给「最小边长」兜底：内容宽不够时 cell 会继续收缩（cell 也不再设 min_w），
+/// 若在这里兜一个下限，图片会比 cell 宽、行还会溢出视口。
+fn thumb_edge_for(content_w: f32, cols: usize) -> f32 {
+    let gaps = 8.0 * (cols.saturating_sub(1)) as f32; // 行内 h_flex gap(px(8.))
+    ((content_w - gaps) / cols as f32).max(1.0)
+}
+
+/// 首帧兜底：按「窗口宽 − 左右活动栏 − 停靠区」估算网格容器宽度
+fn estimate_grid_width(state: &AppState, window: &mut Window, cx: &mut Context<AppState>) -> f32 {
+    let mut avail = f32::from(window.viewport_size().width) - 96.0; // 左右活动栏各 48px
+    if let Some(area) = &state.dock_area {
+        let area = area.read(cx);
+        if area.is_dock_open(DockPlacement::Left) {
+            avail -= area
+                .dock_size(DockPlacement::Left)
+                .map(f32::from)
+                .unwrap_or(state.left_panel_width);
+        }
+        if area.is_dock_open(DockPlacement::Right) {
+            avail -= area
+                .dock_size(DockPlacement::Right)
+                .map(f32::from)
+                .unwrap_or(state.right_panel_width);
+        }
+    } else {
+        avail -= state.left_panel_width + state.right_panel_width;
+    }
+    avail.max(200.0)
+}
+
 fn render_grid_cell(
     state: &AppState,
     group: &crate::model::stacks::StackGroup,
     _group_idx: usize,
+    thumb_edge: f32,
     cx: &Context<AppState>,
 ) -> impl IntoElement {
     let active_item_idx = group.active;
@@ -232,7 +307,10 @@ fn render_grid_cell(
         cx.theme().muted_foreground
     };
 
-    let base_name = meta.map(|m| m.base_name.as_str()).unwrap_or("IMG");
+    // 显示用文件名：base_name（无扩展名）+ 主路径真实扩展名（domain::display_name）
+    let file_name = meta
+        .map(|m| m.display_name())
+        .unwrap_or_else(|| "IMG".to_string());
     let file_size_str = meta
         .and_then(|m| m.file_size)
         .map(|s| format!("{:.1} MB", s as f64 / 1_048_576.0))
@@ -252,7 +330,7 @@ fn render_grid_cell(
     let rating = meta.map(|m| m.rating).unwrap_or(Rating::None);
     let color_label = meta.map(|m| m.color_label).unwrap_or(ColorLabel::None);
     let flag = meta.and_then(|m| m.flag);
-    let bird_name = meta.and_then(|m| m.bird_name.clone());
+    let taxon_name = meta.and_then(|m| m.taxon_name.clone());
     let is_best = meta.is_some_and(|m| state.best_frame_paths.contains(&m.primary_path));
 
     let thumb_path = meta.and_then(|m| {
@@ -269,9 +347,20 @@ fn render_grid_cell(
     };
 
     v_flex()
+        .id(("grid-cell", active_item_idx))
         .flex_1()
-        .min_w(px(160.))
+        // 不设 min_w：5 列在窄面板里必须能继续收缩，否则整行溢出、最后一列被裁
+        // （uniform_list 横向不滚动，行宽必须小于等于视口宽）
+        .min_w(px(0.))
         .cursor_pointer()
+        // 列窄时文件名会截断，悬停整格看完整文件名（含扩展名）。
+        // 挂在 cell 上而不是名字元素上：cell 本来就有 on_mouse_down，不额外加子 hitbox
+        .tooltip({
+            let full = file_name.clone();
+            move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(window, cx)
+            }
+        })
         .rounded(px(12.))
         .border_2()
         .border_color(cell_border)
@@ -306,10 +395,15 @@ fn render_grid_cell(
             ),
         )
         // ── 1. 图片区 ──
+        // 正方形裁切（§9.5）：边长由网格容器实测宽度推出。以前写死 170px，侧栏一收
+        // cell 变宽，ObjectFit::Cover 就把照片裁成 1.9:1 的扁横条，观感很差。
         .child(
             div()
                 .w_full()
-                .h(px(170.))
+                .h(px(thumb_edge))
+                // 固定高度不参与 flex 压缩：uniform_list 用 MinContent 高度探测行高，
+                // 允许压缩会把行高探小（首行图片被压扁、后续行互相叠）
+                .flex_shrink_0()
                 .bg(cx.theme().muted)
                 .relative()
                 .overflow_hidden()
@@ -436,6 +530,7 @@ fn render_grid_cell(
             v_flex()
                 .w_full()
                 .h(px(58.))
+                .flex_shrink_0()
                 .p_2()
                 .bg(footer_bg)
                 .justify_between()
@@ -446,22 +541,26 @@ fn render_grid_cell(
                         .w_full()
                         .items_center()
                         .justify_between()
+                        .gap_1()
                         .child(
                             div()
+                                .flex_1()
+                                .min_w(px(0.))
                                 .text_xs()
                                 .font_medium()
                                 .truncate()
                                 .text_color(footer_fg)
-                                .child(base_name.to_string()),
+                                .child(file_name.clone()),
                         )
                         .child(
                             div()
+                                .flex_shrink_0()
                                 .text_xs()
                                 .text_color(footer_muted)
                                 .child(file_size_str),
                         ),
                 )
-                // 第 2 行：星级评分 + 鸟种名称
+                // 第 2 行：星级评分 + 物种名称
                 .child(
                     h_flex()
                         .w_full()
@@ -474,7 +573,7 @@ fn render_grid_cell(
                                 .font_medium()
                                 .truncate()
                                 .text_color(footer_fg)
-                                .child(bird_name.unwrap_or_default()),
+                                .child(taxon_name.unwrap_or_default()),
                         ),
                 ),
         )

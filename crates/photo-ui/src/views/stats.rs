@@ -1,8 +1,8 @@
-//! 鸟种统计视图组件（对应 §10.6）。
+//! 物种统计视图组件（对应 §10.6）。
 //!
-//! - 顶部四卡：鸟种总数 / 照片总数 / 覆盖文件夹数 / 平均命中率
-//! - 左栏：鸟种排行列表（张数、占比条、首见~末见、平均眼锐度）
-//! - 右栏：选中鸟种的照片网格
+//! - 顶部三卡：物种总数 / 照片总数 / 覆盖文件夹数
+//! - 左栏：物种排行列表（张数、占比条、首见~末见）
+//! - 右栏：选中物种的照片网格
 //! - 退出返回网格
 
 use gpui_kit::component::{
@@ -55,7 +55,7 @@ pub fn render_stats_view(
                                 .font_semibold()
                                 .text_base()
                                 .text_color(cx.theme().foreground)
-                                .child("鸟种全局统计"),
+                                .child("物种全局统计"),
                         ),
                 )
                 .child(
@@ -74,9 +74,9 @@ pub fn render_stats_view(
             h_flex()
                 .w_full()
                 .gap_3()
-                // 卡片 1: 鸟种总数
+                // 卡片 1: 物种总数
                 .child(render_stat_card(
-                    "鸟种总数",
+                    "物种总数",
                     &format!("{total_species}"),
                     "全库去重种数",
                     cx,
@@ -95,23 +95,8 @@ pub fn render_stats_view(
                     "已扫描入库目录",
                     cx,
                 ))
-                // 卡片 4: 平均锐度
-                .child(render_stat_card(
-                    "平均鸟眼锐度",
-                    &format!(
-                        "{:.2}",
-                        if stats.is_empty() {
-                            0.0
-                        } else {
-                            stats.iter().filter_map(|s| s.avg_sharpness).sum::<f64>()
-                                / stats.len().max(1) as f64
-                        }
-                    ),
-                    "已评测鸟眼样本",
-                    cx,
-                )),
         )
-        // ── 主体双栏：鸟种排行 ──
+        // ── 主体双栏：物种排行 ──
         .child(
             h_flex()
                 .w_full()
@@ -134,7 +119,7 @@ pub fn render_stats_view(
                                 .text_xs()
                                 .font_medium()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("鸟种排行榜"),
+                                .child("物种排行榜"),
                         )
                         .child(
                             div()
@@ -211,7 +196,7 @@ pub fn render_stats_view(
                         .justify_center()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child("选择左侧鸟种查看照片记录"),
+                        .child("选择左侧物种查看照片记录"),
                 ),
         )
         .into_any_element()

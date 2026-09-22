@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 pub struct FilterCriteria {
     /// 格式精确匹配（大小写归一；RAW 为通配语义）
     pub format_filter: Option<ImageFormat>,
-    /// 鸟种多选（命中任一即保留，空 = 不限）
-    pub bird_names: Vec<String>,
+    /// 物种多选（命中任一即保留，空 = 不限）
+    pub taxon_names: Vec<String>,
     /// 拍摄日期范围（闭区间，比较 YYYY-MM-DD）
     pub date_from: Option<NaiveDate>,
     pub date_to: Option<NaiveDate>,
@@ -42,7 +42,7 @@ impl From<FilterCriteria> for photo_domain::FilterCriteria {
     fn from(c: FilterCriteria) -> Self {
         photo_domain::FilterCriteria {
             format_filter: c.format_filter,
-            bird_names: c.bird_names,
+            taxon_names: c.taxon_names,
             date_from: c.date_from,
             date_to: c.date_to,
             min_rating: c.min_rating,
@@ -145,10 +145,10 @@ pub fn filter_captures(items: &[CaptureMeta], criteria: &FilterCriteria) -> Vec<
             }
         }
 
-        // bird_names: 命中任一选中项即保留
-        if !criteria.bird_names.is_empty() {
-            let matched = match &meta.bird_name {
-                Some(name) => criteria.bird_names.iter().any(|b| b == name),
+        // taxon_names: 命中任一选中项即保留
+        if !criteria.taxon_names.is_empty() {
+            let matched = match &meta.taxon_name {
+                Some(name) => criteria.taxon_names.iter().any(|b| b == name),
                 None => false,
             };
             if !matched {
@@ -304,7 +304,7 @@ pub fn default_filter_criteria() -> FilterCriteria {
 /// 是否有任一筛选生效（作为批量操作的安全边界）
 pub fn has_active_filters(criteria: &FilterCriteria) -> bool {
     criteria.format_filter.is_some()
-        || !criteria.bird_names.is_empty()
+        || !criteria.taxon_names.is_empty()
         || criteria.date_from.is_some()
         || criteria.date_to.is_some()
         || criteria.min_rating.is_some()

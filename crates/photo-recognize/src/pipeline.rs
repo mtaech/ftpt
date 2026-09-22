@@ -17,10 +17,9 @@ use photo_domain::{
     BBox, Capture, FocusPoint, FocusShape, Recognition, RecognitionFailureStage, RecognitionStatus,
 };
 
-use crate::catalog::{CatalogDb, ClassificationOutput};
+use crate::catalog::CatalogDb;
+use crate::classifier::{Classified, Classifier};
 use crate::detect;
-use crate::eye;
-use crate::sharpness;
 use crate::RecognizeError;
 
 /// 进度回调：进度 0.0-1.0 + 阶段文本
@@ -155,9 +154,8 @@ fn resolve_source_opt(
 ///
 ///
 /// # 参数
-/// - `detection_session`: YOLO 检测 session
-/// - `classification_session`: 鸟种分类 session
-/// - `eye_session`: 鸟眼检测 session
+/// - `detection_session`: 主体检测 session（org_det）
+/// - `classifier`: 识别后端（分类 + 落到物种，见 classifier.rs）
 /// - `catalog`: 名录映射
 /// - `capture`: 待识别的 Capture
 /// - `focus_override`: 相机对焦点（`Some` = 跳过 YOLO 检测，用对焦点 ROI 直接
@@ -168,8 +166,7 @@ fn resolve_source_opt(
 /// 识别结果（业务失败体现在 Recognition.status，Err 只用于系统故障）
 pub fn recognize_capture(
     detection_session: &mut Session,
-    classification_session: &mut Session,
-    eye_session: &mut Session,
+    classifier: &mut dyn Classifier,
     catalog: &CatalogDb,
     capture: &Capture,
     focus_override: Option<FocusPoint>,
@@ -177,8 +174,7 @@ pub fn recognize_capture(
 ) -> Result<Recognition, RecognizeError> {
     recognize_capture_impl(
         detection_session,
-        classification_session,
-        eye_session,
+        classifier,
         catalog,
         capture,
         None,
@@ -199,8 +195,7 @@ pub fn recognize_capture(
 /// lib.rs 侧包装为 `Recognizer::recognize_with_thumbnail` 后移除本 allow。
 pub(crate) fn recognize_capture_with_thumbnail(
     detection_session: &mut Session,
-    classification_session: &mut Session,
-    eye_session: &mut Session,
+    classifier: &mut dyn Classifier,
     catalog: &CatalogDb,
     capture: &Capture,
     thumb_bytes: Option<&[u8]>,
@@ -209,8 +204,7 @@ pub(crate) fn recognize_capture_with_thumbnail(
 ) -> Result<Recognition, RecognizeError> {
     recognize_capture_impl(
         detection_session,
-        classification_session,
-        eye_session,
+        classifier,
         catalog,
         capture,
         thumb_bytes,
@@ -256,8 +250,7 @@ fn focus_to_bbox(fp: &FocusPoint) -> BBox {
 /// 单张全管线识别共用实现（`thumb_bytes` 为可选缩略图优先输入）。
 fn recognize_capture_impl(
     detection_session: &mut Session,
-    classification_session: &mut Session,
-    eye_session: &mut Session,
+    classifier: &mut dyn Classifier,
     catalog: &CatalogDb,
     capture: &Capture,
     thumb_bytes: Option<&[u8]>,
@@ -281,12 +274,10 @@ fn recognize_capture_impl(
             let (status, failure_stage) = stage_to_status(stage, false);
             return Ok(Recognition {
                 status,
-                bird: None,
+                taxon: None,
                 class_index: None,
                 confidence: None,
                 bbox: None,
-                eye_sharpness: None,
-                eye_bbox: None,
                 candidates: vec![],
                 failure_stage,
                 recognized_at,
@@ -304,18 +295,8 @@ fn recognize_capture_impl(
         report_progress(on_progress, 0.35, "对焦点定位");
         let bbox = focus_to_bbox(&fp);
         report_progress(on_progress, 0.5, "检测完成");
-        let (eye_sharpness, eye_bbox) = run_eye_stage(eye_session, &img, None, bbox);
         report_progress(on_progress, 0.7, "分类中");
-        return Ok(classify_and_map(
-            classification_session,
-            catalog,
-            &img,
-            bbox,
-            eye_sharpness,
-            eye_bbox,
-            on_progress,
-            recognized_at,
-        ));
+        return Ok(classify_and_map(classifier, catalog, &img, bbox, on_progress, recognized_at));
     }
 
     // ---- 共享 640×640 缩放：检测与眼模型同尺寸同插值（CatmullRom），
@@ -327,17 +308,28 @@ fn recognize_capture_impl(
     let detection = match detect::run_yolo_detection_resized(detection_session, &shared_640) {
         Ok(Some(d)) => d,
         Ok(None) => {
-            // 检测无框 → Unrecognized (Detection)
+            // 检测无框 → 退回整图识别（org_det 的 19 个粗类偶尔也会漏掉主体，
+            // 此时整图直接分类仍是可用的兜底）。
+            if classifier.whole_image_on_no_detection() {
+                tracing::debug!("[识别] {} 未检出主体，BioCLIP 退回整图识别", capture.base_name);
+                report_progress(on_progress, 0.5, "整图识别");
+                return Ok(classify_and_map(
+                    classifier,
+                    catalog,
+                    &img,
+                    BBox::new(0.0, 0.0, 1.0, 1.0),
+                    on_progress,
+                    recognized_at,
+                ));
+            }
             tracing::debug!("[识别] {} 未检出鸟体（Unrecognized）", capture.base_name);
             let (status, failure_stage) = stage_to_status(RecognitionFailureStage::Detection, true);
             return Ok(Recognition {
                 status,
-                bird: None,
+                taxon: None,
                 class_index: None,
                 confidence: None,
                 bbox: None,
-                eye_sharpness: None,
-                eye_bbox: None,
                 candidates: vec![],
                 failure_stage,
                 recognized_at,
@@ -351,12 +343,10 @@ fn recognize_capture_impl(
                 stage_to_status(RecognitionFailureStage::Classification, false);
             return Ok(Recognition {
                 status,
-                bird: None,
+                taxon: None,
                 class_index: None,
                 confidence: None,
                 bbox: None,
-                eye_sharpness: None,
-                eye_bbox: None,
                 candidates: vec![],
                 failure_stage,
                 recognized_at,
@@ -366,22 +356,9 @@ fn recognize_capture_impl(
     let bbox = detection.bbox;
     report_progress(on_progress, 0.5, "检测完成");
 
-    // ---- 3. 鸟眼锐度（第四阶段） ----
-    report_progress(on_progress, 0.6, "鸟眼锐度");
-    let (eye_sharpness, eye_bbox) = run_eye_stage(eye_session, &img, Some(&shared_640), bbox);
-
-    // ---- 4-5. 分类 + 名录映射（与 recognize_region 共用尾部管线） ----
+    // ---- 3. 分类 + 名录映射（与 recognize_region 共用尾部管线） ----
     report_progress(on_progress, 0.7, "分类中");
-    Ok(classify_and_map(
-        classification_session,
-        catalog,
-        &img,
-        bbox,
-        eye_sharpness,
-        eye_bbox,
-        on_progress,
-        recognized_at,
-    ))
+    Ok(classify_and_map(classifier, catalog, &img, bbox, on_progress, recognized_at))
 }
 
 /// 用户手动框选区域识别：跳过 YOLO 检测，直接对用户给的 bbox 分类 + 名录映射。
@@ -393,22 +370,13 @@ fn recognize_capture_impl(
 /// - `bbox`: 用户框选区域（归一化 0-1 坐标，相对原图）
 /// - 其余同 `recognize_capture`
 pub fn recognize_region(
-    classification_session: &mut Session,
-    eye_session: &mut Session,
+    classifier: &mut dyn Classifier,
     catalog: &CatalogDb,
     capture: &Capture,
     bbox: BBox,
     on_progress: Option<&ProgressCallback>,
 ) -> Result<Recognition, RecognizeError> {
-    recognize_region_impl(
-        classification_session,
-        eye_session,
-        catalog,
-        capture,
-        bbox,
-        None,
-        on_progress,
-    )
+    recognize_region_impl(classifier, catalog, capture, bbox, None, on_progress)
 }
 
 /// 带可选内存缩略图的手动框选识别（跳过检测）。
@@ -417,29 +385,19 @@ pub fn recognize_region(
 /// 派生图避免全图 `image::open`，解码失败回落完整路径；`None` 时行为与
 /// [`recognize_region`] 完全一致。
 pub(crate) fn recognize_region_with_thumbnail(
-    classification_session: &mut Session,
-    eye_session: &mut Session,
+    classifier: &mut dyn Classifier,
     catalog: &CatalogDb,
     capture: &Capture,
     bbox: BBox,
     thumb_bytes: Option<&[u8]>,
     on_progress: Option<&ProgressCallback>,
 ) -> Result<Recognition, RecognizeError> {
-    recognize_region_impl(
-        classification_session,
-        eye_session,
-        catalog,
-        capture,
-        bbox,
-        thumb_bytes,
-        on_progress,
-    )
+    recognize_region_impl(classifier, catalog, capture, bbox, thumb_bytes, on_progress)
 }
 
 /// 手动框选识别共用实现（`thumb_bytes` 为可选缩略图优先输入）。
 fn recognize_region_impl(
-    classification_session: &mut Session,
-    eye_session: &mut Session,
+    classifier: &mut dyn Classifier,
     catalog: &CatalogDb,
     capture: &Capture,
     bbox: BBox,
@@ -461,12 +419,10 @@ fn recognize_region_impl(
             let (status, failure_stage) = stage_to_status(stage, false);
             return Ok(Recognition {
                 status,
-                bird: None,
+                taxon: None,
                 class_index: None,
                 confidence: None,
                 bbox: Some(bbox),
-                eye_sharpness: None,
-                eye_bbox: None,
                 candidates: vec![],
                 failure_stage,
                 recognized_at,
@@ -477,81 +433,53 @@ fn recognize_region_impl(
 
     let ResolvedSource::Image(img) = source;
 
-    // ---- 2. 鸟眼锐度（用户框视为鸟框；无检测阶段，眼自行缩放） ----
-    report_progress(on_progress, 0.4, "鸟眼锐度");
-    let (eye_sharpness, eye_bbox) = run_eye_stage(eye_session, &img, None, bbox);
-
-    // ---- 3. 分类 + 名录映射（跳过检测） ----
+    // ---- 2. 分类 + 名录映射（跳过检测） ----
     report_progress(on_progress, 0.5, "分类中");
-    Ok(classify_and_map(
-        classification_session,
-        catalog,
-        &img,
-        bbox,
-        eye_sharpness,
-        eye_bbox,
-        on_progress,
-        recognized_at,
-    ))
+    Ok(classify_and_map(classifier, catalog, &img, bbox, on_progress, recognized_at))
 }
 
 /// 分类 → 名录映射 → 候选解析，构建最终 Recognition。
 ///
-/// `recognize_capture`（YOLO 检测框）与 `recognize_region`（用户手动画框）共用的尾部管线。
+/// `recognize_capture`（检测框）与 `recognize_region`（用户手动画框）共用的尾部管线。
 fn classify_and_map(
-    classification_session: &mut Session,
+    classifier: &mut dyn Classifier,
     catalog: &CatalogDb,
     img: &DynamicImage,
     bbox: BBox,
-    eye_sharpness: Option<f32>,
-    eye_bbox: Option<BBox>,
     on_progress: Option<&ProgressCallback>,
     recognized_at: String,
 ) -> Recognition {
-    // ---- 分类 ----
-    let classified: ClassificationOutput =
-        match crate::classify::run_classification(classification_session, img, bbox) {
-            Ok(c) => c,
-            Err(e) => {
-                // 分类失败 → NeedsReview(Classification)
-                tracing::error!("[识别] 分类错误: {e}");
-                return Recognition {
-                    status: RecognitionStatus::NeedsReview,
-                    bird: None,
-                    class_index: None,
-                    confidence: None,
-                    bbox: Some(bbox),
-                    eye_sharpness,
-                    eye_bbox,
-                    candidates: vec![],
-                    failure_stage: RecognitionFailureStage::Classification,
-                    recognized_at,
-                };
-            }
-        };
-    report_progress(on_progress, 0.85, "名录映射中");
+    // ---- 分类 + 落到物种（后端内部完成，见 classifier.rs） ----
+    let classified: Classified = match classifier.classify(catalog, img, bbox) {
+        Ok(c) => c,
+        Err(e) => {
+            // 分类失败 → NeedsReview(Classification)
+            tracing::error!("[识别] 分类错误: {e}");
+            return Recognition {
+                status: RecognitionStatus::NeedsReview,
+                taxon: None,
+                class_index: None,
+                confidence: None,
+                bbox: Some(bbox),
+                candidates: vec![],
+                failure_stage: RecognitionFailureStage::Classification,
+                recognized_at,
+            };
+        }
+    };
+    report_progress(on_progress, 0.85, "结果整理中");
 
-    // ---- 名录映射 ----
-    let (bird, map_stage) = catalog.resolve_class(classified.class_index);
-
-    // 候选列表：Top-5 跳过 Top-1 自身，至多 4 条（未映射项 bird=None 也保留）
-    let candidates =
-        catalog.resolve_top_candidates(&classified.top_candidates, classified.class_index);
-
-    // 状态推断
-    // 唯一匹配 → Confirmed(None)；映射失败 0/多 → NeedsReview(Mapping)
+    // 状态推断：有物种结论 → Confirmed(None)；没落到物种 → NeedsReview(Mapping)
     // （与测试共用 stage_to_status，避免测试复制一份映射逻辑）
-    let (status, failure_stage) = stage_to_status(map_stage, false);
+    let (status, failure_stage) = stage_to_status(classified.failure, false);
 
     Recognition {
         status,
-        bird,
-        class_index: Some(classified.class_index),
-        confidence: Some(classified.confidence),
+        taxon: classified.taxon,
+        class_index: classified.class_index,
+        confidence: classified.confidence,
         bbox: Some(bbox),
-        eye_sharpness,
-        eye_bbox,
-        candidates,
+        candidates: classified.candidates,
         failure_stage,
         recognized_at,
     }
@@ -588,38 +516,6 @@ pub(crate) fn stage_to_status(
             (RecognitionStatus::NeedsReview, stage)
         }
     }
-}
-
-/// 运行鸟眼锐度阶段：眼检测 → 锐度计算。
-///
-/// 任何一步失败均返回 (None, None)，不影响管线主状态。
-/// `shared_640` 为检测阶段的共享 640×640 缩放（可选，检测路径传 `Some`，
-/// 框选路径无检测阶段传 `None` 由眼自行缩放）。
-fn run_eye_stage(
-    eye_session: &mut Session,
-    img: &DynamicImage,
-    shared_640: Option<&DynamicImage>,
-    bird_bbox: BBox,
-) -> (Option<f32>, Option<BBox>) {
-    // 眼检测（复用共享缩放时避免第二次全图缩放）
-    let eye_bbox = match shared_640 {
-        Some(shared) => eye::detect_eye_shared(eye_session, img, shared, bird_bbox),
-        None => eye::detect_eye(eye_session, img, bird_bbox),
-    };
-    let eye_bbox = match eye_bbox {
-        Ok(Some(bbox)) => bbox,
-        Ok(None) => return (None, None),
-        Err(e) => {
-            // 系统错误（ORT 推理失败/OOM）与「确实没检出眼」必须可区分
-            tracing::warn!("[识别] 眼检测失败，跳过锐度: {e}");
-            return (None, None);
-        }
-    };
-
-    // 锐度计算
-    let sharpness = sharpness::eye_sharpness(img, &eye_bbox);
-
-    (sharpness, Some(eye_bbox))
 }
 
 // ---------------------------------------------------------------------------

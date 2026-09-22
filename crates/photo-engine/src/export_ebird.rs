@@ -2,7 +2,7 @@
 //!
 //! 数据源 = 文件夹级 `.pt/data.db`（folder_db）：
 //! - `recognition` 表：Confirmed 全量计入；NeedsReview 计入但备注列标注「待确认」；
-//!   Unrecognized 与无鸟种名（bird None）的行不计入
+//!   Unrecognized 与无物种结论（taxon None）的行不计入
 //! - `exif_cache` 表：拍摄日期（date_time_original → YYYY-MM-DD），缺失/解析失败
 //!   回退文件 mtime（照抄 import.rs 的 fallback 逻辑）；GPS 度分秒 → 十进制度
 //!   （photo_domain::dms_to_decimal，南纬/西经为负）
@@ -10,6 +10,8 @@
 //! 聚合键 = (中文名, 学名, 日期)：同日多张合并计数（count 累加），跨日拆分。
 //! 导出范围 = 单个文件夹（不读 global_db 跨文件夹索引；任务契约）。
 //! CSV 输出 = UTF-8 BOM + RFC 4180 转义（逗号/引号/换行），手写转义不引入新依赖。
+//!
+//! 只对鸟纲有意义（其它类群导 eBird 没意义），是否展示入口由 UI 侧负责门控。
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
@@ -30,10 +32,10 @@ pub enum EbirdError {
     Io(#[from] std::io::Error),
 }
 
-/// eBird CSV 单行（按（鸟种, 日期）聚合后的观测记录）。
+/// eBird CSV 单行（按（物种, 日期）聚合后的观测记录）。
 ///
-/// `species_sci` 来自识别行的 BirdMatch::latin_name——注意 folder_db 持久化只存
-/// 中文名（bird_name），重读时学名为空串；需学名的消费方可自行经名录库补全。
+/// `species_sci` 来自识别行的 TaxonMatch::latin_name（folder_db 已持久化学名，
+/// BioCLIP 预测不在名录里时中文名可能为空，此时学名是唯一物种标识）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct EbirdRow {
     pub species_cn: String,
@@ -61,7 +63,7 @@ struct FileRow {
 
 /// 按文件夹汇总 eBird 记录：读 recognition + exif_cache，按（鸟种, 日期）聚合。
 ///
-/// - Confirmed / NeedsReview 且 bird 匹配成功（有鸟种名）的行参与聚合；
+/// - Confirmed / NeedsReview 且 taxon 匹配成功（有物种名）的行参与聚合；
 ///   NeedsReview 组内计入并标注「待确认」
 /// - 日期 = EXIF date_time_original（YYYY-MM-DD），回退文件 mtime（照 import.rs）
 /// - GPS = EXIF 度分秒 → 十进制；组内取首个有 GPS 的坐标（按 rel_path 升序确定性）
@@ -84,16 +86,16 @@ pub fn build_rows(dir: &Path) -> Result<Vec<EbirdRow>, EbirdError> {
             RecognitionStatus::NeedsReview => true,
             RecognitionStatus::Unrecognized => continue,
         };
-        // 无鸟种名（映射失败/未检出）无法构成记录行，跳过
-        let Some(bird) = rec.bird.as_ref() else { continue };
+        // 无物种结论（映射失败/未检出）无法构成记录行，跳过
+        let Some(taxon) = rec.taxon.as_ref() else { continue };
 
         let full_path = dir.join(&rel_path);
         let exif = exif_norm.get(&norm_key(&full_path.to_string_lossy()));
         let (lat, lon) = row_gps(exif);
         file_rows.push(FileRow {
             rel_path,
-            cn: bird.cn_name.clone(),
-            sci: bird.latin_name.clone(),
+            cn: taxon.cn_name.clone(),
+            sci: taxon.latin_name.clone(),
             date: row_date(&full_path, exif),
             lat,
             lon,
@@ -266,22 +268,22 @@ fn norm_key(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photo_domain::{BirdMatch, Recognition, RecognitionFailureStage};
+    use photo_domain::{CnLevel, Recognition, RecognitionFailureStage, TaxonMatch};
 
-    /// 测试用识别行（bird 匹配成功，含学名）
+    /// 测试用识别行（taxon 匹配成功，含学名）
     fn rec(status: RecognitionStatus, cn: &str, latin: &str) -> Recognition {
         Recognition {
             status,
-            bird: Some(BirdMatch {
-                bird_id: 1,
+            taxon: Some(TaxonMatch {
+                taxon_id: Some(1),
                 cn_name: cn.to_string(),
                 latin_name: latin.to_string(),
+                cn_level: CnLevel::Species,
+                ranks: Vec::new(),
             }),
             class_index: Some(100),
             confidence: Some(95.0),
             bbox: None,
-            eye_sharpness: None,
-            eye_bbox: None,
             candidates: Vec::new(),
             failure_stage: RecognitionFailureStage::None,
             recognized_at: "2024-01-01T00:00:00Z".to_string(),
@@ -366,16 +368,16 @@ mod tests {
     }
 
     #[test]
-    fn test_build_rows_skips_unrecognized_and_no_bird() {
-        // 真实 folder_db：Unrecognized（有鸟种名）与 bird None（NeedsReview）均不计入，
-        // 只有 Confirmed + bird 匹配成功的行进入结果
+    fn test_build_rows_skips_unrecognized_and_no_taxon() {
+        // 真实 folder_db：Unrecognized（有物种名）与 taxon None（NeedsReview）均不计入，
+        // 只有 Confirmed + taxon 匹配成功的行进入结果
         let dir = tempfile::tempdir().unwrap();
         let db = FolderDb::open_in_dir(dir.path()).unwrap();
         db.upsert_recognition("a.jpg", &rec(RecognitionStatus::Unrecognized, "麻雀", "Passer montanus"))
             .unwrap();
-        let mut no_bird = rec(RecognitionStatus::NeedsReview, "麻雀", "Passer montanus");
-        no_bird.bird = None;
-        db.upsert_recognition("b.jpg", &no_bird).unwrap();
+        let mut no_taxon = rec(RecognitionStatus::NeedsReview, "麻雀", "Passer montanus");
+        no_taxon.taxon = None;
+        db.upsert_recognition("b.jpg", &no_taxon).unwrap();
         db.upsert_recognition("c.jpg", &rec(RecognitionStatus::Confirmed, "乌鸫", "Turdus merula"))
             .unwrap();
 

@@ -145,7 +145,7 @@ CaptureMeta {                        // 每图片文件一条；扫描不配对
 |---|---|---|
 | 权威副本 | `items: CaptureMeta[]`、`directory`、缩略图版本号 | 扫描/重扫/回滚时整体替换 |
 | 纯派生（零 IPC） | 筛选结果下标、排序、堆叠组、连拍组、选中集、缩放平移、可见行 | 由权威副本 + 用户输入同步算出 |
-| 任务状态机 | 扫描 / 识别 / 批量 / 导出 / 导入 / 重复检测 / 技术分 | 事件驱动 + 哨兵位 |
+| 任务状态机 | 扫描 / 识别 / 批量 / 导出 / 导入 / 重复检测 | 事件驱动 + 哨兵位 |
 
 ### 3.2 派生管线（顺序不可换）
 
@@ -246,8 +246,6 @@ Stats → 空态(无目录) → Slideshow → Preview → Grid
 | `FileSize` | 数值 | null → 0 |
 | `Rating` | 0–5 数值 | None = 0 |
 | `Modified` | 用 `dateTaken` 代理 mtime（桌面端可换真实文件 mtime） | null 排最前 |
-| `EyeSharpness` | 数值升序 | **null 排最前** |
-| `Quality` | 数值升序（技术分来自内存表） | **null 排最后**（未评分不参与机筛） |
 
 降序 = 外层整体反转比较结果（不是各自写一遍降序逻辑）。
 排序必须**稳定**（同键保持 display 原序）。
@@ -448,7 +446,7 @@ mutateOptimistic(paths, apply, remote):
 | 键 | 动作 |
 |---|---|
 | `B` / `Ctrl+B` / `Ctrl+Shift+B` | 识别当前所选 / 识别全部未识别 / 重新识别全部 |
-| `V` | 检测框（含鸟眼角标） |
+| `V` | 检测框 |
 | `F` | 对焦点叠加（仅预览态） |
 | `O` | 剪切警告叠加（仅预览态） |
 
@@ -729,7 +727,7 @@ UI：细进度条 + n/m + 当前文件名 + ✕ 取消（Esc 同义）
 
 **② 目录任务追踪（per-directory task tracker）**
 
-批量识别 / 重复检测 / 技术分三类任务各持一个：
+批量识别 / 重复检测两类任务各持一个：
 - 防并发（同类型任务运行中拒绝再启动）
 - 切目录时**只取消该任务**，不复用旧令牌
 - 旧 worker 完成后**不能**复位新任务的状态
@@ -795,8 +793,7 @@ UI：细进度条 + n/m + 当前文件名 + ✕ 取消（Esc 同义）
 
 **折叠态一行（36px，横向滚动）**：
 `筛选` 折叠按钮（有激活筛选时 accent + 加粗）→ **摘要 chips**（每个带 × 单独清除）→ 弹性空白 →
-`排序` 下拉（文件名 / 拍摄日期 / 文件大小 / 评分 / 修改时间 / 眼锐度 / 技术分）→ 升降序 →
-`技术分` 触发按钮（进行中显示 `n/m`）→ `每行图片数 2–5` 下拉。
+`排序` 下拉（文件名 / 拍摄日期 / 文件大小 / 评分 / 修改时间）→ 升降序 → `每行图片数 2–5` 下拉。
 
 **展开态**按条件组排布（可换行，组间发丝分隔）：
 
@@ -817,15 +814,22 @@ UI：细进度条 + n/m + 当前文件名 + ✕ 取消（Esc 同义）
 ### 9.5 网格
 
 **Cell 内容（自外向内）**：
-- 缩略图（`object-cover` 正方裁切）。
+- 缩略图（`object-cover` 正方裁切：**边长 = 网格容器实测宽度按列均分**——容器一宽图片跟着变大，绝不会被裁成扁横条）。
 - 非图片格式（OTHER）显示**居中格式徽标**而非破图。
 - 左上：格式徽标（半透明黑底；RAW 显示扩展名如 `NEF`）。
 - 右上：旗标角标（18px 圆，入选绿底白勾 / 淘汰红底白叉）。
 - 右下：技术质量分角标（≥0.75 绿点 / <0.4 红点，中档不显示）。
 - 左下：连拍徽标（**仅单成员组**，`Layers + n`；最优帧带 amber 皇冠）。
 - 底部：**堆叠成员带**（多成员组，见 §9.5.1）。
-- 信息区（56px）：文件名 / 文件大小 + 逐位彩虹五星 / 鸟种状态行（常驻 18px）。
+- 信息区（56px）：文件名（`CaptureMeta::display_name()`，**含真实扩展名**；列窄时截断，悬停整格看全名）/ 文件大小 + 逐位彩虹五星 / 鸟种状态行（常驻 18px）。
 - 底缘：3px 色标条。
+
+**实现约定（GPUI）**：行高必须由 cell 宽度**算出确定像素值**再喂给 `uniform_list`——它按 item 的
+**MinContent 高度**探测行高，任何"高度反过来跟宽度联动"的写法（`aspect_ratio`）都会探测失败
+（首行被压扁、后续行互相叠）。做法：边长取**列表自己的视口宽度**（`grid_scroll.viewport_bounds()`，与滚动条同源），拿不到时退回网格根节点 `on_prepaint` 实测容器宽（回填
+`AppState.grid_viewport_size`（首帧按窗口 − 活动栏 − 停靠区估算），边长 =（内容宽 − 列间距）/ 列数；
+图片区与信息区都要 `flex_shrink_0`，否则会被 flex 压缩、行高同样被探小。
+**cell 不设 `min_w`**：`uniform_list` 横向不滚动，cell 一旦有最小宽度，列多/面板窄时整行就会溢出、最后一列被裁。
 
 **选中态**：2px accent 环 + 2px 间隙（用**环**而非边框——与 cell 边缘留呼吸缝且不撑动布局）；
 锚点项 100% 不透明，其余 70%。
@@ -854,7 +858,6 @@ offset / content_size 推导，滚轮、thumb 拖拽、键盘精确滚动三处�
 | 叠加 | 键 | 形态 |
 |---|---|---|
 | 检测框 | `V` | 2px accent 边框 + 20% 填充 |
-| 鸟眼角标 | 随 `V` | 眼框**四角 L 形臂条**（臂长随框大小夹紧 4–14px，不遮眼） |
 | 对焦点 | `F` | Point = 十字准星（臂长 14px）/ Circle = 圆 / Rectangle = 框，用 `focus` 色 |
 | 剪切警告 | `O` | 同尺寸 PNG 叠加，70% 不透明 |
 | 框选实时框 | — | `Shift`+拖拽，accent 实框 |
@@ -883,8 +886,8 @@ offset / content_size 推导，滚轮、thumb 拖拽、键盘精确滚动三处�
 2. **拍摄信息**：默认只显示 **2×2 曝光四格**（焦距 / 光圈 / 快门 / ISO，发丝网格 + 等宽加粗）；
    `更多/收起` 展开：相机、镜头、日期、位置（十进制 6 位 + 地图链接）、对焦点（形状 + 归一化坐标）。
 3. **识别**：状态 chip（已识别绿 / 待复核橙 / 未检测到灰）+ 鸟名 + 置信度条
-   （≥80% 绿 / ≥50% 橙 / <50% 蓝）+ 失败阶段中文 + 最接近候选 + 眼锐度（tooltip 展示评分公式）
-   + 动作行 `纠正…` / `重新识别` / `显示或隐藏检测框`。
+   （≥80% 绿 / ≥50% 橙 / <50% 蓝）+ 失败阶段中文 + 最接近候选
+   + 动作行 `重新识别` / `显示或隐藏检测框`。
 4. **评分**：五星点选（点当前星 = 清除）+ `清除`。
 5. **颜色标签**：五个色圆 + "无"圆，选中项加前景色描边。
 6. **旗标**：入选 / 淘汰 / 无 三按钮互斥。
@@ -942,8 +945,7 @@ offset / content_size 推导，滚轮、thumb 拖拽、键盘精确滚动三处�
 | **导入** | 宽 ≤ 576，高 ≤ 85vh | **仅 ×**（遮罩/Esc 不关） | 顶部 `导入 / 添加` 分段；流程见 §10.3 |
 | **导出** | 宽 512，高 ≤ 85vh | 遮罩 / `Esc` / × | 预设下拉（新建/保存/删除）+ 长边 + JPEG 质量滑杆 + 命名模板（实时预览第一张）+ 目标目录 |
 | **重复照片** | 高 576，宽 ≤ 832 | 遮罩 / `Esc` / × | 阈值下拉（6/8/10/12/16，默认 10）+ 检测按钮 + 分组卡片横排缩略图 + "保留第一张，其余标 Rejected" |
-| **纠错** | 宽 416，高 ≤ 85vh | 遮罩 / `Esc` / × | 当前识别条 + Top-5 候选 + 常用 chips（本机高频）+ 名录搜索（300ms 防抖，中文/拼音/拉丁）+ 应用（N 张） |
-| **连拍选优确认** | 宽 ~448 | 遮罩 / `Esc` | 说明规则（眼锐度→文件大小→路径序）+ "标记 Reject" 危险按钮 |
+| **连拍选优确认** | 宽 ~448 | 遮罩 / `Esc` | 说明规则（文件大小→路径序）+ "标记 Reject" 危险按钮 |
 | **批量操作** 3 个 | 目标目录 md / 删除 md / 进度 sm | 进度不可关 | 见 §10.4 |
 
 **设置三页**
@@ -1016,13 +1018,12 @@ offset / content_size 推导，滚轮、thumb 拖拽、键盘精确滚动三处�
 同一面板还有：批量重命名（模板 + 起始序号 + 实时预览）与"导出…"
 ```
 
-### 10.5 识别与纠错
+### 10.5 识别
 
 ```
 B（所选）/ Ctrl+B（全部未识别）/ Ctrl+Shift+B（重新识别全部）/ 左活动栏按钮
 → 状态栏进度（n/m + 当前文件名 + ✕/Esc 取消）→ 完成摘要 4s
 → 网格 chip / 右栏识别卡；单图失败细分阶段（检测/分类/名录映射/源图不可用）
-纠错："纠正…"或右键"纠正鸟种…" → Top-5 候选 / 常用 chips / 名录搜索 → 应用（批量 N 张）
 ```
 
 ### 10.6 其他
@@ -1030,8 +1031,7 @@ B（所选）/ Ctrl+B（全部未识别）/ Ctrl+Shift+B（重新识别全部）
 - **导出**：预设 / 长边 / 质量 / 模板（实时预览）/ 目标目录 → 进度 → toast。
 - **重复检测**：左栏底部 → 阈值 → 检测（dHash + 汉明距离贪心聚类）→ 分组卡片 →
   "保留第一张，其余标 Rejected"（走旗标链路，网格/筛选即时生效）。
-- **统计**：`T` → 顶部四卡（鸟种/照片/文件夹/平均命中率）+ 左栏鸟种排行（占比条 + 首见~末见 + 平均锐度）
-  + 命中率条形图（弱项在前，样本 < 3 标"样本少"）+ 右栏该鸟种照片网格；
+- **统计**：`T` → 顶部三卡（鸟种/照片/文件夹）+ 左栏鸟种排行（占比条 + 首见~末见）+ 右栏该鸟种照片网格；
   双击照片 → 切到所在目录并选中 → 退出统计回网格；"导出记录" → CSV。
 - **地图**：`M` → 全屏；弹窗"定位到网格" → 关地图 + 回网格 + 选中。
 
@@ -1207,7 +1207,7 @@ Tauri 层做的事，在 GPUI 里各有对应：
 
 6. 面板宽度双轨（本地存储 vs 配置字段），不会跨设备同步。
 7. 导出/导入目标目录互不记忆。
-8. 技术分/重复检测的阈值与结果都不落盘，重启后需重算。
+8. 重复检测的阈值与结果都不落盘，重启后需重算。
 
 ### 维护约定（改这份手册的规则）
 
@@ -1228,12 +1228,12 @@ Tauri 层做的事，在 GPUI 里各有对应：
 | 目录与扫描 | `pick_directory` `scan_directory` `get_captures` `list_subdirs` `list_favorites` `add_favorite` `remove_favorite` `list_recent` `remove_recent` |
 | 标记 | `set_rating` `set_flag` `set_color_label` `set_keywords` |
 | 文件操作 | `delete_captures` `batch_op_preview` `batch_op_execute` `undo_batch_operation` `batch_rename` `export_captures` `export_adjusted` |
-| 识别 | `recognize_captures` `cancel_recognition` `get_recognition` `search_catalog` `correct_recognition` `list_bird_species` |
+| 识别 | `recognize_captures` `cancel_recognition` `get_recognition` |
 | 图像数据 | `get_histogram` `get_clipping_mask` `get_adjustments` `set_adjustments` |
 | 配置与系统 | `get_app_config` `set_app_config` `open_config_file` `list_system_fonts` `copy_image_to_clipboard` `copy_text_to_clipboard` `log` `get_log_file_path` `open_log_file` `open_log_directory` |
-| 统计（全局索引） | `get_species_stats` `get_species_photos` `get_correction_stats` `get_frequent_species` `export_bird_records` |
+| 统计（全局索引） | `get_species_stats` `get_species_photos` `export_bird_records` |
 | 导入 | `list_import_drives` `take_pending_import_path` `scan_import_source` `plan_import` `execute_import` |
-| 重复与技术分 | `find_duplicates` `compute_quality_scores` `get_quality_scores` |
+| 重复检测 | `find_duplicates` |
 
 ## 附录 B：纯函数自检清单（移植后必须有的最小测试）
 
@@ -1249,8 +1249,6 @@ filterCaptures:
 hasActiveFilters: 全默认 → false；任一字段非默认 → true
 
 compareCaptures:
-  · EyeSharpness: null 排最前
-  · Quality:      null 排最后
   · 稳定性：同键保持原序
 
 groupStacks:
@@ -1264,7 +1262,7 @@ pickPrimary: 组内有 jpg + nef → 选 jpg；纯 RAW → 组内首个
 computeBurstGroups:
   · size < 2 不登记
   · 时间字段越界（13 月）→ 视为 null
-pickBestFrame: 三键全并列 → 路径字典序决定，且重复调用结果一致
+pickBestFrame: 文件大小并列 → 路径字典序决定，且重复调用结果一致
 
 clampPanAxis: disp <= container → 0
 fitScale: 小图 → 1.0（不放大）

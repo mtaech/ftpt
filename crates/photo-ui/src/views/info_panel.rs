@@ -3,7 +3,7 @@
 //! - Info Tab（七张卡）：
 //!   1. Hero：直方图与基本文件信息
 //!   2. 拍摄信息：2x2 曝光四格（焦距/光圈/快门/ISO）+ 扩展信息
-//!   3. 识别：状态 Chip、鸟种名、置信度条、眼锐度、纠错/重测
+//!   3. 识别：状态 Chip、物种名、置信度条、重测
 //!   4. 评分：五星点选
 //!   5. 颜色标签：红黄绿蓝紫 + 无
 //!   6. 旗标：入选 / 淘汰 / 无
@@ -58,11 +58,19 @@ pub fn render_info_tab(
                 .gap_1p5()
                 .child(
                     div()
+                        .id("info-file-name")
                         .font_semibold()
                         .text_xs()
                         .text_color(cx.theme().foreground)
                         .truncate()
-                        .child(meta.base_name.clone()),
+                        .tooltip({
+                            let full = meta.display_name();
+                            move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(full.clone())
+                                    .build(window, cx)
+                            }
+                        })
+                        .child(meta.display_name()),
                 )
                 .child(
                     h_flex()
@@ -145,7 +153,7 @@ pub fn render_info_tab(
                         ),
                 ),
         )
-        // ── 3. 鸟类识别卡 ──
+        // ── 3. 物种识别卡 ──
         .child(
             crate::theme::section(cx)
                 .gap_2()
@@ -158,7 +166,7 @@ pub fn render_info_tab(
                                 .text_xs()
                                 .font_medium()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("鸟类识别"),
+                                .child("物种识别"),
                         )
                         .child(match meta.recognition_status {
                             Some(RecognitionStatus::Confirmed) => {
@@ -183,33 +191,22 @@ pub fn render_info_tab(
                                 .text_sm()
                                 .text_color(cx.theme().foreground)
                                 .child(
-                                    meta.bird_name
+                                    meta.taxon_name
                                         .clone()
                                         .unwrap_or_else(|| "无记录".to_string()),
                                 ),
                         )
-                        .child(if let Some(conf) = meta.bird_confidence {
+                        .child(if let Some(conf) = meta.taxon_confidence {
                             div()
                                 .text_xs()
                                 .font_medium()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(format!("{:.1}%", conf * 100.0))
+                                // Recognition.confidence 本身就是 0–100 的百分数，别再乘 100
+                                .child(format!("{conf:.1}%"))
                         } else {
                             div().child("")
                         }),
                 )
-                .when(meta.eye_sharpness.is_some(), |this| {
-                    let sharpness = meta.eye_sharpness.unwrap();
-                    this.child(
-                        h_flex()
-                            .items_center()
-                            .justify_between()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("鸟眼锐度")
-                            .child(format!("{sharpness:.2}")),
-                    )
-                })
                 .child(
                     h_flex()
                         .items_center()

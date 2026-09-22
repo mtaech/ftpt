@@ -70,7 +70,8 @@ fn main() {
     };
 
     eprintln!("加载模型: {}", models_dir.display());
-    let mut recognizer = Recognizer::new(&models_dir, &catalog_db).unwrap_or_else(|e| {
+    let mut recognizer =
+        Recognizer::new(&models_dir, &catalog_db).unwrap_or_else(|e| {
         eprintln!("初始化识别器失败: {e}");
         std::process::exit(1);
     });
@@ -89,10 +90,13 @@ fn main() {
     println!("--- 手动框选结果（{:?}）---", started.elapsed());
     println!("status:        {:?}", result.status);
     println!("failure_stage: {:?}", result.failure_stage);
-    if let Some(bird) = &result.bird {
+    if let Some(t) = &result.taxon {
         println!(
-            "bird:          {} ({}) [id={}]",
-            bird.cn_name, bird.latin_name, bird.bird_id
+            "taxon:         {} ({}) [id={:?}, cn_level={}]",
+            t.display_name(),
+            t.latin_name,
+            t.taxon_id,
+            t.cn_level.as_str()
         );
     }
     if let Some(conf) = result.confidence {
@@ -107,9 +111,9 @@ fn main() {
     println!("candidates:    {}", result.candidates.len());
     for c in &result.candidates {
         let name = c
-            .bird
+            .taxon
             .as_ref()
-            .map(|b| b.cn_name.as_str())
+            .map(|t| t.display_name())
             .unwrap_or("<未映射>");
         println!("  - cls={} {name} {:.1}%", c.class_index, c.confidence);
     }

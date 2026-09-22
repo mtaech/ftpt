@@ -2,8 +2,7 @@
 //!
 //! - 图片区：缩放平移视口，图源 master / full
 //! - 叠加层（指针事件穿透）：
-//!   - 鸟体检测框（V 键）：2px accent 描边 + 20% 填充
-//!   - 鸟眼角标：四角 L 形臂条（4–14px，不遮眼）
+//!   - 主体检测框（V 键）：2px accent 描边 + 20% 填充
 //!   - 对焦点（F 键）：十字准星（focus 颜色）
 //!   - 剪切警告（O 键）：高光溢出与死黑叠加
 //! - 底部胶囊工具条：
@@ -336,9 +335,9 @@ pub fn render_photo_preview(
                                 .bg(cx.theme().muted)
                                 .into_any_element()
                         })
-                        // ── 叠加层：检测框与鸟眼角标 ──
-                        .when(state.show_bbox && meta.bird_bbox.is_some(), |this| {
-                            let bbox = meta.bird_bbox.as_ref().unwrap();
+                        // ── 叠加层：主体检测框 ──
+                        .when(state.show_bbox && meta.taxon_bbox.is_some(), |this| {
+                            let bbox = meta.taxon_bbox.as_ref().unwrap();
                             let bx = bbox.x1 as f64 * disp_w;
                             let by = bbox.y1 as f64 * disp_h;
                             let bw = (bbox.x2 - bbox.x1) as f64 * disp_w;

@@ -161,12 +161,10 @@ pub struct CaptureMeta {
     // --- 关键词标签字段（从文件夹数据库 keywords 真相表填充，空 = 无标签） ---
     pub keywords: Vec<String>,
     // --- 识别摘要字段（从文件夹数据目录的 recognition 表填充，None = 未识别） ---
-    pub bird_name: Option<String>,
-    pub bird_confidence: Option<f32>,
+    pub taxon_name: Option<String>,
+    pub taxon_confidence: Option<f32>,
     pub recognition_status: Option<RecognitionStatus>,
-    pub bird_bbox: Option<BBox>,
-    /// 鸟眼锐度分（与 Recognition::eye_sharpness 同源；无识别记录/无眼/评分失败为 None）
-    pub eye_sharpness: Option<f32>,
+    pub taxon_bbox: Option<BBox>,
 }
 
 /// 从 Capture 构造 CaptureMeta。注意 index 固定为 0（历史调用约定，
@@ -235,11 +233,10 @@ impl CaptureMeta {
             color_label: ColorLabel::None,
             flag: None,
             keywords: Vec::new(),
-            bird_name: None,
-            bird_confidence: None,
+            taxon_name: None,
+            taxon_confidence: None,
             recognition_status: None,
-            bird_bbox: None,
-            eye_sharpness: None,
+            taxon_bbox: None,
         }
     }
 
@@ -282,11 +279,10 @@ impl CaptureMeta {
 
     /// 填充识别摘要字段（由调用方负责从文件夹数据目录读取 Recognition）
     pub fn enrich_with_recognition(&mut self, recognition: &Recognition) {
-        self.bird_name = recognition.bird.as_ref().map(|b| b.cn_name.clone());
-        self.bird_confidence = recognition.confidence;
+        self.taxon_name = recognition.taxon.as_ref().map(|t| t.cn_name.clone());
+        self.taxon_confidence = recognition.confidence;
         self.recognition_status = Some(recognition.status);
-        self.bird_bbox = recognition.bbox;
-        self.eye_sharpness = recognition.eye_sharpness;
+        self.taxon_bbox = recognition.bbox;
     }
 }
 
@@ -329,9 +325,9 @@ pub enum Flag {
 pub struct FilterCriteria {
     /// 按文件类型过滤
     pub format_filter: Option<ImageFormat>,
-    /// 按鸟种中文名过滤（多选，空 = 不过滤）
+    /// 按物种中文名过滤（多选，空 = 不过滤）
     #[serde(default)]
-    pub bird_names: Vec<String>,
+    pub taxon_names: Vec<String>,
     /// 按日期范围过滤
     pub date_from: Option<chrono::NaiveDate>,
     pub date_to: Option<chrono::NaiveDate>,
@@ -353,7 +349,7 @@ impl FilterCriteria {
     /// 无筛选时操作集 = 全部文件，批量文件操作应拒绝执行（防误操作）。
     pub fn has_active_filter(&self) -> bool {
         self.format_filter.is_some()
-            || !self.bird_names.is_empty()
+            || !self.taxon_names.is_empty()
             || self.date_from.is_some()
             || self.date_to.is_some()
             || self.min_rating.is_some()
@@ -373,12 +369,8 @@ pub enum SortBy {
     FileSize,
     Rating,
     Modified,
-    /// 鸟眼锐度分排序（None 排最前；排序逻辑在前端 filter.ts，Rust 侧仅做序列化传递）
-    EyeSharpness,
-    /// 技术质量机筛分排序（QualityScore 批次；None = 未评分排最后，与 EyeSharpness
-    /// 的 None 排最前语义相反；排序逻辑在前端 filter.ts，Rust 侧仅做序列化传递）
-    Quality,
 }
+
 
 /// 排序方向
 #[cfg_attr(feature = "specta", derive(specta::Type))]
@@ -716,30 +708,83 @@ impl RecognitionFailureStage {
     }
 }
 
-/// 鸟种匹配：分类器类别号经名录库映射到的具体鸟种
+/// 物种匹配：识别器给出的一个物种结论（见 docs/adr/0008）。
+///
+/// BioCLIP 直接以标签的学名为答案（名录里查得到才有 taxon_id）。所以
+/// **模型的结论不依赖本地名录是否有这个物种** —— 名录只提供中文名与主键。
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BirdMatch {
-    /// 名录库 animal_info 主键
-    pub bird_id: i64,
-    /// 中文名
+pub struct TaxonMatch {
+    /// 名录库 animal_info 主键（名录里没有这个物种时为 None）
+    pub taxon_id: Option<i64>,
+    /// 中文名（空串 = 三个中文名源都没收这个名字）
     pub cn_name: String,
-    /// 学名（拉丁名）
+    /// 学名（拉丁名，双名）
     pub latin_name: String,
+    /// 中文名来自哪一级（种 / 属 / 科 / 无）
+    pub cn_level: CnLevel,
+    /// 七级分类 [界, 门, 纲, 目, 科, 属, 种]，空串 = 该级缺
+    pub ranks: Vec<String>,
 }
 
-/// Top-N 候选（含未映射项：bird 为 None 表示该类别号未映射到名录）
+impl TaxonMatch {
+    /// 展示名：有中文名就用中文名，没有就退到学名。
+    /// 全量标签空间里 26% 的类群三个中文名源都收不到，这类只能显示学名。
+    pub fn display_name(&self) -> &str {
+        if self.cn_name.is_empty() { &self.latin_name } else { &self.cn_name }
+    }
+}
+
+/// 中文名的级别：识别器给的是学名，中文名按 种 → 属 → 科 三级回落
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CnLevel {
+    /// 种级中文名
+    Species,
+    /// 回落到属级中文名
+    Genus,
+    /// 回落到科级中文名
+    Family,
+    /// 三级都没有（只能显示学名）
+    Missing,
+}
+
+impl CnLevel {
+    /// 数据库存储文本
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Species => "species",
+            Self::Genus => "genus",
+            Self::Family => "family",
+            Self::Missing => "missing",
+        }
+    }
+
+    /// 从数据库文本解析
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "species" => Some(Self::Species),
+            "genus" => Some(Self::Genus),
+            "family" => Some(Self::Family),
+            "missing" => Some(Self::Missing),
+            _ => None,
+        }
+    }
+}
+
+/// Top-N 候选（含未映射项：taxon 为 None 表示该候选没落到任何物种上）
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BirdCandidate {
-    /// bird_model 原始类别号
+pub struct TaxonCandidate {
+    /// 识别器原始类别号（BioCLIP 标签下标）
     pub class_index: u32,
     /// 置信度（0–100）
     pub confidence: f32,
-    /// 映射到的鸟种（未映射为 None）
-    pub bird: Option<BirdMatch>,
+    /// 该候选对应的物种（未命中为 None）
+    pub taxon: Option<TaxonMatch>,
 }
 
 /// 一次识别的完整结果（不含路径；路径是持久化层的键）
@@ -748,20 +793,16 @@ pub struct BirdCandidate {
 #[serde(rename_all = "camelCase")]
 pub struct Recognition {
     pub status: RecognitionStatus,
-    /// Top-1 鸟种匹配（mapping 失败 / 未检出时为 None）
-    pub bird: Option<BirdMatch>,
+    /// Top-1 物种匹配（未检出 / 分类失败时为 None）
+    pub taxon: Option<TaxonMatch>,
     /// Top-1 原始类别号（诊断用）
     pub class_index: Option<u32>,
     /// Top-1 置信度（0–100）
     pub confidence: Option<f32>,
     /// 检测框（检测失败为 None）
     pub bbox: Option<BBox>,
-    /// 鸟眼锐度分（连续，仅保证单调性，阈值后置；无鸟/有鸟无眼/评分失败为 None）
-    pub eye_sharpness: Option<f32>,
-    /// 评分所用眼框（归一化坐标，相对全图；无锐度分为 None）
-    pub eye_bbox: Option<BBox>,
     /// Top-5 候选（含 Top-1 自身除外的备选；分类失败为空）
-    pub candidates: Vec<BirdCandidate>,
+    pub candidates: Vec<TaxonCandidate>,
     pub failure_stage: RecognitionFailureStage,
     /// ISO8601 时间戳
     pub recognized_at: String,
@@ -950,11 +991,10 @@ mod tests {
             color_label: ColorLabel::None,
             flag: None,
             keywords: Vec::new(),
-            bird_name: None,
-            bird_confidence: None,
+            taxon_name: None,
+            taxon_confidence: None,
             recognition_status: None,
-            bird_bbox: None,
-            eye_sharpness: None,
+            taxon_bbox: None,
         };
         cm.enrich_with_xmp(&xmp);
         assert_eq!(cm.rating, Rating::Three);
@@ -1209,16 +1249,16 @@ mod tests {
     fn test_enrich_with_recognition_confirmed() {
         let rec = Recognition {
             status: RecognitionStatus::Confirmed,
-            bird: Some(BirdMatch {
-                bird_id: 42,
+            taxon: Some(TaxonMatch {
+                taxon_id: Some(42),
                 cn_name: "大山雀".into(),
                 latin_name: "Parus major".into(),
+                cn_level: CnLevel::Species,
+                ranks: vec![],
             }),
             class_index: Some(1066),
             confidence: Some(85.3),
             bbox: Some(BBox::new(0.1, 0.2, 0.8, 0.9)),
-            eye_sharpness: Some(2.35),
-            eye_bbox: Some(BBox::new(0.3, 0.3, 0.4, 0.4)),
             candidates: vec![],
             failure_stage: RecognitionFailureStage::None,
             recognized_at: "2026-07-28T12:00:00Z".into(),
@@ -1233,23 +1273,20 @@ mod tests {
             primary_index: 0,
         });
         cm.enrich_with_recognition(&rec);
-        assert_eq!(cm.bird_name.as_deref(), Some("大山雀"));
-        assert_eq!(cm.bird_confidence, Some(85.3));
+        assert_eq!(cm.taxon_name.as_deref(), Some("大山雀"));
+        assert_eq!(cm.taxon_confidence, Some(85.3));
         assert_eq!(cm.recognition_status, Some(RecognitionStatus::Confirmed));
-        assert!(cm.bird_bbox.is_some());
-        assert_eq!(cm.eye_sharpness, Some(2.35));
+        assert!(cm.taxon_bbox.is_some());
     }
 
     #[test]
     fn test_enrich_with_recognition_unrecognized_has_no_bird_fields() {
         let rec = Recognition {
             status: RecognitionStatus::Unrecognized,
-            bird: None,
+            taxon: None,
             class_index: None,
             confidence: None,
             bbox: None,
-            eye_sharpness: None,
-            eye_bbox: None,
             candidates: vec![],
             failure_stage: RecognitionFailureStage::Detection,
             recognized_at: "2026-07-28T12:00:00Z".into(),
@@ -1264,32 +1301,19 @@ mod tests {
             primary_index: 0,
         });
         cm.enrich_with_recognition(&rec);
-        assert_eq!(cm.bird_name, None);
+        assert_eq!(cm.taxon_name, None);
         assert_eq!(cm.recognition_status, Some(RecognitionStatus::Unrecognized));
-        assert_eq!(cm.bird_bbox, None);
-        assert_eq!(cm.eye_sharpness, None);
+        assert_eq!(cm.taxon_bbox, None);
     }
 
     #[test]
-    fn test_sort_by_eye_sharpness_serde_roundtrip() {
-        // 外部标签枚举：EyeSharpness ↔ "EyeSharpness"（前端 bindings.ts 手写段同步维护）
-        let json = serde_json::to_string(&SortBy::EyeSharpness).expect("序列化失败");
-        assert_eq!(json, "\"EyeSharpness\"");
-        let back: SortBy = serde_json::from_str(&json).expect("反序列化失败");
-        assert_eq!(back, SortBy::EyeSharpness);
-        // 顺带验证既有变体不受影响
+    fn test_sort_by_modified_serde_roundtrip() {
+        let json = serde_json::to_string(&SortBy::Modified).expect("序列化失败");
+        assert_eq!(json, "\"Modified\"");
         assert_eq!(
             serde_json::from_str::<SortBy>("\"Modified\"").expect("反序列化失败"),
             SortBy::Modified
         );
     }
 
-    #[test]
-    fn test_sort_by_quality_serde_roundtrip() {
-        // 外部标签枚举：Quality ↔ "Quality"（前端 bindings.ts 手写段同步维护）
-        let json = serde_json::to_string(&SortBy::Quality).expect("序列化失败");
-        assert_eq!(json, "\"Quality\"");
-        let back: SortBy = serde_json::from_str(&json).expect("反序列化失败");
-        assert_eq!(back, SortBy::Quality);
-    }
 }

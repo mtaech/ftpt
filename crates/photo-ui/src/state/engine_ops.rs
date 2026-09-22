@@ -500,7 +500,7 @@ async fn do_background_scan(
                     .map(|p| p.to_string_lossy().replace('\\', "/"))
                     .unwrap_or_default();
                 if let Some(r) = rec_map.get(rel.as_str()) {
-                    meta.enrich_with_recognition(r);
+                    enrich_meta_recognition(meta, r);
                 }
             }
         }
@@ -731,7 +731,7 @@ fn apply_recognition(
         return;
     };
     if let Some(meta) = state.items.get_mut(idx) {
-        meta.enrich_with_recognition(recognition);
+        enrich_meta_recognition(meta, recognition);
     }
     // 识别结果写回文件夹级 data.db（连接不能跨线程，所以在前台写）
     if let (Some(db), Some(dir)) = (&state.folder_db, &state.current_dir) {
@@ -742,7 +742,21 @@ fn apply_recognition(
     }
 }
 
-/// 启动鸟类识别管线（§5.6）
+/// 把识别结果写进 CaptureMeta 摘要，并把物种名归一为「显示名」。
+///
+/// `CaptureMeta::enrich_with_recognition` 取的是 taxon.cn_name，而 BioCLIP 的标签
+/// 是学名、大多数预测根本不在本地名录里——此时 taxon_id = None、cn_name 为空串，
+/// 直接落摘要就会在网格/信息栏/幻灯片里显示成空白。摘要里没有学名字段，所以这里
+/// 统一改写成 TaxonMatch::display_name()（有中文名用中文名，没有用学名）。
+fn enrich_meta_recognition(meta: &mut CaptureMeta, recognition: &photo_domain::Recognition) {
+    meta.enrich_with_recognition(recognition);
+    if let Some(taxon) = &recognition.taxon {
+        let display = taxon.display_name();
+        meta.taxon_name = (!display.is_empty()).then(|| display.to_string());
+    }
+}
+
+/// 启动物种识别管线（§5.6）
 ///
 /// **推理必须留在后台线程**：`Recognizer::recognize` 是 CPU 密集的同步调用（单张
 /// 几百 ms）。此前它直接写在 `cx.spawn` 的循环里，而该循环没有任何 `.await`——GPUI 的
@@ -789,7 +803,7 @@ pub fn start_recognition(
         state.recognize_total = targets.len() as u32;
         cx.notify();
 
-        targets
+        let items = targets
             .into_iter()
             .filter_map(|i| {
                 state
@@ -797,7 +811,8 @@ pub fn start_recognition(
                     .get(i)
                     .map(|m| (i, PathBuf::from(&m.primary_path)))
             })
-            .collect()
+            .collect();
+        items
     });
 
     if items_to_recognize.is_empty() {
@@ -819,6 +834,8 @@ pub fn start_recognition(
 
     let models_dir = data_root.join("models");
     let catalog_db = data_root.join("data/bird_catalog.db");
+    // 状态栏/日志里的识别器名（BioCLIP 是唯一后端）
+    const BACKEND_LABEL: &str = "BioCLIP（全物种）";
 
     // 后台 worker -> 前台的结果队列（前台 try_recv 非阻塞，节拍到了就收）
     let (tx, rx) = std::sync::mpsc::channel::<RecognizeOutcome>();
@@ -830,10 +847,21 @@ pub fn start_recognition(
             .spawn(async move {
                 let recognizer = photo_recognize::Recognizer::new(&models_dir, &catalog_db);
                 let mut recognizer = match recognizer {
-                    Ok(recognizer) => recognizer,
+                    Ok(recognizer) => {
+                        tracing::info!(
+                            "识别器就绪：后端 {}（{}），资产版本 {:?}",
+                            recognizer.classifier_backend(),
+                            BACKEND_LABEL,
+                            recognizer.asset_version()
+                        );
+                        recognizer
+                    }
                     Err(e) => {
-                        tracing::warn!("初始化识别模型失败: {e}");
-                        let _ = tx.send(RecognizeOutcome::Fatal("初始化识别模型失败".to_string()));
+                        // RecognizeError::ModelLoad 的文案已含「缺哪个文件」，直接透传
+                        tracing::warn!("初始化识别模型失败（{BACKEND_LABEL}）: {e}");
+                        let _ = tx.send(RecognizeOutcome::Fatal(format!(
+                            "初始化识别模型失败（{BACKEND_LABEL}）：{e}"
+                        )));
                         let _ = tx.send(RecognizeOutcome::Finished);
                         return;
                     }
@@ -1128,5 +1156,74 @@ mod clipboard_tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+#[cfg(test)]
+mod recognition_tests {
+    use super::*;
+    use photo_domain::{CnLevel, RecognitionFailureStage, RecognitionStatus, TaxonMatch};
+
+    /// 造一张最小识别结果（字段全部与 domain::Recognition 对齐）
+    fn recognition(taxon: Option<TaxonMatch>) -> photo_domain::Recognition {
+        photo_domain::Recognition {
+            status: RecognitionStatus::Confirmed,
+            taxon,
+            class_index: Some(7),
+            confidence: Some(88.5),
+            bbox: None,
+            candidates: Vec::new(),
+            failure_stage: RecognitionFailureStage::None,
+            recognized_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    fn empty_meta() -> CaptureMeta {
+        let capture = photo_domain::Capture {
+            base_name: "IMG_0001".to_string(),
+            source_files: Vec::new(),
+            primary_index: 0,
+        };
+        CaptureMeta::from_capture(&capture, 0)
+    }
+
+    #[test]
+    fn test_enrich_meta_recognition_falls_back_to_latin_name() {
+        // BioCLIP 常见情形：预测不在名录（taxon_id None、cn_name 空），摘要要落学名
+        let mut meta = empty_meta();
+        let r = recognition(Some(TaxonMatch {
+            taxon_id: None,
+            cn_name: String::new(),
+            latin_name: "Corvus corax".to_string(),
+            cn_level: CnLevel::Missing,
+            ranks: vec![],
+        }));
+        enrich_meta_recognition(&mut meta, &r);
+        assert_eq!(meta.taxon_name.as_deref(), Some("Corvus corax"));
+        assert_eq!(meta.taxon_confidence, Some(88.5));
+        assert_eq!(meta.recognition_status, Some(RecognitionStatus::Confirmed));
+    }
+
+    #[test]
+    fn test_enrich_meta_recognition_prefers_cn_name() {
+        let mut meta = empty_meta();
+        let r = recognition(Some(TaxonMatch {
+            taxon_id: Some(42),
+            cn_name: "大嘴乌鸦".to_string(),
+            latin_name: "Corvus macrorhynchos".to_string(),
+            cn_level: CnLevel::Species,
+            ranks: vec![],
+        }));
+        enrich_meta_recognition(&mut meta, &r);
+        assert_eq!(meta.taxon_name.as_deref(), Some("大嘴乌鸦"));
+    }
+
+    #[test]
+    fn test_enrich_meta_recognition_without_taxon_keeps_name_empty() {
+        let mut meta = empty_meta();
+        let r = recognition(None);
+        enrich_meta_recognition(&mut meta, &r);
+        assert_eq!(meta.taxon_name, None);
+    }
+
 }
 

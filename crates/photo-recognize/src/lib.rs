@@ -1,11 +1,11 @@
-//! 鸟类识别：YOLO 检测 → 鸟种分类 → 名录映射（全同步）。
+//! 物种识别：YOLO 检测 → BioCLIP 全物种零样本分类 → 名录补充（全同步）。
 //!
 //! 管线语义与持久化格式见 `docs/adr/0002-folder-central-db.md`、
 //! `docs/adr/0003-recognition-subsystem.md`；领域类型定义在 `photo-domain`。
 //!
 //! ## 实现说明
 //!
-//! - 候选列表中的未映射项 `bird=None` 也保留（不跳过）
+//! - 候选列表中的未映射项 `taxon=None` 也保留（不跳过）
 //! - 输入源解析：RAW 格式使用 `photo_engine::thumbnail::decode_raw_preview`
 //!   提取内嵌 JPEG（通用解码失败时仍尝试 RAW 提取）
 //! - 预处理/后处理常数与模型元数据一致
@@ -22,14 +22,13 @@
 //! 本 crate **不直接读写 `data.db`**——recognition 表的写入/读取由 `photo-engine`
 //! 的 `FolderDb` 模块完成，本 crate 只负责计算 `Recognition` 值对象。
 
+mod bioclip;
 mod catalog;
-mod classify;
+mod classifier;
 mod detect;
-mod eye;
 mod pipeline;
-mod sharpness;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "windows")]
 use ort::ep;
@@ -37,11 +36,11 @@ use ort::session::Session;
 
 use photo_domain::{BBox, Capture, FocusPoint, Recognition};
 
+pub use bioclip::{BioClipAssets, BioClipClassifier, MODEL_FILE as BIOCLIP_MODEL_FILE};
 pub use catalog::CatalogDb;
-pub use catalog::ClassificationOutput;
+pub use classifier::{Classified, Classifier};
 pub use detect::DetectionResult;
 pub use pipeline::{ProgressCallback, RecognitionProgress};
-pub use catalog::CatalogEntry;
 
 // ---------------------------------------------------------------------------
 // RecognizeError
@@ -79,6 +78,10 @@ pub enum RecognizeError {
     /// RAW 预览提取失败
     #[error("RAW 预览提取失败: {0}")]
     RawPreview(String),
+
+    /// 识别资产（标签 / 中文名表 / VERSION）JSON 解析失败
+    #[error("识别资产 JSON 错误: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 /// 推理后端。
@@ -100,7 +103,7 @@ impl std::fmt::Display for Backend {
 // Recognizer
 // ---------------------------------------------------------------------------
 
-/// 识别器：持有三个 ONNX Session + 名录库连接。
+/// 识别器：持有主体检测 Session、BioCLIP 分类后端 + 名录库连接。
 ///
 /// 示例：
 /// ```no_run
@@ -113,9 +116,10 @@ impl std::fmt::Display for Backend {
 /// ```
 pub struct Recognizer {
     detection_session: Session,
-    classification_session: Session,
-    eye_session: Session,
+    /// 物种分类后端：分类 + 落到物种（BioCLIP，见 classifier.rs / bioclip.rs）
+    classifier: Box<dyn Classifier>,
     catalog: CatalogDb,
+    /// ONNX Runtime 执行提供程序（DirectML / CPU）——与识别后端是两件事
     backend: Backend,
 }
 
@@ -123,56 +127,73 @@ impl Recognizer {
     /// 创建识别器。
     ///
     /// # 参数
-    /// - `models_dir`: 包含 `detect.onnx`、`bird_model.onnx` 和 `eye.onnx` 的目录
+    /// - `models_dir`: 模型目录（`org_det.onnx`、`bioclip2_model_int8.onnx`）
     /// - `catalog_db`: 名录库 `bird_catalog.db` 路径
     ///
     /// # 模型路径约定（便携模式）
-    /// 默认路径相对于 exe 所在目录：`exe_dir/models/` + `exe_dir/data/bird_catalog.db`。
+    /// 默认路径相对于 exe 所在目录：`exe_dir/models/` + `exe_dir/data/bird_catalog.db`；
+    /// BioCLIP 的名录子集资产在名录库同级的 `taxon/`（`exe_dir/data/taxon/`）。
     /// 调用方可通过参数注入任意路径（测试用临时目录等）。
     ///
     /// # 执行提供程序
     /// - Windows: DirectML → 失败回退 CPU 并 `tracing::warn` 记录原因
     /// - 非 Windows: CPU
     pub fn new(models_dir: &Path, catalog_db: &Path) -> Result<Self, RecognizeError> {
-        let yolo_path = models_dir.join("detect.onnx");
-        let bird_path = models_dir.join("bird_model.onnx");
-        let eye_path = models_dir.join("eye.onnx");
+        let detector_path = models_dir.join(detect::MODEL_FILE);
 
-        if !yolo_path.exists() {
+        if !detector_path.exists() {
             return Err(RecognizeError::ModelLoad(format!(
-                "YOLO 模型文件不存在: {}。请将 detect.onnx 放入 models/ 目录",
-                yolo_path.display()
+                "检测模型文件不存在: {}。请将 org_det.onnx 放入 models/ 目录",
+                detector_path.display()
             )));
         }
-        if !bird_path.exists() {
-            return Err(RecognizeError::ModelLoad(format!(
-                "bird_model 模型文件不存在: {}。请将 bird_model.onnx 放入 models/ 目录",
-                bird_path.display()
-            )));
-        }
-        if !eye_path.exists() {
-            return Err(RecognizeError::ModelLoad(format!(
-                "eye 模型文件不存在: {}。请将 eye.onnx 放入 models/ 目录",
-                eye_path.display()
-            )));
-        }
-        let (detection_session, backend) = load_model(&yolo_path)?;
-        let (classification_session, _) = load_model(&bird_path)?;
-        // eye.onnx 强制 CPU：DirectML（Radeon 780M 实测）会把姿态头输出腐蚀成
-        // 顶部窄条区域的假框（关键点全部場缩到 y≈21/640），眼框完全错位。
-        // 检测/分类模型在同后端下输出正常，仅姿态模型不兼容。
-        let (eye_session, _) = load_model_cpu(&eye_path)?;
+        let (detection_session, backend_ep) = load_model(&detector_path)?;
         let catalog = CatalogDb::open(catalog_db)?;
 
-        tracing::info!("识别器初始化完成，推理后端: {}", backend);
+        let model = models_dir.join(bioclip::MODEL_FILE);
+        if !model.exists() {
+            return Err(RecognizeError::ModelLoad(format!(
+                "BioCLIP 模型文件不存在: {}。请把 bioclip2_model_int8.onnx 放入 models/ 目录",
+                model.display()
+            )));
+        }
+        // 名录子集资产与名录库同级：<data_root>/data/taxon/
+        let taxon_dir = catalog_db
+            .parent()
+            .map(|d| d.join("taxon"))
+            .unwrap_or_else(|| PathBuf::from("taxon"));
+        let assets = BioClipAssets::load(&taxon_dir)?;
+        tracing::info!("BioCLIP 名录子集: {} 类（{}）", assets.label_count(), taxon_dir.display());
+        let session = Session::builder()?.commit_from_file(&model).map_err(|e| {
+            RecognizeError::ModelLoad(format!(
+                "BioCLIP session 创建失败 ({}): {e}",
+                model.display()
+            ))
+        })?;
+        let classifier: Box<dyn Classifier> = Box::new(BioClipClassifier::new(session, assets));
+
+        tracing::info!(
+            "识别器初始化完成，识别后端: {}，推理后端: {}",
+            classifier.backend(),
+            backend_ep
+        );
 
         Ok(Self {
             detection_session,
-            classification_session,
-            eye_session,
+            classifier,
             catalog,
-            backend,
+            backend: backend_ep,
         })
+    }
+
+    /// 当前识别后端标识（恒为 `"bioclip"`），诊断与状态栏用。
+    pub fn classifier_backend(&self) -> &'static str {
+        self.classifier.backend()
+    }
+
+    /// 当前识别后端的资产版本（class_index 的语义依赖它），无版本信息时为 None。
+    pub fn asset_version(&self) -> Option<String> {
+        self.classifier.asset_version()
     }
 
     /// 单张全管线识别。
@@ -189,8 +210,7 @@ impl Recognizer {
     ) -> Result<Recognition, RecognizeError> {
         pipeline::recognize_capture(
             &mut self.detection_session,
-            &mut self.classification_session,
-            &mut self.eye_session,
+            &mut *self.classifier,
             &self.catalog,
             capture,
             focus_override,
@@ -213,8 +233,7 @@ impl Recognizer {
     ) -> Result<Recognition, RecognizeError> {
         pipeline::recognize_capture_with_thumbnail(
             &mut self.detection_session,
-            &mut self.classification_session,
-            &mut self.eye_session,
+            &mut *self.classifier,
             &self.catalog,
             capture,
             thumb_bytes,
@@ -235,8 +254,7 @@ impl Recognizer {
         on_progress: Option<&pipeline::ProgressCallback>,
     ) -> Result<Recognition, RecognizeError> {
         pipeline::recognize_region(
-            &mut self.classification_session,
-            &mut self.eye_session,
+            &mut *self.classifier,
             &self.catalog,
             capture,
             bbox,
@@ -257,8 +275,7 @@ impl Recognizer {
         on_progress: Option<&pipeline::ProgressCallback>,
     ) -> Result<Recognition, RecognizeError> {
         pipeline::recognize_region_with_thumbnail(
-            &mut self.classification_session,
-            &mut self.eye_session,
+            &mut *self.classifier,
             &self.catalog,
             capture,
             bbox,
@@ -267,39 +284,10 @@ impl Recognizer {
         )
     }
 
-    /// 返回眼检测 session 的可变引用（供直接调用 eye 模块用）
-    pub fn eye_session(&mut self) -> &mut Session {
-        &mut self.eye_session
-    }
-
     /// 返回当前使用的推理后端。
     pub fn backend(&self) -> Backend {
         self.backend
     }
-}
-
-/// 名录库全量鸟种（手动修正鸟种下拉数据源）：按中文名排序。
-/// 名录库路径与 [`Recognizer::new`] 的 `catalog_db` 参数相同。
-pub fn list_all_species(catalog_db: &Path) -> Result<Vec<photo_domain::BirdMatch>, RecognizeError> {
-    CatalogDb::open(catalog_db).map(|db| db.all_species())
-}
-
-/// 名录搜索（人工纠错对话框数据源）：按中文名/拼音/拉丁名 LIKE 子串匹配，仅鸟纲。
-/// 名录库路径与 [`list_all_species`] 相同。
-pub fn search_catalog(
-    catalog_db: &Path,
-    query: &str,
-    limit: usize,
-) -> Result<Vec<CatalogEntry>, RecognizeError> {
-    CatalogDb::open(catalog_db).map(|db| db.search_catalog(query, limit))
-}
-
-/// 按名录库主键查单一鸟种（`correct_recognition` 入参校验用；非鸟纲返回 None）。
-pub fn get_catalog_entry(
-    catalog_db: &Path,
-    bird_id: i64,
-) -> Result<Option<CatalogEntry>, RecognizeError> {
-    CatalogDb::open(catalog_db).map(|db| db.get_species_by_id(bird_id))
 }
 
 // ---------------------------------------------------------------------------
@@ -342,22 +330,13 @@ fn load_model(path: &Path) -> Result<(Session, Backend), RecognizeError> {
     Ok((session, Backend::Cpu))
 }
 
-/// 仅 CPU 加载（用于与 DirectML 不兼容的模型，如 eye.onnx 姿态头）。
-fn load_model_cpu(path: &Path) -> Result<(Session, Backend), RecognizeError> {
-    let session = Session::builder()?.commit_from_file(path).map_err(|e| {
-        RecognizeError::ModelLoad(format!("CPU session 创建失败 ({}): {e}", path.display()))
-    })?;
-    tracing::info!("模型加载成功 (CPU，跳过 DirectML): {}", path.display());
-    Ok((session, Backend::Cpu))
-}
-
 // ---------------------------------------------------------------------------
 // RAW 预览提取（供 pipeline 模块调用）
 // ---------------------------------------------------------------------------
 
 /// 识别用 RAW 预览提取：优先相机内嵌 JPEG（~50ms）。
 ///
-/// 识别输入只需 640/224 分辨率（检测/眼/分类），内嵌预览（相机写入的
+/// 识别输入只需 640/224 分辨率（检测/分类），内嵌预览（相机写入的
 /// 1600×1200 级 JPEG）足够——避免 20MP RAW 完整解码（LibRaw half_size
 /// 约 5-8s，是识别慢的主因）。内嵌缺失/非 JPEG 时回退完整解码。
 fn engine_raw_preview(path: &Path) -> Result<Vec<u8>, RecognizeError> {
@@ -387,12 +366,10 @@ mod tests {
         // 检测无框 → Unrecognized(Detection)
         let r = Recognition {
             status: RecognitionStatus::Unrecognized,
-            bird: None,
+            taxon: None,
             class_index: None,
             confidence: None,
             bbox: None,
-            eye_sharpness: None,
-            eye_bbox: None,
             candidates: vec![],
             failure_stage: RecognitionFailureStage::Detection,
             recognized_at: String::new(),
@@ -403,12 +380,10 @@ mod tests {
         // 分类异常 → NeedsReview(Classification)
         let r = Recognition {
             status: RecognitionStatus::NeedsReview,
-            bird: None,
+            taxon: None,
             class_index: None,
             confidence: None,
             bbox: None,
-            eye_sharpness: None,
-            eye_bbox: None,
             candidates: vec![],
             failure_stage: RecognitionFailureStage::Classification,
             recognized_at: String::new(),
@@ -419,12 +394,10 @@ mod tests {
         // 映射失败 → NeedsReview(Mapping)
         let r = Recognition {
             status: RecognitionStatus::NeedsReview,
-            bird: None,
+            taxon: None,
             class_index: None,
             confidence: None,
             bbox: None,
-            eye_sharpness: None,
-            eye_bbox: None,
             candidates: vec![],
             failure_stage: RecognitionFailureStage::Mapping,
             recognized_at: String::new(),
@@ -435,12 +408,10 @@ mod tests {
         // 资源不可用 → NeedsReview(Assets)
         let r = Recognition {
             status: RecognitionStatus::NeedsReview,
-            bird: None,
+            taxon: None,
             class_index: None,
             confidence: None,
             bbox: None,
-            eye_sharpness: None,
-            eye_bbox: None,
             candidates: vec![],
             failure_stage: RecognitionFailureStage::Assets,
             recognized_at: String::new(),
@@ -451,23 +422,23 @@ mod tests {
         // 全部成功 → Confirmed(None)
         let r = Recognition {
             status: RecognitionStatus::Confirmed,
-            bird: Some(photo_domain::BirdMatch {
-                bird_id: 1,
+            taxon: Some(photo_domain::TaxonMatch {
+                taxon_id: Some(1),
                 cn_name: "乌鸫".into(),
                 latin_name: "Turdus merula".into(),
+                cn_level: photo_domain::CnLevel::Species,
+                ranks: vec![],
             }),
             class_index: Some(100),
             confidence: Some(95.5),
             bbox: Some(BBox::new(0.1, 0.2, 0.5, 0.6)),
-            eye_sharpness: None,
-            eye_bbox: None,
             candidates: vec![],
             failure_stage: RecognitionFailureStage::None,
             recognized_at: "2026-07-28T12:00:00+00:00".into(),
         };
         assert_eq!(r.status, RecognitionStatus::Confirmed);
         assert_eq!(r.failure_stage, RecognitionFailureStage::None);
-        assert!(r.bird.is_some());
+        assert!(r.taxon.is_some());
     }
 
     /// 输入源解析：标准 JPEG 直接解码路径
@@ -544,29 +515,22 @@ mod tests {
         let _ = RecognizeError::RawPreview("test".into());
     }
 
-    /// eye.onnx 缺失时应报 ModelLoad 错误
+    /// 检测模型缺失时应报 ModelLoad 错误（模型目录里什么都没有）
     #[test]
-    fn test_eye_model_missing_returns_modelload_error() {
+    fn test_detector_model_missing_returns_modelload_error() {
         let dir = tempfile::TempDir::new().unwrap();
         let models_dir = dir.path().join("models");
         std::fs::create_dir(&models_dir).unwrap();
 
-        // 只放 detect.onnx 和 bird_model.onnx，缺 eye.onnx
-        let dummy = b"dummy onnx content";
-        std::fs::write(models_dir.join("detect.onnx"), dummy).unwrap();
-        std::fs::write(models_dir.join("bird_model.onnx"), dummy).unwrap();
-
-        // 也需要有效名录库——用空文件模拟创建
+        // 空模型目录：第一道检查就是 org_det.onnx
         let db_path = dir.path().join("bird_catalog.db");
-        // CatalogDb::open 会尝试打开 SQLite，可能失败；我们用临时 db
-        // 但本测试只验证 ModelLoad 错误，不会走到 CatalogDb
         let result = Recognizer::new(&models_dir, &db_path);
 
         match result {
             Err(RecognizeError::ModelLoad(msg)) => {
                 assert!(
-                    msg.contains("eye"),
-                    "错误消息应提及 eye.onnx, got: {msg}"
+                    msg.contains("org_det.onnx"),
+                    "错误消息应提及 org_det.onnx, got: {msg}"
                 );
             }
             Err(e) => panic!("期望 ModelLoad 错误，但得到: {e:?}"),
@@ -574,37 +538,57 @@ mod tests {
         }
     }
 
-    /// #[ignore] 真实模型冒烟测试（手动触发：cargo test -- --ignored -p photo-recognize）
+    /// 资产缺失时报可读的 ModelLoad（而不是 panic 或静默空标签）
+    #[test]
+    fn test_bioclip_assets_missing_dir_reports_modelload() {
+        let dir = tempfile::TempDir::new().unwrap();
+        match BioClipAssets::load(dir.path()) {
+            Err(RecognizeError::ModelLoad(msg)) => {
+                assert!(msg.contains("BioCLIP 资产缺失"), "错误消息应指明资产缺失, got: {msg}");
+            }
+            Err(other) => panic!("期望 ModelLoad 错误，实际其它错误: {other}"),
+            Ok(_) => panic!("空目录不该加载成功"),
+        }
+    }
+
+    /// #[ignore] 真实 BioCLIP 资产 + 模型端到端冒烟（手动触发）。
+    ///
+    /// 需要仓库根有 models/bioclip2_model_int8.onnx 与 data/taxon/（名录子集包），
+    /// 缺任一个就跳过；跑法：cargo test -- --ignored -p photo-recognize -- real_bioclip
     #[test]
     #[ignore]
-    fn test_real_model_smoke() {
-        // 需要在 worktree 根目录有 models/ 和 data/ 目录
+    fn test_real_bioclip_end_to_end_smoke() {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
-
         let models_dir = workspace_root.join("models");
         let catalog_db = workspace_root.join("data").join("bird_catalog.db");
-
-        if !models_dir.join("detect.onnx").exists()
-            || !models_dir.join("eye.onnx").exists()
-            || !catalog_db.exists()
+        let taxon_dir = workspace_root.join("data").join("taxon");
+        if !models_dir.join(BIOCLIP_MODEL_FILE).exists()
+            || !taxon_dir.join("txt_emb_bioclip-2.npy").exists()
         {
-            eprintln!("SKIP: 模型或名录库不存在，请确保 worktree 根有 models/ 和 data/");
+            eprintln!("SKIP: 缺少 BioCLIP 资产（models/bioclip2_model_int8.onnx 或 data/taxon/）");
             return;
         }
 
-        let mut recognizer = Recognizer::new(&models_dir, &catalog_db).unwrap();
+        // 资产本身：标签数与列数必须一致（不一致说明 npy/json 配错对）
+        let assets = BioClipAssets::load(&taxon_dir).unwrap();
+        assert!(assets.label_count() > 70_000, "中国包应有 9 万+ 类，实际 {}", assets.label_count());
+        assert!(assets.label_count() < 851_968, "不该是全量包（全量与子集用同一套代码）");
 
-        // 创建一个临时 JPEG 作为测试图
+        // 端到端：识别一个自建图（内容无意义，只验证链路不 panic 且给出物种结论）
+        let mut recognizer =
+            Recognizer::new(&models_dir, &catalog_db).unwrap();
+        assert_eq!(recognizer.classifier_backend(), "bioclip");
+        assert!(recognizer.asset_version().is_some(), "VERSION 应被读到");
+
         let dir = tempfile::TempDir::new().unwrap();
-        let img_path = dir.path().join("test.jpg");
+        let img_path = dir.path().join("smoke.jpg");
         let img = image::RgbImage::from_fn(640, 480, |x, y| {
             image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
         });
         img.save(&img_path).unwrap();
-
         let capture = Capture {
-            base_name: "smoke_test".into(),
+            base_name: "bioclip_smoke".into(),
             primary_index: 0,
             source_files: vec![SourceFile {
                 path: img_path,
@@ -612,21 +596,22 @@ mod tests {
                 file_size: None,
             }],
         };
-
-        let result = recognizer.recognize(&capture, None, None);
-        match result {
-            Ok(rec) => {
-                // 任何结果都是可接受的——只要不 panic 就是成功
+        let rec = recognizer.recognize(&capture, None, None);
+        match rec {
+            Ok(r) => {
                 eprintln!(
-                    "冒烟测试完成: status={:?}, bird={:?}, stage={:?}",
-                    rec.status, rec.bird, rec.failure_stage
+                    "BioCLIP 冒烟: status={:?} taxon={:?} conf={:?}",
+                    r.status,
+                    r.taxon.as_ref().map(|t| t.latin_name.clone()),
+                    r.confidence
                 );
+                // 标签空间就是物种清单，所以有结论是必然的；无结论说明检索/映射断了
+                let t = r.taxon.expect("BioCLIP 后端应给出物种结论");
+                assert!(!t.latin_name.is_empty());
+                assert!(!t.ranks.is_empty(), "七级分类应来自标签路径");
             }
-            Err(e) => {
-                // 如果报缺少 DirectML 运行时（例如未安装 DirectX），
-                // 回退 CPU 也视为正常
-                eprintln!("识别返回系统错误（可能是缺少运行时）: {e}");
-            }
+            Err(e) => panic!("BioCLIP 端到端应返回 Ok（业务失败体现在 status）: {e}"),
         }
     }
+
 }

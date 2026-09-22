@@ -6,6 +6,8 @@ edition.workspace = true
 [dependencies]
 photo-domain = { path = "../photo-domain" }
 photo-engine = { path = "../photo-engine" }
+# 余弦检索的 sgemm（与 bioclip_demo 同一套：瓶颈在内存带宽，不在算力）
+matrixmultiply = { version = "0.3", features = ["threading"] }
 ort = { workspace = true }
 image = { workspace = true }
 thiserror = { workspace = true }
@@ -13,6 +15,7 @@ tracing = { workspace = true }
 chrono = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 # 可选：specta::Type 派生（原 Tauri 版导出 TS 绑定用；Tauri 版已删除，暂无消费方）
 # （对齐 photo-domain 的 specta feature 门控）
 specta = { workspace = true, optional = true }

@@ -36,10 +36,8 @@ fn global_migrations() -> Migrations<'static> {
                 PRIMARY KEY (folder, rel_path)
             );",
         ),
-        // 人工修正审计日志（T 批次 Wave 2）：只追加、不删除——species_index 会被
-        // 重扫覆盖（replace_folder），原模型预测只能从日志追溯。old_* = 修正前的
-        // 模型预测（bird_name + confidence），new_bird = 人工指定值。
-        // (folder, rel_path) 索引供 correction_stats 的「每张最新修正」查找。
+        // 人工修正审计日志（T 批次 Wave 2 历史建表）：随修正对话框一起下线（2026-09-22），
+        // 表在链末尾的迁移里 DROP。保留历史建表语句不动，避免打乱既有库的 user_version。
         M::up(
             "CREATE TABLE IF NOT EXISTS correction_log (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,6 +50,12 @@ fn global_migrations() -> Migrations<'static> {
             );
             CREATE INDEX IF NOT EXISTS idx_correction_log_photo
                 ON correction_log(folder, rel_path);",
+        ),
+        // 鸟眼锐度与人工修正审计一起下线（2026-09-22：锐度阶段删除、修正对话框删除）。
+        // 历史建表留在链中间不动（删改序号会破坏既有库的 user_version 记账），末尾收敛。
+        M::up(
+            "DROP TABLE IF EXISTS correction_log;
+             ALTER TABLE species_index DROP COLUMN eye_sharpness;",
         ),
     ])
 }
@@ -74,32 +78,17 @@ pub struct SpeciesRow {
     pub bird_name: String,
     pub confidence: Option<f64>,
     pub status: String,
-    pub eye_sharpness: Option<f64>,
     pub date_taken: Option<String>,
     pub updated_at: String,
 }
 
-/// 单鸟种聚合统计（species_stats 返回；avg_sharpness 为 AVG 聚合，自动忽略 NULL）。
+/// 单鸟种聚合统计（species_stats 返回）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpeciesStat {
     pub bird_name: String,
     pub photo_count: i64,
     pub first_date: Option<String>,
     pub last_date: Option<String>,
-    pub avg_sharpness: Option<f64>,
-}
-
-/// 单鸟种识别命中率（correction_stats 返回）。
-/// 按 species_index 当前鸟种聚合：predicted = 该鸟种被预测的张数（含未被修正的），
-/// corrected_away = 其中被人工改成别种的张数，accuracy = 1 - corrected/predicted。
-/// accuracy 恒为 [0,1] 有限值（predicted ≥ 1）；specta 导出 number|null 属防御性
-/// 类型（浮点 NaN/Infinity 序列化为 null），前端按 null 兜底处理。
-#[derive(Debug, Clone, PartialEq)]
-pub struct CorrectionStat {
-    pub bird_name: String,
-    pub predicted_count: i64,
-    pub corrected_away_count: i64,
-    pub accuracy: f64,
 }
 
 /// 全局鸟种索引库：单连接 + 互斥（对齐 FolderDb 线程模型，全同步）。
@@ -166,8 +155,8 @@ impl GlobalDb {
     ) -> Result<(), GlobalDbError> {
         let mut stmt = tx.prepare_cached(
             "INSERT OR REPLACE INTO species_index
-             (folder, rel_path, bird_name, confidence, status, eye_sharpness, date_taken, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             (folder, rel_path, bird_name, confidence, status, date_taken, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
         for row in rows {
             stmt.execute(rusqlite::params![
@@ -176,7 +165,6 @@ impl GlobalDb {
                 row.bird_name,
                 row.confidence,
                 row.status,
-                row.eye_sharpness,
                 row.date_taken,
                 row.updated_at,
             ])?;
@@ -214,15 +202,13 @@ impl GlobalDb {
     }
 
     /// 全库聚合统计：按鸟种分组。排序 = 张数降序，同张数按鸟名升序（稳定确定性）。
-    /// avg_sharpness 用 AVG 聚合，NULL 自动忽略（无锐度分的照片不进分母）。
     pub fn species_stats(&self) -> Result<Vec<SpeciesStat>, GlobalDbError> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare_cached(
             "SELECT bird_name,
                     COUNT(*)            AS photo_count,
                     MIN(date_taken)     AS first_date,
-                    MAX(date_taken)     AS last_date,
-                    AVG(eye_sharpness)  AS avg_sharpness
+                    MAX(date_taken)     AS last_date
              FROM species_index
              GROUP BY bird_name
              ORDER BY photo_count DESC, bird_name ASC",
@@ -233,7 +219,6 @@ impl GlobalDb {
                 photo_count: row.get(1)?,
                 first_date: row.get(2)?,
                 last_date: row.get(3)?,
-                avg_sharpness: row.get(4)?,
             })
         })?;
         let mut out = Vec::new();
@@ -271,108 +256,6 @@ impl GlobalDb {
         )?)
     }
 
-    /// 追加一条人工修正审计日志（correct_bird 落库时调用；只追加不修改，
-    /// 重扫覆盖 species_index 后原模型预测仍可追溯）。corrected_at 取当前时间。
-    pub fn log_correction(
-        &self,
-        folder: &str,
-        rel_path: &str,
-        old_bird: &str,
-        new_bird: &str,
-        old_confidence: Option<f64>,
-    ) -> Result<(), GlobalDbError> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "INSERT INTO correction_log
-                 (folder, rel_path, old_bird, new_bird, old_confidence, corrected_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                folder,
-                rel_path,
-                old_bird,
-                new_bird,
-                old_confidence,
-                chrono::Utc::now().to_rfc3339(),
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// 全库识别命中率：按 species_index 当前鸟种聚合。
-    ///
-    /// 判定「被修正走」：某张 species_index 行的最新一条修正日志（按 id 取每张
-    /// 最新）的 new_bird 与该行当前 bird_name 不一致 → 该行被人工改成别种。
-    /// 该判定能覆盖「修正后被重扫覆盖」的场景：重扫把模型预测写回 bird_name，
-    /// 与最新 new_bird 不一致即命中；未被修正的行无日志，恒为一致。
-    ///
-    /// 取舍说明（简化方案对比）：更精确的做法是聚合 correction_log.old_bird
-    /// （原模型预测）+ 未修正行数，但「未修正行」仍必须靠 species_index 反查，
-    /// 无法省掉 LEFT JOIN；且 old_bird 链式修正（A→B→C）会丢失「中间态」。
-    /// 本方案以 species_index.bird_name 为预测口径，代价是「被人工改入」的行会
-    /// 计入目标鸟种的 predicted（其最新 new_bird 恰等于当前名，判为未修正），
-    /// 属可接受的近似——命中率视图定位「模型哪些预测值得复核」，偏保守方向。
-    pub fn correction_stats(&self) -> Result<Vec<CorrectionStat>, GlobalDbError> {
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare_cached(
-            "SELECT s.bird_name,
-                    COUNT(*) AS predicted_count,
-                    SUM(CASE WHEN c.latest_new IS NOT NULL
-                              AND c.latest_new <> s.bird_name
-                             THEN 1 ELSE 0 END) AS corrected_away_count
-             FROM species_index s
-             LEFT JOIN (
-                 SELECT cl.folder, cl.rel_path, cl.new_bird AS latest_new
-                 FROM correction_log cl
-                 WHERE cl.id = (SELECT MAX(id) FROM correction_log c2
-                                WHERE c2.folder = cl.folder AND c2.rel_path = cl.rel_path)
-             ) c ON c.folder = s.folder AND c.rel_path = s.rel_path
-             GROUP BY s.bird_name
-             ORDER BY s.bird_name ASC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (bird_name, predicted_count, corrected_away_count) = row?;
-            let accuracy = if predicted_count > 0 {
-                1.0 - corrected_away_count as f64 / predicted_count as f64
-            } else {
-                1.0
-            };
-            out.push(CorrectionStat {
-                bird_name,
-                predicted_count,
-                corrected_away_count,
-                accuracy,
-            });
-        }
-        Ok(out)
-    }
-
-    /// 高频鸟种：species_index 按张数降序的鸟种名（去 NULL/空白），同张数按鸟名
-    /// 升序保证确定性。供修正鸟种下拉「常用」分组——本机使用频次即区域相关性代理。
-    pub fn frequent_species(&self, limit: usize) -> Result<Vec<String>, GlobalDbError> {
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare_cached(
-            "SELECT bird_name
-             FROM species_index
-             WHERE bird_name IS NOT NULL AND trim(bird_name) <> ''
-             GROUP BY bird_name
-             ORDER BY COUNT(*) DESC, bird_name ASC
-             LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![limit as i64], |row| row.get(0))?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
-        }
-        Ok(out)
-    }
 }
 
 #[cfg(test)]
@@ -386,7 +269,6 @@ mod tests {
         bird: &str,
         conf: Option<f64>,
         status: &str,
-        sharp: Option<f64>,
         date: Option<&str>,
     ) -> SpeciesRow {
         SpeciesRow {
@@ -395,7 +277,6 @@ mod tests {
             bird_name: bird.to_string(),
             confidence: conf,
             status: status.to_string(),
-            eye_sharpness: sharp,
             date_taken: date.map(|s| s.to_string()),
             updated_at: "2026-08-11T10:00:00Z".to_string(),
         }
@@ -411,7 +292,7 @@ mod tests {
         // 迁移幂等：重开不报错、数据保留
         db.replace_folder(
             "E:/A",
-            &[row("E:/A", "1.jpg", "白鹭", Some(90.0), "confirmed", Some(42.5), Some("2026-08-01"))],
+            &[row("E:/A", "1.jpg", "白鹭", Some(90.0), "confirmed", Some("2026-08-01"))],
         )
         .unwrap();
         drop(db);
@@ -424,9 +305,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let db = GlobalDb::open(tmp.path()).unwrap();
         let rows = vec![
-            row("E:/A", "1.jpg", "白鹭", Some(90.0), "confirmed", Some(42.5), Some("2026-08-01T10:00:00")),
-            row("E:/A", "2.jpg", "白鹭", Some(80.0), "confirmed", None, Some("2026-08-02T10:00:00")),
-            row("E:/A", "3.jpg", "翠鸟", Some(95.0), "confirmed", Some(30.0), Some("2026-08-03T10:00:00")),
+            row("E:/A", "1.jpg", "白鹭", Some(90.0), "confirmed", Some("2026-08-01T10:00:00")),
+            row("E:/A", "2.jpg", "白鹭", Some(80.0), "confirmed", Some("2026-08-02T10:00:00")),
+            row("E:/A", "3.jpg", "翠鸟", Some(95.0), "confirmed", Some("2026-08-03T10:00:00")),
         ];
         db.replace_folder("E:/A", &rows).unwrap();
         // 幂等：重复替换结果一致（先删后插，无累积）
@@ -455,7 +336,7 @@ mod tests {
 
         db.replace_folder(
             &folder,
-            &[row(&folder, "sub/bird.jpg", "白鹭", None, "confirmed", None, None)],
+            &[row(&folder, "sub/bird.jpg", "白鹭", None, "confirmed", None)],
         )
         .unwrap();
         // 单层扫描：rows 为空但文件仍在磁盘 → 索引行保留
@@ -472,18 +353,17 @@ mod tests {
     fn test_global_db_upsert_rows() {
         let tmp = TempDir::new().unwrap();
         let db = GlobalDb::open(tmp.path()).unwrap();
-        db.upsert_rows(&[row("E:/A", "1.jpg", "白鹭", Some(90.0), "confirmed", Some(42.5), Some("2026-08-01"))])
+        db.upsert_rows(&[row("E:/A", "1.jpg", "白鹭", Some(90.0), "confirmed", Some("2026-08-01"))])
             .unwrap();
         // 同键再 upsert：覆盖更新（改鸟名/置信度），不新增行
-        db.upsert_rows(&[row("E:/A", "1.jpg", "苍鹭", Some(99.0), "confirmed", Some(50.0), Some("2026-08-01"))])
+        db.upsert_rows(&[row("E:/A", "1.jpg", "苍鹭", Some(99.0), "confirmed", Some("2026-08-01"))])
             .unwrap();
         let stats = db.species_stats().unwrap();
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].bird_name, "苍鹭");
         assert_eq!(stats[0].photo_count, 1);
-        assert_eq!(stats[0].avg_sharpness, Some(50.0));
         // 新增键：行数增长
-        db.upsert_rows(&[row("E:/A", "2.jpg", "苍鹭", Some(80.0), "needs_review", None, Some("2026-08-02"))])
+        db.upsert_rows(&[row("E:/A", "2.jpg", "苍鹭", Some(80.0), "needs_review", Some("2026-08-02"))])
             .unwrap();
         assert_eq!(db.photos_of_species("苍鹭").unwrap().len(), 2);
     }
@@ -493,9 +373,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let db = GlobalDb::open(tmp.path()).unwrap();
         let rows = vec![
-            row("E:/A", "1.jpg", "白鹭", None, "confirmed", None, None),
-            row("E:/A", "2.jpg", "白鹭", None, "confirmed", None, None),
-            row("E:/B", "3.jpg", "白鹭", None, "confirmed", None, None),
+            row("E:/A", "1.jpg", "白鹭", None, "confirmed", None),
+            row("E:/A", "2.jpg", "白鹭", None, "confirmed", None),
+            row("E:/B", "3.jpg", "白鹭", None, "confirmed", None),
         ];
         db.replace_folder("E:/A", &rows[..2]).unwrap();
         db.replace_folder("E:/B", &rows[2..]).unwrap();
@@ -515,16 +395,15 @@ mod tests {
     }
 
     #[test]
-    fn test_global_db_stats_avg_ignores_null() {
+    fn test_global_db_stats_first_last_date() {
         let tmp = TempDir::new().unwrap();
         let db = GlobalDb::open(tmp.path()).unwrap();
-        // 白鹭：一张有锐度 42.5、一张 NULL → AVG = 42.5（NULL 不占分母）
         db.replace_folder(
             "E:/A",
             &[
-                row("E:/A", "1.jpg", "白鹭", None, "confirmed", Some(42.5), Some("2026-08-01")),
-                row("E:/A", "2.jpg", "白鹭", None, "confirmed", None, Some("2026-08-03")),
-                row("E:/A", "3.jpg", "翠鸟", None, "confirmed", Some(60.0), Some("2026-08-02")),
+                row("E:/A", "1.jpg", "白鹭", None, "confirmed", Some("2026-08-01")),
+                row("E:/A", "2.jpg", "白鹭", None, "confirmed", Some("2026-08-03")),
+                row("E:/A", "3.jpg", "翠鸟", None, "confirmed", Some("2026-08-02")),
             ],
         )
         .unwrap();
@@ -532,13 +411,9 @@ mod tests {
         assert_eq!(stats.len(), 2);
         let bailu = stats.iter().find(|s| s.bird_name == "白鹭").unwrap();
         assert_eq!(bailu.photo_count, 2);
-        assert_eq!(bailu.avg_sharpness, Some(42.5));
         // 首末见日期（TEXT MIN/MAX）
         assert_eq!(bailu.first_date.as_deref(), Some("2026-08-01"));
         assert_eq!(bailu.last_date.as_deref(), Some("2026-08-03"));
-        // 无锐度数据的鸟种：avg 为 NULL（不是 0）
-        let cui = stats.iter().find(|s| s.bird_name == "翠鸟").unwrap();
-        assert_eq!(cui.avg_sharpness, Some(60.0));
     }
 
     #[test]
@@ -548,10 +423,10 @@ mod tests {
         db.replace_folder(
             "E:/A",
             &[
-                row("E:/A", "1.jpg", "麻雀", None, "confirmed", None, None),
-                row("E:/A", "2.jpg", "麻雀", None, "confirmed", None, None),
-                row("E:/A", "3.jpg", "麻雀", None, "confirmed", None, None),
-                row("E:/A", "4.jpg", "白鹭", None, "confirmed", None, None),
+                row("E:/A", "1.jpg", "麻雀", None, "confirmed", None),
+                row("E:/A", "2.jpg", "麻雀", None, "confirmed", None),
+                row("E:/A", "3.jpg", "麻雀", None, "confirmed", None),
+                row("E:/A", "4.jpg", "白鹭", None, "confirmed", None),
             ],
         )
         .unwrap();
@@ -568,10 +443,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let db = GlobalDb::open(tmp.path()).unwrap();
         let rows = vec![
-            row("E:/A", "1.jpg", "白鹭", None, "confirmed", None, None),
-            row("E:/A", "2.jpg", "翠鸟", None, "confirmed", None, None),
-            row("E:/B", "3.jpg", "白鹭", None, "confirmed", None, None),
-            row("E:/B", "4.jpg", "白鹭", None, "confirmed", None, None),
+            row("E:/A", "1.jpg", "白鹭", None, "confirmed", None),
+            row("E:/A", "2.jpg", "翠鸟", None, "confirmed", None),
+            row("E:/B", "3.jpg", "白鹭", None, "confirmed", None),
+            row("E:/B", "4.jpg", "白鹭", None, "confirmed", None),
         ];
         db.replace_folder("E:/A", &rows[..2]).unwrap();
         db.replace_folder("E:/B", &rows[2..]).unwrap();
@@ -596,14 +471,14 @@ mod tests {
         db.replace_folder(
             "E:/A",
             &[
-                row("E:/A", "1.jpg", "白鹭", None, "confirmed", None, None),
-                row("E:/A", "2.jpg", "翠鸟", None, "confirmed", None, None),
+                row("E:/A", "1.jpg", "白鹭", None, "confirmed", None),
+                row("E:/A", "2.jpg", "翠鸟", None, "confirmed", None),
             ],
         )
         .unwrap();
         db.replace_folder(
             "E:/B",
-            &[row("E:/B", "3.jpg", "白鹭", None, "confirmed", None, None)],
+            &[row("E:/B", "3.jpg", "白鹭", None, "confirmed", None)],
         )
         .unwrap();
         assert_eq!(db.distinct_folder_count().unwrap(), 2);
@@ -611,116 +486,4 @@ mod tests {
         assert_eq!(db.distinct_folder_count().unwrap(), 1);
     }
 
-    #[test]
-    fn test_global_db_log_correction_and_stats() {
-        let tmp = TempDir::new().unwrap();
-        let db = GlobalDb::open(tmp.path()).unwrap();
-        // 1.jpg 白鹭：从未修正（未被修正计数）
-        // 2.jpg 苍鹭：模型预测白鹭 → 人工改为苍鹭（species_index 已是苍鹭）
-        // 3.jpg 白鹭：模型预测白鹭 → 人工改苍鹭 → 重扫覆盖回白鹭（判定被修正走）
-        // 4.jpg 翠鸟：从未修正
-        db.upsert_rows(&[
-            row("E:/A", "1.jpg", "白鹭", Some(90.0), "confirmed", None, None),
-            row("E:/A", "2.jpg", "苍鹭", Some(100.0), "confirmed", None, None),
-            row("E:/A", "3.jpg", "白鹭", Some(85.0), "confirmed", None, None),
-            row("E:/A", "4.jpg", "翠鸟", Some(95.0), "confirmed", None, None),
-        ])
-        .unwrap();
-        db.log_correction("E:/A", "2.jpg", "白鹭", "苍鹭", Some(90.0)).unwrap();
-        db.log_correction("E:/A", "3.jpg", "白鹭", "苍鹭", Some(85.0)).unwrap();
-
-        let stats = db.correction_stats().unwrap();
-        let bailu = stats.iter().find(|s| s.bird_name == "白鹭").unwrap();
-        // predicted = 当前名为白鹭的行数（1.jpg + 3.jpg）= 2；3.jpg 被修正走 → 1
-        assert_eq!(bailu.predicted_count, 2);
-        assert_eq!(bailu.corrected_away_count, 1);
-        assert!((bailu.accuracy - 0.5).abs() < 1e-9);
-        // 苍鹭：被人工改入，最新 new_bird == 当前名 → 判未修正
-        let cang = stats.iter().find(|s| s.bird_name == "苍鹭").unwrap();
-        assert_eq!(cang.predicted_count, 1);
-        assert_eq!(cang.corrected_away_count, 0);
-        assert_eq!(cang.accuracy, 1.0);
-        // 翠鸟：从未修正，全计数保留
-        let cui = stats.iter().find(|s| s.bird_name == "翠鸟").unwrap();
-        assert_eq!(cui.predicted_count, 1);
-        assert_eq!(cui.corrected_away_count, 0);
-        assert_eq!(cui.accuracy, 1.0);
-    }
-
-    #[test]
-    fn test_global_db_correction_stats_chain_latest_wins() {
-        let tmp = TempDir::new().unwrap();
-        let db = GlobalDb::open(tmp.path()).unwrap();
-        // 链式修正 麻雀 → 白鹭 → 山斑鸠：只取最新一条（new_bird = 山斑鸠 == 当前名）
-        db.upsert_rows(&[row("E:/A", "5.jpg", "山斑鸠", Some(100.0), "confirmed", None, None)])
-            .unwrap();
-        db.log_correction("E:/A", "5.jpg", "麻雀", "白鹭", Some(70.0)).unwrap();
-        db.log_correction("E:/A", "5.jpg", "白鹭", "山斑鸠", Some(100.0)).unwrap();
-        let stats = db.correction_stats().unwrap();
-        // 取舍说明：被改入的行计入目标鸟种 predicted（最新 new_bird == 当前名 → 未修正）
-        let shan = stats.iter().find(|s| s.bird_name == "山斑鸠").unwrap();
-        assert_eq!(shan.predicted_count, 1);
-        assert_eq!(shan.corrected_away_count, 0);
-        // 麻雀在 species_index 中已无行 → 不参与聚合（原预测只能从日志反查，属已知近似）
-        assert!(stats.iter().all(|s| s.bird_name != "麻雀"));
-    }
-
-    #[test]
-    fn test_global_db_correction_stats_accuracy_boundaries() {
-        let tmp = TempDir::new().unwrap();
-        let db = GlobalDb::open(tmp.path()).unwrap();
-        // 全对：白鹭 3 张从未修正 → accuracy 1.0
-        // 全被改：麻雀 2 张均被改成白鹭 → accuracy 0.0
-        db.upsert_rows(&[
-            row("E:/A", "1.jpg", "白鹭", Some(90.0), "confirmed", None, None),
-            row("E:/A", "2.jpg", "白鹭", Some(80.0), "confirmed", None, None),
-            row("E:/A", "3.jpg", "白鹭", Some(70.0), "confirmed", None, None),
-            row("E:/A", "4.jpg", "麻雀", Some(60.0), "confirmed", None, None),
-            row("E:/A", "5.jpg", "麻雀", Some(55.0), "confirmed", None, None),
-        ])
-        .unwrap();
-        db.log_correction("E:/A", "4.jpg", "麻雀", "白鹭", Some(60.0)).unwrap();
-        db.log_correction("E:/A", "5.jpg", "麻雀", "白鹭", Some(55.0)).unwrap();
-
-        let stats = db.correction_stats().unwrap();
-        let bailu = stats.iter().find(|s| s.bird_name == "白鹭").unwrap();
-        assert_eq!(bailu.predicted_count, 3);
-        assert_eq!(bailu.corrected_away_count, 0);
-        assert_eq!(bailu.accuracy, 1.0);
-        let maque = stats.iter().find(|s| s.bird_name == "麻雀").unwrap();
-        assert_eq!(maque.predicted_count, 2);
-        assert_eq!(maque.corrected_away_count, 2);
-        assert_eq!(maque.accuracy, 0.0);
-    }
-
-    #[test]
-    fn test_global_db_frequent_species() {
-        let tmp = TempDir::new().unwrap();
-        let db = GlobalDb::open(tmp.path()).unwrap();
-        // 白鹭 3 张、翠鸟 2 张、麻雀 1 张、空白名 1 张（trim 过滤）
-        db.replace_folder(
-            "E:/A",
-            &[
-                row("E:/A", "1.jpg", "白鹭", None, "confirmed", None, None),
-                row("E:/A", "2.jpg", "白鹭", None, "confirmed", None, None),
-                row("E:/A", "3.jpg", "白鹭", None, "confirmed", None, None),
-                row("E:/A", "4.jpg", "翠鸟", None, "confirmed", None, None),
-                row("E:/A", "5.jpg", "翠鸟", None, "confirmed", None, None),
-                row("E:/A", "6.jpg", "麻雀", None, "confirmed", None, None),
-                row("E:/A", "7.jpg", "", None, "confirmed", None, None),
-            ],
-        )
-        .unwrap();
-        // 张数降序：白鹭在前；空名被排除
-        let all = db.frequent_species(10).unwrap();
-        assert_eq!(all, vec!["白鹭", "翠鸟", "麻雀"]);
-        // limit 截断
-        let top = db.frequent_species(2).unwrap();
-        assert_eq!(top, vec!["白鹭", "翠鸟"]);
-        // 同张数按鸟名升序（确定性）
-        db.upsert_rows(&[row("E:/B", "8.jpg", "麻雀", None, "confirmed", None, None)])
-            .unwrap();
-        let tie = db.frequent_species(10).unwrap();
-        assert_eq!(tie, vec!["白鹭", "翠鸟", "麻雀"]);
-    }
 }

@@ -9,7 +9,6 @@ pub mod export_ebird;
 pub mod histogram;
 pub mod ops;
 pub mod phash;
-pub mod quality;
 pub mod scanner;
 pub mod template;
 pub mod thumbnail;

@@ -1,5 +1,9 @@
 # 0005 — 识别管线第四阶段：鸟眼锐度评分（eye.onnx）
 
+> **2026-09-22 已整体删除，本 ADR 仅作历史记录**：鸟眼锐度阶段（eye.onnx → 关键点 → 连续分）
+> 已随通用化收尾移除，见 [ADR 0010](0010-general-recognition-cleanup.md)。recognition 表的
+> `eye_sharpness` / `eye_bbox` 列在迁移链末尾 DROP。
+
 ## 状态
 
 已接受

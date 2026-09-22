@@ -110,9 +110,9 @@ pub fn render_slideshow(
                                 .unwrap_or_default();
                             this.child(div().font_medium().text_color(rgb(0xffffff)).child(fname))
                         })
-                        // 鸟种
+                        // 物种
                         .when_some(
-                            meta.as_ref().and_then(|m| m.bird_name.as_ref()),
+                            meta.as_ref().and_then(|m| m.taxon_name.as_ref()),
                             |this, name| {
                                 this.child(
                                     div()

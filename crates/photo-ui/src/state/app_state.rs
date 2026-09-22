@@ -51,7 +51,6 @@ pub enum ActiveDialog {
     Import,
     Export,
     Duplicates,
-    Correct(usize),
     BurstConfirm,
     BatchConfirm(photo_domain::BatchOpType),
 }
@@ -67,14 +66,14 @@ pub enum SettingsTab {
     About,
 }
 
-/// 字体下拉候选项模型（支持中英文双向实时搜索过滤）
+/// 下拉候选项模型（value = 稳定机器值 / label = 显示名，支持中英文实时搜索过滤）
 #[derive(Clone, Debug, PartialEq)]
-pub struct FontOption {
+pub struct ChoiceOption {
     pub value: SharedString,
     pub label: SharedString,
 }
 
-impl SearchableListItem for FontOption {
+impl SearchableListItem for ChoiceOption {
     type Value = SharedString;
 
     fn title(&self) -> SharedString {
@@ -94,10 +93,23 @@ impl SearchableListItem for FontOption {
     }
 }
 
-pub type FontSelectState = SelectState<SearchableVec<FontOption>>;
+pub type ChoiceSelectState = SelectState<SearchableVec<ChoiceOption>>;
+
+/// 构造静态下拉选项（value/label 成对，顺序即显示顺序）
+pub fn choice_options(items: &[(&str, &str)]) -> SearchableVec<ChoiceOption> {
+    SearchableVec::new(
+        items
+            .iter()
+            .map(|(value, label)| ChoiceOption {
+                value: (*value).into(),
+                label: (*label).into(),
+            })
+            .collect::<Vec<_>>(),
+    )
+}
 
 /// 构建包含常用推荐预设与本机所有已安装字体的搜索集合（跨平台全字体枚举）
-pub fn build_font_options(current_font: &str, cx: &App) -> SearchableVec<FontOption> {
+pub fn build_font_options(current_font: &str, cx: &App) -> SearchableVec<ChoiceOption> {
     let presets: &[(&str, &str)] = &[
         (".SystemUIFont", "系统默认 UI 字体 (.SystemUIFont)"),
         ("Microsoft YaHei UI", "微软雅黑 (Microsoft YaHei UI)"),
@@ -119,7 +131,7 @@ pub fn build_font_options(current_font: &str, cx: &App) -> SearchableVec<FontOpt
 
     // 1. 常用推荐预设
     for &(val, label) in presets {
-        options.push(FontOption {
+        options.push(ChoiceOption {
             value: val.into(),
             label: label.into(),
         });
@@ -131,7 +143,7 @@ pub fn build_font_options(current_font: &str, cx: &App) -> SearchableVec<FontOpt
     if !current_trimmed.is_empty() && !seen.contains(current_trimmed) {
         options.insert(
             0,
-            FontOption {
+            ChoiceOption {
                 value: current_trimmed.to_string().into(),
                 label: format!("{current_trimmed} (当前配置)").into(),
             },
@@ -143,7 +155,7 @@ pub fn build_font_options(current_font: &str, cx: &App) -> SearchableVec<FontOpt
     let sys_fonts = cx.text_system().all_font_names();
     for font in sys_fonts {
         if !seen.contains(&font) && !font.starts_with('.') {
-            options.push(FontOption {
+            options.push(ChoiceOption {
                 value: font.clone().into(),
                 label: font.clone().into(),
             });
@@ -170,7 +182,6 @@ pub struct AppState {
     pub criteria: FilterCriteria,
     pub sort_by: SortBy,
     pub sort_direction: SortDirection,
-    pub quality_scores: HashMap<String, f64>,
     pub display_order: Vec<usize>,
     pub stack_groups: Vec<StackGroup>,
     pub burst_groups: BurstGroupMap,
@@ -233,6 +244,9 @@ pub struct AppState {
     /// 网格滚动句柄：每帧交给 `uniform_list.track_scroll`，并给 `Scrollbar` 当数据源
     /// （GPUI 的溢出滚动容器不会自动画滚动条，必须显式绑定）。
     pub grid_scroll: UniformListScrollHandle,
+    /// 网格容器实测尺寸（post-layout prepaint 回填）；缩略图边长按它算，
+    /// 首帧为空时按窗口与停靠区宽度估算。
+    pub grid_viewport_size: Option<(f64, f64)>,
     /// 拖宽去抖保存的世代号（350ms 内多次变更只落盘一次）
     layout_save_generation: u64,
     /// Dock 布局事件订阅（drop 即取消，必须持有）
@@ -269,9 +283,16 @@ pub struct AppState {
     /// 设置页「自定义全局字体」输入框（创建需要 Window，故在 AppState::build 里初始化）。
     pub font_input: Option<Entity<InputState>>,
     /// 设置页「全局界面字体」可搜索选择器（创建需要 Window，故在 AppState::build 里初始化）。
-    pub font_select: Option<Entity<FontSelectState>>,
+    pub font_select: Option<Entity<ChoiceSelectState>>,
     /// 字体选择器确认事件订阅（持有 Subscription 保证事件持续接收）
     pub _font_select_sub: Option<Subscription>,
+    /// 筛选栏「排序方式」下拉（创建需要 Window）
+    pub sort_select: Option<Entity<ChoiceSelectState>>,
+    /// 筛选栏「每行列数」下拉（创建需要 Window）
+    pub grid_cols_select: Option<Entity<ChoiceSelectState>>,
+    /// 两个下拉的确认事件订阅（持有保证持续接收）
+    pub _sort_select_sub: Option<Subscription>,
+    pub _grid_cols_select_sub: Option<Subscription>,
 
     // ── 导入弹窗（SD 卡 / 目录）──
     pub import: ImportState,
@@ -579,7 +600,6 @@ impl AppState {
             criteria: default_filter_criteria(),
             sort_by: SortBy::FileName,
             sort_direction: SortDirection::Ascending,
-            quality_scores: HashMap::new(),
             display_order: Vec::new(),
             stack_groups: Vec::new(),
             burst_groups: HashMap::new(),
@@ -621,6 +641,7 @@ impl AppState {
             filter_bar_expanded: false,
             grid_columns: 4,
             grid_scroll: UniformListScrollHandle::new(),
+            grid_viewport_size: None,
             layout_save_generation: 0,
             _dock_subscription: None,
 
@@ -651,6 +672,10 @@ impl AppState {
             font_input: None,
             font_select: None,
             _font_select_sub: None,
+            sort_select: None,
+            grid_cols_select: None,
+            _sort_select_sub: None,
+            _grid_cols_select_sub: None,
             import: ImportState::default(),
             import_dest_input: None,
             import_rename_input: None,
@@ -811,6 +836,46 @@ impl AppState {
         });
     }
 
+    /// 设置排序方式（筛选栏下拉的唯一入口；排序变化要重算管线）
+    pub fn set_sort_by(&mut self, sort_by: SortBy, cx: &mut Context<Self>) {
+        if self.sort_by == sort_by {
+            return;
+        }
+        self.sort_by = sort_by;
+        self.recompute_pipeline();
+        cx.notify();
+    }
+
+    /// 设置网格每行列数（钳制 2–5，写回配置）
+    pub fn set_grid_columns(&mut self, cols: usize, cx: &mut Context<Self>) {
+        let cols = cols.clamp(2, 5);
+        if self.grid_columns == cols {
+            return;
+        }
+        self.grid_columns = cols;
+        self.app_config.grid_columns = cols as u32;
+        self.save_config();
+        cx.notify();
+    }
+
+    /// 同步「排序方式」下拉的选中项（排序从别处改动时调用）
+    pub fn sync_sort_select(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(select) = self.sort_select.clone() else {
+            return;
+        };
+        let value: SharedString = crate::model::sort_by_value(self.sort_by).into();
+        select.update(cx, |state, cx| state.set_selected_value(&value, window, cx));
+    }
+
+    /// 同步「每行列数」下拉的选中项（设置页改列数时调用）
+    pub fn sync_grid_cols_select(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(select) = self.grid_cols_select.clone() else {
+            return;
+        };
+        let value: SharedString = self.grid_columns.to_string().into();
+        select.update(cx, |state, cx| state.set_selected_value(&value, window, cx));
+    }
+
     /// 设置主题色 seed；格式非法则不改动并返回 false（调用方给用户提示）。
     pub fn set_accent(&mut self, hex: &str, window: Option<&mut Window>, cx: &mut App) -> bool {
         let Some(normalized) = photo_config::normalize_accent_hex(hex) else {
@@ -878,7 +943,6 @@ impl AppState {
             &self.criteria,
             self.sort_by,
             self.sort_direction,
-            Some(&self.quality_scores),
         );
 
         // 2. 堆叠分组

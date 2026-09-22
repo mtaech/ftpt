@@ -24,7 +24,7 @@ use std::time::Duration;
 use gpui_kit::component::scroll::ScrollbarHandle;
 use gpui_kit::{AppContext as _, Bounds, Point, WindowBounds, WindowOptions, point, px, size};
 
-use photo_ui::actions::Rescan;
+use photo_ui::actions::{Rescan, ToggleLeftPanel, ToggleRightPanel};
 use photo_ui::state::{AppState, ViewMode};
 
 /// 在窗口上派发一个动作（与视图里 window.dispatch_action(...) 同一条路径）。
@@ -76,13 +76,21 @@ fn main() {
         photo_ui::theme::apply(None, false, None, None, cx);
         AppState::register_keybindings(cx);
 
+        // 窗口尺寸可用 PHOTO_SMOKE_WINDOW=WxH 覆盖（量不同宽度下的网格布局用）
+        let (win_w, win_h) = std::env::var("PHOTO_SMOKE_WINDOW")
+            .ok()
+            .and_then(|v| {
+                let (w, h) = v.split_once('x')?;
+                Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?))
+            })
+            .unwrap_or((1100.0, 760.0));
         let window_options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
                 origin: Point {
                     x: px(0.),
                     y: px(0.),
                 },
-                size: size(px(1100.), px(760.)),
+                size: size(px(win_w), px(win_h)),
             })),
             titlebar: None,
             ..Default::default()
@@ -122,19 +130,51 @@ fn main() {
                     std::process::exit(1);
                 }
 
-                // 网格态、3 列（行数够多才有滚动条可言）
+                // 网格态（行数够多才有滚动条可言）；列数可用 PHOTO_SMOKE_COLS 覆盖来复现宽网格
+                let cols: usize = std::env::var("PHOTO_SMOKE_COLS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(3);
                 let _ = async_cx.update(|cx| {
                     task_state.update(cx, |state, cx| {
                         state.view_mode = ViewMode::Grid;
-                        state.grid_columns = 3;
+                        state.grid_columns = cols;
                         cx.notify();
                     });
                 });
                 pump(async_cx, 1200).await;
 
+                // 可选：收起左右侧栏，复现并目检"侧栏隐藏后网格变宽"时的 cell 观感
+                if std::env::var("PHOTO_SMOKE_HIDE_PANELS").is_ok() {
+                    fire(async_cx, handle, Box::new(ToggleLeftPanel));
+                    pump(async_cx, 300).await;
+                    fire(async_cx, handle, Box::new(ToggleRightPanel));
+                    pump(async_cx, 300).await;
+                }
+
                 let viewport_h = async_cx.update(|cx| {
                     f32::from(task_state.read(cx).grid_scroll.viewport_bounds().size.height)
                 });
+                let measured = async_cx.update(|cx| task_state.read(cx).grid_viewport_size);
+                let list_vw = async_cx.update(|cx| {
+                    f32::from(
+                        task_state
+                            .read(cx)
+                            .grid_scroll
+                            .viewport_bounds()
+                            .size
+                            .width,
+                    )
+                });
+                let mut win_w = 0.0f32;
+                let _ = async_cx.update(|cx| {
+                    let _ = handle.update(cx, |_view, window, _cx| {
+                        win_w = f32::from(window.viewport_size().width);
+                    });
+                });
+                eprintln!(
+                    "[diag] 窗口宽={win_w:.0} 列数={cols} 实测容器={measured:?} 列表视口宽={list_vw:.0}"
+                );
                 let content_h = async_cx.update(|cx| {
                     f32::from(task_state.read(cx).grid_scroll.content_size().height)
                 });
@@ -171,9 +211,12 @@ fn main() {
                     .ok_or(())
                 {
                     eprintln!("保持窗口 {hold_ms}ms 供外部截图…");
+                    // PHOTO_SMOKE_HOLD_STILL=1：保持窗口但不推偏移——注入鼠标做交互验证时，
+                    // 画面必须静止才能逐像素对比（默认会轻推偏移让滚动条 thumb 停在可见态）
+                    let still = std::env::var("PHOTO_SMOKE_HOLD_STILL").is_ok();
                     let steps = (hold_ms / 250).max(1);
                     for i in 0..steps {
-                        let y = -200.0 - (i % 5) as f32 * 60.0;
+                        let y = if still { -200.0 } else { -200.0 - (i % 5) as f32 * 60.0 };
                         let _ = async_cx.update(|cx| {
                             task_state.update(cx, |state, cx| {
                                 state.grid_scroll.set_offset(point(px(0.), px(y)));

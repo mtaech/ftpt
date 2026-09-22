@@ -3,7 +3,7 @@
 //! - **exif_cache**：缓存表，EXIF 元数据的 LRU 风格缓存。
 //!   缓存表**可被清除**（清空释放空间）——丢失后只会触发重新提取。
 //!
-//! - **xmp_meta** / **recognition** / **keywords**：真相表，存储 XMP 元数据、鸟类识别结果
+//! - **xmp_meta** / **recognition** / **keywords**：真相表，存储 XMP 元数据、物种识别结果
 //!   与用户关键词标签。
 //!   **任何清理缓存的操作都不得触碰 xmp_meta、recognition 与 keywords 表**——
 //!   识别结果不可重新计算（需要 YOLO + 模型推理），XMP 元数据与关键词为用户手动编辑。
@@ -16,8 +16,8 @@ use thiserror::Error;
 use rusqlite_migration::{Migrations, M};
 
 use photo_domain::{
-    AdjustParams, BBox, BirdCandidate, ImageFormat, Recognition, RecognitionFailureStage,
-    RecognitionStatus,
+    AdjustParams, BBox, CnLevel, ImageFormat, Recognition, RecognitionFailureStage,
+    RecognitionStatus, TaxonCandidate, TaxonMatch,
 };
 use photo_domain::ExifMetadata;
 use photo_domain::XmpMetadata;
@@ -97,6 +97,22 @@ fn folder_migrations() -> Migrations<'static> {
                 keyword TEXT NOT NULL,
                 PRIMARY KEY (path, keyword)
             );",
+        ),
+        // 识别结论泛化到物种：追加学名与中文名级别两列。
+        // BioCLIP 后端大多数预测不在本地名录里（bird_id 为 NULL），只存中文名的话这些
+        // 结果重载后只剩空字符串（展示名退化），必须持久化学名；cn_level 记中文名来自
+        // 种 / 属 / 科哪一级。migration 3 的建表语句是 v3 历史 schema，保持原样不动
+        // （新库同样按 3 → 本条顺序执行），新列在链末尾 ALTER 补上，新库与迁移库 schema 一致。
+        // ALTER TABLE 一次只能加一列，两条分开写。
+        M::up(
+            "ALTER TABLE recognition ADD COLUMN latin_name TEXT;
+             ALTER TABLE recognition ADD COLUMN cn_level TEXT;",
+        ),
+        // 移除鸟眼锐度（该阶段 2026-09-22 整体删除）。链中间的 ADD COLUMN 是历史，
+        // 不能删改（会打乱既有库的 user_version 记账），所以在末尾 DROP 收敛到同一 schema。
+        M::up(
+            "ALTER TABLE recognition DROP COLUMN eye_sharpness;
+             ALTER TABLE recognition DROP COLUMN eye_bbox;",
         ),
     ])
 }
@@ -337,74 +353,29 @@ impl FolderDb {
         let normalized = rel_path.replace('\\', "/");
         let bbox_str = rec.bbox.as_ref().map(|b| b.to_db_string());
         let candidates_str = serde_json::to_string(&rec.candidates)?;
-        let eye_bbox_str = rec.eye_bbox.as_ref().map(|b| b.to_db_string());
+        // bird_id 列即名录主键（taxon_id），列名保持历史不动；BioCLIP 预测不在名录中时为 NULL。
+        // ranks 是七级分类明细，不持久化（识别当次可用，落库无消费方）。
         conn.execute(
             "INSERT OR REPLACE INTO recognition
              (rel_path, status, bird_id, bird_name, class_index, confidence,
               bbox, candidates, failure_stage, recognized_at,
-              eye_sharpness, eye_bbox)
+              latin_name, cn_level)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             rusqlite::params![
                 normalized,
                 rec.status.as_str(),
-                rec.bird.as_ref().map(|b| b.bird_id),
-                rec.bird.as_ref().map(|b| b.cn_name.as_str()),
+                rec.taxon.as_ref().and_then(|t| t.taxon_id),
+                rec.taxon.as_ref().map(|t| t.cn_name.as_str()),
                 rec.class_index.map(|v| v as i64),
                 rec.confidence,
                 bbox_str,
                 candidates_str,
                 rec.failure_stage.as_str(),
                 rec.recognized_at,
-                rec.eye_sharpness,
-                eye_bbox_str,
+                rec.taxon.as_ref().map(|t| t.latin_name.as_str()),
+                rec.taxon.as_ref().map(|t| t.cn_level.as_str()),
             ],
         )?;
-        Ok(())
-    }
-
-    /// 人工修正鸟种：更新识别行的鸟种字段（bird_id/bird_name）并置状态 Confirmed。
-    ///
-    /// 「人工来源」用现有字段表达（不加列/表）：status=confirmed + confidence=100
-    /// （人工指定即权威结论，恒 100；模型置信恒 <100）+ recognized_at 刷新为当前时间；
-    /// 持久审计在 global_db 的 correction_log（old→new + 时间，`photo-ui` 侧写入）。
-    /// 保留原 class_index/bbox/眼数据；清空 Top-5 候选（模型备选对人工结论无意义，
-    /// 对齐 correct_bird 语义）。行不存在时插入一条全新 Confirmed 行（从未识别
-    /// 直接人工指定，对齐 correct_bird「无预测记录直接人工指定」）。
-    ///
-    /// 键约定与其他 recognition 方法一致：rel_path = 相对文件夹根的正斜杠路径
-    /// （学名不持久化——recognition 表无学名列，名录库可按 bird_id 反查）。
-    pub fn update_recognition_species(
-        &self,
-        rel_path: &str,
-        sp_id: i64,
-        cn_name: &str,
-    ) -> Result<(), FolderDbError> {
-        let conn = self.conn.lock();
-        let normalized = rel_path.replace('\\', "/");
-        let now = chrono::Utc::now().to_rfc3339();
-        let exists = conn
-            .prepare_cached("SELECT 1 FROM recognition WHERE rel_path = ?1")?
-            .exists(rusqlite::params![normalized])?;
-        if exists {
-            conn.execute(
-                "UPDATE recognition
-                 SET status = 'confirmed', bird_id = ?1, bird_name = ?2,
-                     confidence = 100.0, candidates = '[]',
-                     failure_stage = 'none', recognized_at = ?3
-                 WHERE rel_path = ?4",
-                rusqlite::params![sp_id, cn_name, now, normalized],
-            )?;
-        } else {
-            conn.execute(
-                "INSERT INTO recognition
-                 (rel_path, status, bird_id, bird_name, class_index, confidence,
-                  bbox, candidates, failure_stage, recognized_at,
-                  eye_sharpness, eye_bbox)
-                 VALUES (?1, 'confirmed', ?2, ?3, NULL, 100.0, NULL, '[]', 'none', ?4,
-                         NULL, NULL)",
-                rusqlite::params![normalized, sp_id, cn_name, now],
-            )?;
-        }
         Ok(())
     }
 
@@ -415,7 +386,7 @@ impl FolderDb {
         let mut stmt = conn.prepare_cached(
             "SELECT rel_path, status, bird_id, bird_name, class_index, confidence,
                     bbox, candidates, failure_stage, recognized_at,
-                    eye_sharpness, eye_bbox
+                    latin_name, cn_level
              FROM recognition WHERE rel_path = ?1",
         )?;
         match stmt.query_row(rusqlite::params![normalized], |row| row_to_recognition(row)) {
@@ -431,7 +402,7 @@ impl FolderDb {
         let mut stmt = conn.prepare_cached(
             "SELECT rel_path, status, bird_id, bird_name, class_index, confidence,
                     bbox, candidates, failure_stage, recognized_at,
-                    eye_sharpness, eye_bbox
+                    latin_name, cn_level
              FROM recognition",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -483,7 +454,7 @@ impl FolderDb {
             let mut stmt = conn.prepare_cached(
                 "SELECT rel_path, status, bird_id, bird_name, class_index, confidence,
                         bbox, candidates, failure_stage, recognized_at,
-                        eye_sharpness, eye_bbox
+                        latin_name, cn_level
                  FROM recognition WHERE rel_path = ?1",
             )?;
             for (src_rel, dst_rel) in entries {
@@ -1025,6 +996,12 @@ fn exif_to_params<'a>(
     ]
 }
 
+/// 行 → Recognition（列序与各 SELECT 的列清单一致）。
+///
+/// 物种字段映射：bird_id 列即 taxon_id（历史列名保留不动），bird_name 列即 cn_name。
+/// 两者都 NULL → taxon 为 None；只要一侧非空就重建——BioCLIP 预测大多不在本地名录里
+/// （taxon_id 为 NULL），学名与中文名必须保住。
+/// ranks（七级分类）不持久化，读回恒为空 vec。
 fn row_to_recognition(row: &rusqlite::Row) -> rusqlite::Result<Result<Recognition, serde_json::Error>> {
     let status_str: String = row.get(1)?;
     let status = RecognitionStatus::from_str(&status_str).unwrap_or(RecognitionStatus::Unrecognized);
@@ -1037,43 +1014,46 @@ fn row_to_recognition(row: &rusqlite::Row) -> rusqlite::Result<Result<Recognitio
     let bbox_str: Option<String> = row.get(6)?;
     let candidates_str: Option<String> = row.get(7)?;
     let recognized_at: String = row.get(9)?;
-    let eye_sharpness: Option<f32> = row.get(10)?;
-    let eye_bbox_str: Option<String> = row.get(11)?;
+    let latin_name: Option<String> = row.get(10)?;
+    let cn_level_str: Option<String> = row.get(11)?;
 
-    let bird = match (bird_id, bird_name) {
-        (Some(id), Some(cn)) => {
-            Some(photo_domain::BirdMatch {
-                bird_id: id,
-                cn_name: cn,
-                latin_name: String::new(),
-            })
-        }
-        _ => None,
+    let taxon = if bird_id.is_none() && bird_name.is_none() {
+        None
+    } else {
+        Some(TaxonMatch {
+            taxon_id: bird_id,
+            cn_name: bird_name.unwrap_or_default(),
+            latin_name: latin_name.unwrap_or_default(),
+            // 空列 / 非法文本都按「无中文名」处理（历史行 cn_level 为 NULL）
+            cn_level: cn_level_str
+                .as_deref()
+                .and_then(CnLevel::from_str)
+                .unwrap_or(CnLevel::Missing),
+            ranks: vec![],
+        })
     };
 
-    let candidates: Vec<BirdCandidate> = match candidates_str {
+    let candidates: Vec<TaxonCandidate> = match candidates_str {
         Some(s) => serde_json::from_str(&s).unwrap_or_default(),
         None => Vec::new(),
     };
 
     Ok(Ok(Recognition {
         status,
-        bird,
+        taxon,
         class_index: class_index.map(|v| v as u32),
         confidence: confidence.map(|v| v as f32),
         bbox: bbox_str.and_then(|s| BBox::parse(&s)),
         candidates,
         failure_stage,
         recognized_at,
-        eye_sharpness,
-        eye_bbox: eye_bbox_str.and_then(|s| BBox::parse(&s)),
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photo_domain::{BirdMatch, BirdCandidate, CameraInfo, GpsInfo, ShootingParams};
+    use photo_domain::{CameraInfo, GpsInfo, ShootingParams};
     use tempfile::TempDir;
 
     fn make_exif() -> ExifMetadata {
@@ -1114,32 +1094,33 @@ mod tests {
         }
     }
 
+    /// 名录命中的物种（taxon_id 有值 + 种级中文名）
+    fn taxon(id: i64, cn: &str, latin: &str) -> TaxonMatch {
+        TaxonMatch {
+            taxon_id: Some(id),
+            cn_name: cn.into(),
+            latin_name: latin.into(),
+            cn_level: CnLevel::Species,
+            ranks: vec![],
+        }
+    }
+
     fn make_recognition() -> Recognition {
         Recognition {
             status: RecognitionStatus::NeedsReview,
-            bird: Some(BirdMatch {
-                bird_id: 42,
-                cn_name: "大斑啄木鸟".into(),
-                latin_name: "Dendrocopos major".into(),
-            }),
+            taxon: Some(taxon(42, "大斑啄木鸟", "Dendrocopos major")),
             class_index: Some(123),
             confidence: Some(95.5),
             bbox: Some(BBox::new(0.1, 0.2, 0.8, 0.9)),
             candidates: vec![
-                BirdCandidate {
+                TaxonCandidate {
                     class_index: 123,
                     confidence: 95.5,
-                    bird: Some(BirdMatch {
-                        bird_id: 42,
-                        cn_name: "大斑啄木鸟".into(),
-                        latin_name: "Dendrocopos major".into(),
-                    }),
+                    taxon: Some(taxon(42, "大斑啄木鸟", "Dendrocopos major")),
                 },
             ],
             failure_stage: RecognitionFailureStage::None,
             recognized_at: "2026-07-28T10:00:00Z".into(),
-            eye_sharpness: Some(42.5),
-            eye_bbox: Some(BBox::new(0.3, 0.4, 0.5, 0.6)),
         }
     }
 
@@ -1200,7 +1181,9 @@ mod tests {
         db.upsert_recognition("photos/bird.jpg", &rec).unwrap();
         let got = db.get_recognition("photos/bird.jpg").unwrap().expect("should exist");
         assert_eq!(got.status, RecognitionStatus::NeedsReview);
-        assert_eq!(got.bird.as_ref().map(|b| b.cn_name.as_str()), Some("大斑啄木鸟"));
+        assert_eq!(got.taxon.as_ref().map(|t| t.cn_name.as_str()), Some("大斑啄木鸟"));
+        assert_eq!(got.taxon.as_ref().map(|t| t.latin_name.as_str()), Some("Dendrocopos major"));
+        assert_eq!(got.taxon.as_ref().map(|t| t.cn_level), Some(CnLevel::Species));
         assert_eq!(got.confidence, Some(95.5));
         assert!(got.bbox.is_some());
     }
@@ -1240,7 +1223,8 @@ mod tests {
             .unwrap();
         let got = dst.get_recognition("dst/bird.jpg").unwrap().expect("should be copied");
         assert_eq!(got.status, RecognitionStatus::NeedsReview);
-        assert_eq!(got.bird.as_ref().map(|b| b.bird_id), Some(42));
+        assert_eq!(got.taxon.as_ref().and_then(|t| t.taxon_id), Some(42));
+        assert_eq!(got.taxon.as_ref().map(|t| t.latin_name.as_str()), Some("Dendrocopos major"));
     }
 
     #[test]
@@ -1263,7 +1247,7 @@ mod tests {
         // 创建遗留 .pt-cache.db 文件
         let legacy_path = tmp.path().join(".pt-cache.db");
         {
-            let mut conn = rusqlite::Connection::open(&legacy_path).unwrap();
+            let conn = rusqlite::Connection::open(&legacy_path).unwrap();
             conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;").unwrap();
             conn.execute_batch(
                 "CREATE TABLE exif_cache (
@@ -1333,83 +1317,28 @@ mod tests {
     }
 
     #[test]
-    fn test_recognition_eye_fields_roundtrip() {
+    fn test_recognition_taxon_without_catalog_id_roundtrip() {
+        // BioCLIP 场景：预测不在本地名录（taxon_id 为 None）、中文名无来源，学名必须保住
         let tmp = TempDir::new().unwrap();
         let db = FolderDb::open_in_dir(tmp.path()).unwrap();
         let mut rec = make_recognition();
-        rec.eye_sharpness = Some(88.3);
-        rec.eye_bbox = Some(BBox::new(0.2, 0.3, 0.45, 0.55));
-        db.upsert_recognition("photos/owl.jpg", &rec).unwrap();
-        let got = db.get_recognition("photos/owl.jpg").unwrap().expect("should exist");
-        assert_eq!(got.eye_sharpness, Some(88.3));
-        assert_eq!(got.eye_bbox, Some(BBox::new(0.2, 0.3, 0.45, 0.55)));
-    }
-
-    #[test]
-    fn test_recognition_eye_fields_null_roundtrip() {
-        let tmp = TempDir::new().unwrap();
-        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
-        let mut rec = make_recognition();
-        rec.eye_sharpness = None;
-        rec.eye_bbox = None;
-        db.upsert_recognition("photos/crow.jpg", &rec).unwrap();
-        let got = db.get_recognition("photos/crow.jpg").unwrap().expect("should exist");
-        assert!(got.eye_sharpness.is_none());
-        assert!(got.eye_bbox.is_none());
-    }
-
-    #[test]
-    fn test_update_recognition_species_roundtrip() {
-        let tmp = TempDir::new().unwrap();
-        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
-        // 预置一条 NeedsReview 记录（含候选/检测框/眼数据），人工纠错后应只改鸟种与状态
-        let rec = make_recognition();
-        db.upsert_recognition("photos/sparrow.jpg", &rec).unwrap();
-        db.update_recognition_species("photos/sparrow.jpg", 7, "乌鸫")
-            .unwrap();
-        let got = db.get_recognition("photos/sparrow.jpg").unwrap().expect("should exist");
-        // 鸟种字段 + 状态 Confirmed + 人工来源标记（confidence=100 / candidates 清空）
-        assert_eq!(got.status, RecognitionStatus::Confirmed);
-        assert_eq!(got.bird.as_ref().map(|b| b.bird_id), Some(7));
-        assert_eq!(got.bird.as_ref().map(|b| b.cn_name.as_str()), Some("乌鸫"));
-        assert_eq!(got.confidence, Some(100.0));
-        assert!(got.candidates.is_empty());
-        assert_eq!(got.failure_stage, RecognitionFailureStage::None);
-        // 原检测框/眼数据保留（对齐 correct_bird 语义）
-        assert_eq!(got.bbox, rec.bbox);
-        assert_eq!(got.eye_sharpness, rec.eye_sharpness);
-        assert_eq!(got.eye_bbox, rec.eye_bbox);
-        // recognized_at 刷新为当前时间（不再是预置时间戳）
-        assert_ne!(got.recognized_at, rec.recognized_at);
-    }
-
-    #[test]
-    fn test_update_recognition_species_insert_when_missing() {
-        let tmp = TempDir::new().unwrap();
-        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
-        // 从未识别直接人工指定：应插入一条全新 Confirmed 行（对齐 correct_bird）
-        assert!(db.get_recognition("photos/new.jpg").unwrap().is_none());
-        db.update_recognition_species("photos/new.jpg", 2, "大山雀")
-            .unwrap();
-        let got = db.get_recognition("photos/new.jpg").unwrap().expect("should exist");
-        assert_eq!(got.status, RecognitionStatus::Confirmed);
-        assert_eq!(got.bird.as_ref().map(|b| b.cn_name.as_str()), Some("大山雀"));
-        assert_eq!(got.confidence, Some(100.0));
-        assert!(got.candidates.is_empty());
-        assert!(got.bbox.is_none());
-        assert!(got.class_index.is_none());
-    }
-
-    #[test]
-    fn test_update_recognition_species_backslash_normalized() {
-        let tmp = TempDir::new().unwrap();
-        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
-        // Windows 风格反斜杠 rel 键归一化为正斜杠（与其他 recognition 方法同约定）
-        db.update_recognition_species("sub\\a.jpg", 1, "麻雀").unwrap();
-        let got = db.get_recognition("sub/a.jpg").unwrap().expect("正斜杠键");
-        assert_eq!(got.bird.as_ref().map(|b| b.cn_name.as_str()), Some("麻雀"));
-        // 读取侧同样归一化：反斜杠键命中同一行（写读键约定一致）
-        assert!(db.get_recognition("sub\\a.jpg").unwrap().is_some());
+        rec.taxon = Some(TaxonMatch {
+            taxon_id: None,
+            cn_name: String::new(),
+            latin_name: "Corvus corax".into(),
+            cn_level: CnLevel::Missing,
+            ranks: vec!["Animalia".into()],
+        });
+        db.upsert_recognition("photos/raven.jpg", &rec).unwrap();
+        let got = db.get_recognition("photos/raven.jpg").unwrap().expect("should exist");
+        let t = got.taxon.expect("taxon_id 为 None 也应重建：学名/中文名是唯一展示来源");
+        assert_eq!(t.taxon_id, None);
+        assert_eq!(t.cn_name, "");
+        assert_eq!(t.latin_name, "Corvus corax");
+        assert_eq!(t.cn_level, CnLevel::Missing);
+        assert_eq!(t.display_name(), "Corvus corax");
+        // ranks 不持久化：读回恒为空
+        assert!(t.ranks.is_empty());
     }
 
     #[test]
@@ -1419,8 +1348,8 @@ mod tests {
         std::fs::create_dir_all(&pt_dir).unwrap();
         let db_path = pt_dir.join("data.db");
         {
-            // 创建不含 eye 列的旧版数据库，模拟迁移前状态
-            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            // 创建 v3 的旧版数据库（不加锐度列），模拟迁移前状态
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS recognition (
                     rel_path    TEXT PRIMARY KEY,
@@ -1445,11 +1374,60 @@ mod tests {
             // 设置 user_version = 3，模拟前三版迁移已执行
             conn.pragma_update(None, "user_version", 3i64).unwrap();
         }
-        // 打开（触发迁移 4 追加 eye 列）
+        // 打开（触发迁移链：追加锐度列 → … → 末尾再 DROP 掉，收敛到当前 schema）
         let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        // 读 SELECT 已含 latin_name/cn_level：迁移漏列会在此报 no such column
         let got = db.get_recognition("old/bird.jpg").unwrap().expect("old row should exist");
-        assert!(got.eye_sharpness.is_none(), "迁移前旧行的 eye_sharpness 应为 None");
-        assert!(got.eye_bbox.is_none(), "迁移前旧行的 eye_bbox 应为 None");
+        // 旧两列均为 NULL → 无物种结论（不凭空字符串造出假物种）
+        assert_eq!(got.taxon, None, "旧行物种两列皆 NULL 时应为 None");
+    }
+
+    #[test]
+    fn test_recognition_schema_same_for_new_and_migrated_db() {
+        // 「新建 + 迁移」必须收敛到同一 schema：新库顺序执行迁移 1→7，旧库（v3 建表）
+        // 靠链末尾的 ALTER 补齐，两者 recognition 列集（名 + 类型 + 顺序）应完全一致。
+        fn columns(db: &FolderDb) -> Vec<(String, String)> {
+            let conn = db.conn.lock();
+            let mut stmt = conn.prepare("PRAGMA table_info(recognition)").unwrap();
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                })
+                .unwrap();
+            rows.filter_map(|r| r.ok()).collect()
+        }
+
+        let fresh = TempDir::new().unwrap();
+        let fresh_db = FolderDb::open_in_dir(fresh.path()).unwrap();
+
+        let old = TempDir::new().unwrap();
+        let pt = old.path().join(".pt");
+        std::fs::create_dir_all(&pt).unwrap();
+        {
+            let conn = rusqlite::Connection::open(pt.join("data.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS recognition (
+                    rel_path    TEXT PRIMARY KEY,
+                    status      TEXT NOT NULL,
+                    bird_id     INTEGER,
+                    bird_name   TEXT,
+                    class_index INTEGER,
+                    confidence  REAL,
+                    bbox        TEXT,
+                    candidates  TEXT,
+                    failure_stage TEXT,
+                    recognized_at TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 3i64).unwrap();
+        }
+        let migrated_db = FolderDb::open_in_dir(old.path()).unwrap();
+
+        let cols = columns(&fresh_db);
+        assert_eq!(cols, columns(&migrated_db), "新库与迁移库 recognition schema 应一致");
+        assert!(cols.iter().any(|(n, _)| n == "latin_name"));
+        assert!(cols.iter().any(|(n, _)| n == "cn_level"));
     }
 
     #[test]
@@ -1749,13 +1727,15 @@ mod tests {
 
     #[test]
     fn test_keywords_migration_old_db() {
-        // 模拟旧版库（user_version = 5，仅到 adjustments 迁移）：打开后应追加 keywords 表
+        // 模拟旧版库（user_version = 5，仅到 adjustments 迁移）：打开后应追加 keywords 表。
+        // v5 的真实 schema 含 recognition（v3 建表 + 迁移 4 的 eye 两列），链末尾新增的
+        // latin_name/cn_level 迁移会 ALTER 它，故这里一并建出（畸形缺表的旧库不在迁移修复范围）。
         let tmp = TempDir::new().unwrap();
         let pt_dir = tmp.path().join(".pt");
         std::fs::create_dir_all(&pt_dir).unwrap();
         let db_path = pt_dir.join("data.db");
         {
-            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS adjustments (
                     rel_path TEXT PRIMARY KEY,
@@ -1763,6 +1743,20 @@ mod tests {
                     contrast INTEGER NOT NULL DEFAULT 0,
                     saturation INTEGER NOT NULL DEFAULT 0,
                     crop TEXT
+                );
+                CREATE TABLE IF NOT EXISTS recognition (
+                    rel_path    TEXT PRIMARY KEY,
+                    status      TEXT NOT NULL,
+                    bird_id     INTEGER,
+                    bird_name   TEXT,
+                    class_index INTEGER,
+                    confidence  REAL,
+                    bbox        TEXT,
+                    candidates  TEXT,
+                    failure_stage TEXT,
+                    recognized_at TEXT NOT NULL,
+                    eye_sharpness REAL,
+                    eye_bbox    TEXT
                 );",
             )
             .unwrap();

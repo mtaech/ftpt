@@ -26,7 +26,10 @@ pub use filter::{
 pub use preview_math::{
     clamp_pan_axis, exceeds_master_res, fit_scale, pan_after_cursor_zoom, preview_center_offset,
 };
-pub use sort::{apply_filter_and_sort, compare_captures};
+pub use sort::{
+    GRID_COL_OPTIONS, SORT_OPTIONS, apply_filter_and_sort, compare_captures,
+    grid_columns_from_value, sort_by_from_value, sort_by_value,
+};
 pub use stacks::{
     STACK_TIME_GAP_MS, StackGroup, group_by_time, group_singles, group_stacks, pick_primary,
 };

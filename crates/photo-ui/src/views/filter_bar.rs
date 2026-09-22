@@ -1,19 +1,18 @@
 //! 筛选栏组件（仅网格态渲染，对应 §9.4）。
 //!
-//! - 折叠态（36px）：筛选开关 + 激活 chips + 排序下拉 + 升降序 + 列数切换
+//! - 折叠态（36px）：筛选开关 + 激活 chips + 排序下拉 + 升降序 + 列数下拉
 //! - 展开态：格式单选、最低星级、旗标单选、识别状态单选、颜色标签、重置全部
 
 use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    select::Select,
     tag::Tag,
     v_flex,
 };
 use gpui_kit::{ClickEvent, Context, IntoElement, Window, div, prelude::*, px};
-use photo_domain::{
-    ColorLabel, Flag, ImageFormat, Rating, RecognitionFilter, SortBy, SortDirection,
-};
+use photo_domain::{ColorLabel, Flag, ImageFormat, Rating, RecognitionFilter, SortDirection};
 
 use crate::model::filter::{default_filter_criteria, has_active_filters};
 use crate::state::AppState;
@@ -197,34 +196,15 @@ pub fn render_filter_bar(
                     h_flex()
                         .items_center()
                         .gap_2()
-                        // 排序方式切换
-                        .child(
-                            Button::new("btn-sort-by")
-                                .small()
-                                .ghost()
-                                .label(match state.sort_by {
-                                    SortBy::FileName => "文件名",
-                                    SortBy::DateTaken => "拍摄时间",
-                                    SortBy::FileSize => "文件大小",
-                                    SortBy::Rating => "星级评分",
-                                    SortBy::Modified => "修改时间",
-                                    SortBy::EyeSharpness => "鸟眼锐度",
-                                    SortBy::Quality => "技术质量分",
-                                })
-                                .on_click(cx.listener(|state, _, _, cx| {
-                                    state.sort_by = match state.sort_by {
-                                        SortBy::FileName => SortBy::DateTaken,
-                                        SortBy::DateTaken => SortBy::FileSize,
-                                        SortBy::FileSize => SortBy::Rating,
-                                        SortBy::Rating => SortBy::EyeSharpness,
-                                        SortBy::EyeSharpness => SortBy::Quality,
-                                        SortBy::Quality => SortBy::Modified,
-                                        SortBy::Modified => SortBy::FileName,
-                                    };
-                                    state.recompute_pipeline();
-                                    cx.notify();
-                                })),
-                        )
+                        // 排序方式（下拉选择，替代原来的「点击循环」）
+                        .when_some(state.sort_select.clone(), |this, select| {
+                            this.child(
+                                Select::new(&select)
+                                    .small()
+                                    .w(px(116.))
+                                    .menu_width(px(148.)),
+                            )
+                        })
                         // 升序/降序切换
                         .child(
                             Button::new("btn-sort-dir")
@@ -249,22 +229,15 @@ pub fn render_filter_bar(
                                     cx.notify();
                                 })),
                         )
-                        // 列数切换 (2-5)
-                        .child(
-                            Button::new("btn-grid-cols")
-                                .small()
-                                .ghost()
-                                .label(format!("{} 列", state.grid_columns))
-                                .tooltip("切换每行图片数 (2-5)")
-                                .on_click(cx.listener(|state, _, _, cx| {
-                                    state.grid_columns = if state.grid_columns >= 5 {
-                                        2
-                                    } else {
-                                        state.grid_columns + 1
-                                    };
-                                    cx.notify();
-                                })),
-                        ),
+                        // 每行列数（下拉选择，替代原来的「点击循环」）
+                        .when_some(state.grid_cols_select.clone(), |this, select| {
+                            this.child(
+                                Select::new(&select)
+                                    .small()
+                                    .w(px(84.))
+                                    .menu_width(px(96.)),
+                            )
+                        }),
                 ),
         )
         // ── 展开面板（条件组） ──
@@ -442,7 +415,7 @@ pub fn render_filter_bar(
                                     .text_xs()
                                     .w(px(60.))
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("鸟类识别"),
+                                    .child("物种识别"),
                             )
                             .child(render_filter_chip(
                                 "全部",

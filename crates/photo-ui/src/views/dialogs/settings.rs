@@ -347,12 +347,11 @@ fn build_general_page(
                                             .when(is_active, |b| b.secondary())
                                             .when(!is_active, |b| b.ghost())
                                             .label(format!("{cols} 列"))
-                                            .on_click(move |_, _, cx| {
+                                            .on_click(move |_, window, cx| {
                                                 app.update(cx, |state, cx| {
-                                                    state.grid_columns = cols;
-                                                    state.app_config.grid_columns = cols as u32;
-                                                    state.save_config();
-                                                    cx.notify();
+                                                    state.set_grid_columns(cols, cx);
+                                                    // 同步筛选栏「每行列数」下拉的选中项
+                                                    state.sync_grid_cols_select(window, cx);
                                                 });
                                             })
                                     }))
@@ -665,7 +664,7 @@ fn build_typography_page(
                                                 .text_xs()
                                                 .font_medium()
                                                 .text_color(primary)
-                                                .child("98.5% 锐度匹配 (Confirmed)"),
+                                                .child("98.5% 物种匹配 (Confirmed)"),
                                         ),
                                 )
                         }
@@ -682,15 +681,15 @@ fn build_typography_page(
 fn build_recognition_page(app: &Entity<AppState>) -> SettingPage {
     SettingPage::new("识别与性能")
         .icon(Icon::new(IconName::Cpu))
-        .description("AI 鸟类检测算法、相机硬件对焦点联动与推理并发控制")
+        .description("AI 物种识别算法、相机硬件对焦点联动与推理并发控制")
         .resettable(false)
         .group(
             SettingGroup::new()
                 .title("目标检测与定位策略")
-                .description("鸟类识别管线提取主体的 ROI 方式")
+                .description("物种识别管线提取主体的 ROI 方式")
                 .items(vec![
                     SettingItem::new(
-                        "鸟体定位来源",
+                        "主体定位来源",
                         SettingField::render({
                             let app = app.clone();
                             move |options: &RenderOptions, _window: &mut Window, cx: &mut App| {
@@ -780,31 +779,31 @@ fn build_recognition_page(app: &Entity<AppState>) -> SettingPage {
                 .description("内置 ONNX Runtime 本地模型权重与离线物种分类库")
                 .items(vec![
                     SettingItem::new(
-                        "鸟体检测定位网络",
+                        "主体检测定位网络",
                         SettingField::render(|_options, _window, _cx| {
-                            Tag::secondary().small().child("YOLOv8 Nano (detect.onnx)")
+                            Tag::secondary().small().child("YOLOE-26s (org_det.onnx)")
                         }),
                     )
-                    .description("轻量高效卷积神经网络，毫秒级快速提取画面鸟类主体边界框")
+                    .description("轻量高效卷积神经网络，毫秒级快速提取画面主体边界框")
                     .keywords(["YOLO", "detect", "检测", "模型"]),
 
                     SettingItem::new(
-                        "鸟眼关键点回归模型",
+                        "物种分类网络",
                         SettingField::render(|_options, _window, _cx| {
-                            Tag::secondary().small().child("Eye Keypoint (eye.onnx)")
+                            Tag::secondary().small().child("BioCLIP 2 (bioclip2_model_int8.onnx)")
                         }),
                     )
-                    .description("鸟眼高灵敏度关键点定位模型，支持双槽几何一致性选点并输出锐度分")
-                    .keywords(["eye", "鸟眼", "锐度", "关键点"]),
+                    .description("全物种零样本分类网络：图像塔 embedding 与离线文本向量包做余弦检索，输出 Top-5 候选物种与相似度")
+                    .keywords(["BioCLIP", "分类", "物种", "全物种", "零样本", "模型"]),
 
                     SettingItem::new(
-                        "鸟种分类多标签网络",
+                        "离线物种标签包",
                         SettingField::render(|_options, _window, _cx| {
-                            Tag::secondary().small().child("Bird Classifier (bird_model.onnx)")
+                            Tag::secondary().small().child("data/taxon/ (93,452 类)")
                         }),
                     )
-                    .description("鸟类品种特征深度分类网络，输出 Top-5 候选物种与置信度分布")
-                    .keywords(["bird_model", "分类", "品种", "物种"]),
+                    .description("TreeOfLife 子集文本向量 + 七级分类路径 + 中文名映射，是 BioCLIP 的标签空间；缺失时识别器启动即报错")
+                    .keywords(["taxon", "标签", "向量", "embedding", "名录子集", "资产"]),
 
                     SettingItem::new(
                         "离线物种名录库",
@@ -845,16 +844,16 @@ fn build_shortcuts_page() -> SettingPage {
                         &["幻灯片", "放映", "全屏", "slideshow", "S"],
                     ),
                     shortcut_item(
-                        "鸟种全局统计看板",
+                        "物种全局统计看板",
                         "T",
-                        "查看跨文件夹全局鸟类识别统计、名录与分布图",
+                        "查看跨文件夹全局物种识别统计、名录与分布图",
                         &["统计", "鸟种", "鸟类", "名录", "stats", "T"],
                     ),
                     shortcut_item(
-                        "检测框与鸟眼角标叠加",
+                        "主体检测框叠加",
                         "V",
-                        "在大图预览中开关 YOLO 鸟体检测框与鸟眼中心绿点标记",
-                        &["检测框", "鸟眼", "YOLO", "角标", "box", "eye", "V"],
+                        "在大图预览中开关主体检测框显示",
+                        &["检测框", "YOLO", "box", "V"],
                     ),
                     shortcut_item(
                         "相机硬件对焦点叠加",
@@ -902,8 +901,8 @@ fn build_shortcuts_page() -> SettingPage {
                     shortcut_item(
                         "连拍选优：淘汰非最优帧",
                         "K",
-                        "基于鸟眼锐度算法自动将当前连拍组中清晰度不足的帧标为淘汰",
-                        &["选优", "连拍", "锐度", "淘汰", "cull", "K"],
+                        "自动将当前连拍组中非最优帧标为淘汰（按文件尺寸 + 路径确定性选优）",
+                        &["选优", "连拍", "淘汰", "cull", "K"],
                     ),
                     shortcut_item(
                         "AI 识别所选照片",
@@ -1062,12 +1061,12 @@ fn build_about_page() -> SettingPage {
                     .keywords(["photo-engine", "引擎", "SQLite", "缓存"]),
 
                     SettingItem::new(
-                        "AI 鸟类识别管线",
+                        "AI 物种识别管线",
                         SettingField::render(|_options, _window, _cx| {
-                            Tag::secondary().small().child("YOLOv8 + ONNX Runtime")
+                            Tag::secondary().small().child("YOLO26 + ONNX Runtime")
                         }),
                     )
-                    .description("鸟体定位 + 鸟眼关键点一致性选点 + 鸟类品种分类 + 鸟眼锐度评估")
+                    .description("主体检测 + BioCLIP 全物种零样本分类 + 名录补充")
                     .keywords(["ONNX", "YOLO", "AI", "识别", "模型"]),
 
                     SettingItem::new(

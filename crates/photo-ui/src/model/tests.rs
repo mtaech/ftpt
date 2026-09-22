@@ -5,7 +5,6 @@ use photo_domain::{
     CaptureMeta, ColorLabel, ImageFormat, Rating, RecognitionFilter, RecognitionStatus, SortBy,
 };
 use photo_engine::template::{NameTemplateContext, render_name_template};
-use std::collections::HashMap;
 
 use super::*;
 
@@ -34,11 +33,10 @@ fn make_meta(base_name: &str, primary_path: &str, primary_format: &str) -> Captu
         color_label: ColorLabel::None,
         flag: None,
         keywords: vec![],
-        bird_name: None,
-        bird_confidence: None,
+        taxon_name: None,
+        taxon_confidence: None,
         recognition_status: None,
-        bird_bbox: None,
-        eye_sharpness: None,
+        taxon_bbox: None,
     }
 }
 
@@ -128,28 +126,6 @@ fn test_has_active_filters() {
 }
 
 #[test]
-fn test_compare_captures_eye_sharpness_and_quality() {
-    let mut m1 = make_meta("a", "/photos/a.jpg", "JPEG");
-    m1.eye_sharpness = None;
-    let mut m2 = make_meta("b", "/photos/b.jpg", "JPEG");
-    m2.eye_sharpness = Some(50.0);
-
-    // EyeSharpness: null 排最前
-    assert_eq!(
-        compare_captures(SortBy::EyeSharpness, &m1, &m2, None),
-        std::cmp::Ordering::Less
-    );
-
-    // Quality: null 排最后
-    let mut scores = HashMap::new();
-    scores.insert("/photos/b.jpg".to_string(), 0.9);
-    assert_eq!(
-        compare_captures(SortBy::Quality, &m1, &m2, Some(&scores)),
-        std::cmp::Ordering::Greater
-    );
-}
-
-#[test]
 fn test_group_stacks_cross_directory_and_scattered() {
     let m1 = make_meta("DSC_001", "/dir1/DSC_001.jpg", "JPEG");
     let m2 = make_meta("DSC_002", "/dir1/DSC_002.jpg", "JPEG");
@@ -228,16 +204,14 @@ fn test_compute_burst_groups() {
 #[test]
 fn test_pick_best_frame_deterministic() {
     let mut m1 = make_meta("1", "/photos/b.jpg", "JPEG");
-    m1.eye_sharpness = Some(80.0);
     m1.file_size = Some(5000);
 
     let mut m2 = make_meta("2", "/photos/a.jpg", "JPEG");
-    m2.eye_sharpness = Some(80.0);
     m2.file_size = Some(5000);
 
     let items = vec![m1, m2];
     let best = pick_best_frame(&items).unwrap();
-    assert_eq!(best, "/photos/a.jpg", "并列时路径升序决定");
+    assert_eq!(best, "/photos/a.jpg", "尺寸并列时路径升序决定");
 }
 
 /// 预览图源选择：显示尺寸超过母版像素就要换真原图（否则 1:1 只是放大 2560 母版）。
@@ -344,4 +318,60 @@ fn test_render_name_template() {
     // 清洗与兜底
     let rendered_clean = render_name_template("{name} <bad> / \\", &ctx);
     assert_eq!(rendered_clean, "IMG_001 bad");
+}
+// ── 筛选栏下拉（排序方式 / 列数）──
+
+#[test]
+fn test_sort_option_value_round_trip() {
+    for sort in [
+        SortBy::FileName,
+        SortBy::DateTaken,
+        SortBy::FileSize,
+        SortBy::Rating,
+        SortBy::Modified,
+    ] {
+        assert_eq!(sort_by_from_value(sort_by_value(sort)), sort);
+    }
+    // 选项表本身也要能和枚举对上（漏一个就会在下拉里少一项）
+    assert_eq!(SORT_OPTIONS.len(), 5);
+    for (value, _) in SORT_OPTIONS {
+        assert_eq!(sort_by_value(sort_by_from_value(value)), value);
+    }
+}
+
+#[test]
+fn test_sort_by_from_value_falls_back_to_file_name() {
+    assert_eq!(sort_by_from_value("nope"), SortBy::FileName);
+    assert_eq!(sort_by_from_value(""), SortBy::FileName);
+}
+
+#[test]
+fn test_sort_options_labels_are_unique_and_non_empty() {
+    let mut values: Vec<&str> = SORT_OPTIONS.iter().map(|(v, _)| *v).collect();
+    values.sort_unstable();
+    values.dedup();
+    assert_eq!(values.len(), SORT_OPTIONS.len(), "排序 value 有重复");
+
+    let mut labels: Vec<&str> = SORT_OPTIONS.iter().map(|(_, l)| *l).collect();
+    labels.sort_unstable();
+    labels.dedup();
+    assert_eq!(labels.len(), SORT_OPTIONS.len(), "排序 label 有重复");
+    assert!(labels.iter().all(|l| !l.is_empty()));
+}
+
+#[test]
+fn test_grid_columns_from_value_clamps_and_falls_back() {
+    assert_eq!(grid_columns_from_value("2"), 2);
+    assert_eq!(grid_columns_from_value("5"), 5);
+    assert_eq!(grid_columns_from_value("9"), 5);
+    assert_eq!(grid_columns_from_value("1"), 2);
+    assert_eq!(grid_columns_from_value("abc"), 4);
+    assert_eq!(grid_columns_from_value(""), 4);
+    // 选项表覆盖 2–5 全部取值
+    assert_eq!(GRID_COL_OPTIONS.len(), 4);
+    for (value, label) in GRID_COL_OPTIONS {
+        let cols = grid_columns_from_value(value);
+        assert_eq!(cols.to_string(), value);
+        assert_eq!(label, format!("{cols} 列"));
+    }
 }
