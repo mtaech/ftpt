@@ -15,6 +15,11 @@ pub enum ThumbnailError {
     Image(#[from] image::ImageError),
     #[error("RAW extraction error: {0}")]
     Raw(String),
+    /// 源文件为空（0 字节）。单独一个变体，是为了让调用方给出「文件是空的」这种
+    /// 可行动的提示——同样的情况下 LibRaw 只会抛 `-100009 Input/output error`，
+    /// 看起来像程序/驱动故障，实际原因通常是复制或传输中断留下的空壳文件。
+    #[error("源文件为空（0 字节），可能是复制或传输中断")]
+    EmptyFile,
     #[error("Cancelled")]
     Cancelled,
 }
@@ -45,6 +50,21 @@ fn write_cache_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
 }
 
+/// 0 字节早判：空文件不进解码器。`known_size` 由调用方传入（`SourceFile.file_size`），
+/// `None` 时现场 stat（顺带把「文件不存在」变成清晰的 IO 错误）。
+/// 返回前打 WARN 而不是 ERROR：文件为空是数据问题（可定位、可清理），不是程序故障。
+fn ensure_non_empty(path: &Path, known_size: Option<u64>) -> Result<(), ThumbnailError> {
+    let size = match known_size {
+        Some(size) => size,
+        None => std::fs::metadata(path)?.len(),
+    };
+    if size == 0 {
+        tracing::warn!("源文件为空（0 字节），跳过解码: {}", path.display());
+        return Err(ThumbnailError::EmptyFile);
+    }
+    Ok(())
+}
+
 impl ThumbnailCache {
     /// 创建缓存管理器
     pub fn new(cache_dir: PathBuf) -> Self {
@@ -70,6 +90,7 @@ impl ThumbnailCache {
         size: u32,
         cancel: Option<&AtomicBool>,
     ) -> Result<Vec<u8>, ThumbnailError> {
+        ensure_non_empty(&source.path, source.file_size)?;
         // RAW：派生缩略图先查（440px ~40KB vs 母版 6-20MB）——滚动网格命中即返回，
         // 不再每次读母版。内嵌占位/母版升级/历史派生都写 std@size 键（见
         // get_or_generate_embedded 注释），同键互斥覆盖，命中即最新版
@@ -134,6 +155,7 @@ impl ThumbnailCache {
         size: u32,
         cancel: Option<&AtomicBool>,
     ) -> Result<Vec<u8>, ThumbnailError> {
+        ensure_non_empty(&source.path, source.file_size)?;
         let start = std::time::Instant::now();
         let cache_key = self.cache_key(source, size, "std");
         let cache_path = self.cache_dir.join(&cache_key);
@@ -278,6 +300,7 @@ pub fn decode_raw16_with_options(
     opts: &rawlib::DecodeOptions,
     cancel: Option<&AtomicBool>,
 ) -> Result<Rgb16Image, ThumbnailError> {
+    ensure_non_empty(path, None)?;
     if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
         return Err(ThumbnailError::Cancelled);
     }
@@ -348,6 +371,7 @@ fn embedded_long_edge(thumb: &rawlib::ThumbnailData) -> u32 {
 
 /// RAW 解码共用实现。`cancel` 为合作式取消令牌：完整解码（慢操作）前检查一次。
 fn decode_raw_impl(path: &Path, size: u32, cancel: Option<&AtomicBool>) -> Result<Vec<u8>, ThumbnailError> {
+    ensure_non_empty(path, None)?;
     let path_str = path.to_string_lossy();
     // 快路径：内嵌 JPEG 长边 ≥ 2048（大内嵌，如 RW2/DNG 全尺寸预览）直接用，省完整解码。
     // 小内嵌不再返回：160×120 放大到预览/全分辨率会糊，统一走完整解码。
@@ -383,6 +407,7 @@ fn decode_raw_impl(path: &Path, size: u32, cancel: Option<&AtomicBool>) -> Resul
 /// 用作缩略图即时占位（放大略糊），清晰版由母版解码升级后替换。
 /// 在 worker 线程中调用。
 pub fn decode_raw_embedded_thumb(path: &Path, size: u32) -> Result<Vec<u8>, ThumbnailError> {
+    ensure_non_empty(path, None)?;
     let path_str = path.to_string_lossy();
     let thumb = rawlib::extract_thumbnail_with_info(path_str.as_ref())
         .map_err(|e| ThumbnailError::Raw(e.to_string()))?;
@@ -397,6 +422,7 @@ pub fn decode_raw_embedded_thumb(path: &Path, size: u32) -> Result<Vec<u8>, Thum
 /// 相对 half_size 预览慢 4-8x（24MP 约 3-5s），配合磁盘缓存与取消令牌。
 /// 在 worker 线程中调用。
 fn decode_raw_full(path: &Path, cancel: Option<&AtomicBool>) -> Result<Vec<u8>, ThumbnailError> {
+    ensure_non_empty(path, None)?;
     // 完整 RAW 解码（慢操作）前检查取消
     if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
         return Err(ThumbnailError::Cancelled);
@@ -728,6 +754,45 @@ mod tests {
 
         let result = cache.get_or_generate(&source, 64, None);
         assert!(result.is_err(), "should error on nonexistent file");
+    }
+
+    /// 空文件早判（回归：真实库里那个 0 字节 RW2 让 LibRaw 报 -100009 Input/output error，
+    /// 日志里每轮扫描刷一次 ERROR，真实原因只是文件内容为空——复制/传输中断的典型残留）。
+    /// 判定必须发生在交给 LibRaw 之前，错误信息要能直接告诉用户「文件是空的」。
+    #[test]
+    fn test_empty_raw_file_reports_empty() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("empty.rw2");
+        std::fs::write(&path, b"").unwrap();
+        let err = decode_raw_preview(&path, 440).unwrap_err();
+        assert!(
+            matches!(err, ThumbnailError::EmptyFile),
+            "0 字节 RAW 应报 EmptyFile，实际 {err:?}"
+        );
+    }
+
+    /// 常规图空文件同样早判：不进 image 解码器（那里的错误只会说「格式不支持」）。
+    /// 覆盖两种入口：调用方已知 file_size（SourceFile）与未知（现场 stat）。
+    #[test]
+    fn test_empty_jpeg_reports_empty() {
+        let cache_dir = TempDir::new().unwrap();
+        let img_dir = TempDir::new().unwrap();
+        let cache = ThumbnailCache::new(cache_dir.path().to_path_buf());
+
+        for known_size in [Some(0u64), None] {
+            let path = img_dir.path().join(format!("empty_{known_size:?}.jpg"));
+            std::fs::write(&path, b"").unwrap();
+            let source = SourceFile {
+                path,
+                format: ImageFormat::Jpeg,
+                file_size: known_size,
+            };
+            let err = cache.get_or_generate(&source, 440, None).unwrap_err();
+            assert!(
+                matches!(err, ThumbnailError::EmptyFile),
+                "0 字节 JPEG（file_size={known_size:?}）应报 EmptyFile，实际 {err:?}"
+            );
+        }
     }
 
     #[test]

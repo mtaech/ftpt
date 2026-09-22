@@ -192,6 +192,11 @@ pub fn start_thumb_pipeline(state_entity: Entity<AppState>, generation: u64, cx:
     let jobs = Arc::new(jobs);
     let done = Arc::new(AtomicUsize::new(0));
     let cursor = Arc::new(AtomicUsize::new(0));
+    // 失败计数 + 前几个样例（文件名：原因）：扫描收尾时汇总一次，
+    // 免得 0 字节/损坏文件在日志里一张一条 ERROR 地刷（真实案例见 ensure_non_empty 注释）
+    let failed = Arc::new(AtomicUsize::new(0));
+    let failed_samples: Arc<std::sync::Mutex<Vec<String>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
 
     cx.spawn(async move |async_cx| {
         // ── 并发 worker：共享游标取任务，各自写磁盘缓存 ──
@@ -201,6 +206,8 @@ pub fn start_thumb_pipeline(state_entity: Entity<AppState>, generation: u64, cx:
             let cursor = cursor.clone();
             let cancel = cancel.clone();
             let manager = manager.clone();
+            let failed = failed.clone();
+            let failed_samples = failed_samples.clone();
             async_cx
                 .background_executor()
                 .spawn(async move {
@@ -214,6 +221,20 @@ pub fn start_thumb_pipeline(state_entity: Entity<AppState>, generation: u64, cx:
                             manager.ensure_thumb(source, THUMB_SIZE_GRID, Some(cancel.as_ref()))
                         {
                             tracing::debug!("缩略图生成失败 {}: {e}", source.path.display());
+                            // 取消不算失败（用户主动中断，不是文件问题）
+                            if !e.contains("Cancelled") {
+                                failed.fetch_add(1, Ordering::Relaxed);
+                                if let Ok(mut samples) = failed_samples.lock() {
+                                    if samples.len() < 3 {
+                                        let name = source
+                                            .path
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().to_string())
+                                            .unwrap_or_else(|| source.path.to_string_lossy().to_string());
+                                        samples.push(format!("{name}（{e}）"));
+                                    }
+                                }
+                            }
                         }
                         done.fetch_add(1, Ordering::Relaxed);
                     }
@@ -246,12 +267,26 @@ pub fn start_thumb_pipeline(state_entity: Entity<AppState>, generation: u64, cx:
             }
         }
 
-        // ── 收尾：清进度（同代际才清，避免清掉新一代的计数）──
+        // ── 收尾：清进度（同代际才清，避免清掉新一代的计数）+ 汇总无法生成的文件 ──
         let _ = async_cx.update(|cx| {
             let _ = state_entity.update(cx, |state, cx| {
                 if state.scan_generation == generation {
                     state.thumb_done = 0;
                     state.thumb_total = 0;
+                    let failed = failed.load(Ordering::Relaxed);
+                    // 取消导致的提前收尾不算「文件有问题」
+                    if failed > 0 && !state.scan_cancel.load(Ordering::Relaxed) {
+                        let samples = failed_samples
+                            .lock()
+                            .map(|s| s.join("、"))
+                            .unwrap_or_default();
+                        tracing::warn!(
+                            "缩略图管线：{failed}/{total} 张读取失败（空文件或损坏），已跳过：{samples}"
+                        );
+                        state.set_status_message(format!(
+                            "{failed} 张无法生成缩略图（空文件或损坏），已跳过"
+                        ));
+                    }
                     cx.notify();
                 }
             });

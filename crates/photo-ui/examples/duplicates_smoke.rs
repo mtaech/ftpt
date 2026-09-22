@@ -15,7 +15,8 @@
 //!   4) 组内首张 = 保留锚点（keeper），多余张数 = summarize
 //!   5) 结果落 `folder_db.duplicates`（阈值 + 时间 + keeper 标记）
 //!   6) 重开弹窗能从落库结果读回（不用重算）
-//!   7) 弹窗保持打开时持续渲染不 panic
+//!   7) 空文件健壮性：0 字节文件早判（不再让 LibRaw 报 I/O error）、扫描收尾汇总一次
+//!   8) 弹窗保持打开时持续渲染不 panic
 
 use std::path::Path;
 use std::time::Duration;
@@ -305,7 +306,42 @@ fn main() {
                     total_after == 8
                 );
 
-                // ── 7) 弹窗保持打开持续渲染几个节拍（渲染 panic 会直接崩）──
+                // ── 7) 空文件健壮性（真实案例：0 字节 RW2 让 LibRaw 报 -100009 I/O error，
+                //        日志里每轮扫描刷 ERROR；现在应早判 + 扫描收尾汇总一次）──
+                std::fs::write(dir.join("broken.rw2"), b"").expect("写空 RAW 占位");
+                fire(async_cx, handle, Box::new(Rescan));
+                pump(async_cx, 3500).await;
+                let (items_broken, thumb_running, status_broken) = async_cx.update(|cx| {
+                    let s = task_state.read(cx);
+                    (
+                        s.items.len(),
+                        s.thumb_total > 0,
+                        s.status_message.clone().map(|(m, _)| m),
+                    )
+                });
+                check!("空文件也进扫描结果（网格里可见、可清理）", items_broken == 11);
+                check!(
+                    format!("空文件不卡住缩略图管线（thumb_total 仍在跑={thumb_running}）"),
+                    !thumb_running
+                );
+                check!(
+                    format!("扫描收尾汇总无法生成缩略图的张数（{status_broken:?}）"),
+                    status_broken
+                        .as_deref()
+                        .is_some_and(|m| m.contains("无法生成缩略图") && m.contains("已跳过"))
+                );
+                // 空文件仍会进检测作用域（无同 stem 配对）→ 哈希失败被跳过，分组不变
+                run_detect!();
+                let after_empty = async_cx.update(|cx| {
+                    let s = task_state.read(cx);
+                    (s.is_detecting_duplicates, s.dup_groups.len())
+                });
+                check!(
+                    format!("空文件存在时检测仍能收尾且分组不变（{after_empty:?}）"),
+                    after_empty == (false, 2)
+                );
+
+                // ── 8) 弹窗保持打开持续渲染几个节拍（渲染 panic 会直接崩）──
                 // PHOTO_SMOKE_HOLD_MS：保持窗口供 Xvfb 外部截图目检（与 grid_scroll_smoke 同约定）
                 let hold = std::env::var("PHOTO_SMOKE_HOLD_MS")
                     .ok()
