@@ -70,12 +70,12 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 |`crates/photo-engine/src/`|文件机械：scanner, ops, exif, thumbnail, convert, folder_db, batch_ops, adjustments（全部同步）|
 |`crates/photo-engine/src/folder_db.rs`|文件夹级 SQLite（`.pt/data.db`）：exif_cache / xmp_meta / recognition / adjustments 四表，rusqlite_migration 版本化|
 |`crates/photo-recognize/src/`|识别管线：lib.rs(Recognizer 门面+BioCLIP 装配), classifier(后端 trait + Classified), bioclip(BioCLIP 图像塔+余弦检索), detect(org_det 输出解码), catalog(名录查询+按学名查), pipeline|
-|`crates/photo-config/src/lib.rs`|配置读写（TOML + SQLite 持久化）；AppConfig 含 favorite_dirs/recent_directories/theme(默认 Light)/leftPanelWidth/rightPanelWidth/thumbnailSize/detectionSource/stackMode(默认 None 不堆叠) 等|
-|`crates/photo-ui/src/app.rs`|GPUI 应用装配：窗口、键位表（46 个 `KeyBinding`）、action 分发、Dock 工作区创建|
+|`crates/photo-config/src/lib.rs`|配置读写（TOML + SQLite 持久化）；AppConfig 含 favorite_dirs/recent_directories/theme(默认 Light)/leftPanelWidth/rightPanelWidth/thumbnailSize/detectionSource/stackMode(默认 None 不堆叠)/exportPresets/exportDir(导出目标目录记忆) 等|
+|`crates/photo-ui/src/app.rs`|GPUI 应用装配：窗口、键位表（47 个 `KeyBinding`）、action 分发、Dock 工作区创建|
 |`crates/photo-ui/src/views/dock_panels.rs`|gpui-kit Dock 工作区：左右停靠区 + 中央主视图；`DockPanel` 的 `panel_name`/`closable`/`zoomable`/`zoom_control` 语义在这里|
 |`crates/photo-ui/src/views/`|grid / preview / slideshow / stats / filmstrip / info_panel / left_panel / filter_bar / header / status_bar / dialogs/|
 |`crates/photo-ui/src/state/`|`AppState`（单实体）/ `import.rs`（导入状态机）/ `engine_ops.rs`（调同步引擎的唯一桥）|
-|`crates/photo-ui/src/model/`|adjust / filter / sort / stacks / burst / preview_math / best_frame（纯逻辑 + 内联单测）|
+|`crates/photo-ui/src/model/`|adjust / export / filter / sort / stacks / burst / preview_math / best_frame（纯逻辑 + 内联单测）|
 |`crates/photo-ui/src/theme/`|Material You 动态取色：`material.rs`（HCT/CAM16）+ `scheme.rs`（seed → 亮/暗语义色）|
 |`docs/todo.md`|**待办总账**（P0–P3，每条带可核实证据与估工）+ 建议顺序与维护约定；与 `docs/open-questions.md`（需拍板项）配套|
 |`docs/exiftool-update.md`|ExifTool 本地运行时更新指引（EXIF 后端依赖，进 git）|
@@ -92,7 +92,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 |运行核心测试|`cargo test -p photo-engine -p photo-recognize -p photo-domain -p photo-config`|
 |前端单测|`cargo test -p photo-ui`（`src/model/` 纯逻辑 + `theme/` 色彩用例）|
 |开发运行（GPUI 桌面窗口）|`cargo run -p photo-ui`|
-|无头冒烟|`XDG_CONFIG_HOME=/tmp/ptlease-config xvfb-run -a cargo run -p photo-ui --example lease_smoke`（另有 `preview_full_smoke`、`clipboard_smoke`、`adjust_smoke`、`grid_scroll_smoke`、`filter_bar_smoke`、`recognize_smoke`、`region_smoke`、`stats_smoke`、`master_bench`）|
+|无头冒烟|`XDG_CONFIG_HOME=/tmp/ptlease-config xvfb-run -a cargo run -p photo-ui --example lease_smoke`（另有 `preview_full_smoke`、`clipboard_smoke`、`adjust_smoke`、`grid_scroll_smoke`、`filter_bar_smoke`、`export_smoke`、`recognize_smoke`、`region_smoke`、`stats_smoke`、`master_bench`）|
 |EXIF 提取验证|`cargo run -p photo-engine --example focus_check -- <图片>`（打印 ExifMetadata + 对焦点；exiftool 不可用或残留进程时先 `taskkill //F //IM perl.exe`）|
 
 ---
@@ -138,7 +138,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 - **exiftool 定位优先级**：`PHOTO_EXIFTOOL` env → exe 同级 `exiftool/`（打包）→ 仓库 `local-lib/exiftool/`（开发）→ PATH；升级版本见 `docs/exiftool-update.md`
 - **配置目录定位（`photo_config::config_dir()`）**：`PHOTO_CONFIG_DIR`（值就是目录本身）→ `XDG_CONFIG_HOME`（取 `pt/` 子目录）→ `~/.config/pt`；空串按未设置。刻意不用 `dirs::config_dir()`（它在 Windows 给 `%APPDATA%`，会破坏全平台同一相对布局）。`config.toml` 与 `logs/` 都在这个目录下（`logging::init` 从 `determine_config_path()` 的父目录派生）。**无头冒烟的 `XDG_CONFIG_HOME=...` 隔离靠这条生效**：2026-09-19 之前这里硬编码 home，冒烟其实一直读写用户真实配置，`lease_smoke` 的「左停靠区宽度来自配置」检查因此在左栏被拖宽过的机器上假失败。
 - **arboard 剪贴板必须留常驻持有者（X11）**：X11 剪贴板的数据是进程应答 X 请求时才提供的，`arboard::Clipboard` 一 drop，选择所有权就没了——「复制图片到剪贴板」会静默变成什么都没复制。`engine_ops` 用 `CLIPBOARD_OWNER` 静态把实例持有到进程退出（Wayland 的 data-control 由合成器接管，不受影响）。`clipboard_smoke` 长期没抓到这条：它以前跑在用户的 Wayland 会话上（窗口根本没落到 Xvfb），读回的是合成器接管的那份数据。
-- **无头冒烟必须钉住 X11 后端**：GPUI 选后端只看环境变量（`platform::guess_compositor()`）：`WAYLAND_DISPLAY` 非空 → Wayland，其次 `DISPLAY` → X11。而 `xvfb-run` 只准备 X 显示：在 Wayland 会话里跑冒烟时窗口会落到**用户真实桌面**，帧由真实合成器决定（被遮挡/最小化时不产帧），于是**渲染驱动的行为根本没被测**——渲染驱动的检查（如「对比窗格加载母版」）就因此同一份代码一会儿 13/13 一会儿 12/13（母版加载只在视图真的渲染时才发起；`compare_smoke` 当年就是这样抓出来的，该视图已移除）。所以 9 个 GPUI 冒烟都在 `gpui_kit::application()` 之前调 `photo_ui::app::prepare_headless_smoke()`（把 `WAYLAND_DISPLAY` 置空，GPUI 判空即视为未设置）；要真机 Wayland 目检时设 `PHOTO_SMOKE_ALLOW_WAYLAND=1`。
+- **无头冒烟必须钉住 X11 后端**：GPUI 选后端只看环境变量（`platform::guess_compositor()`）：`WAYLAND_DISPLAY` 非空 → Wayland，其次 `DISPLAY` → X11。而 `xvfb-run` 只准备 X 显示：在 Wayland 会话里跑冒烟时窗口会落到**用户真实桌面**，帧由真实合成器决定（被遮挡/最小化时不产帧），于是**渲染驱动的行为根本没被测**——渲染驱动的检查（如「对比窗格加载母版」）就因此同一份代码一会儿 13/13 一会儿 12/13（母版加载只在视图真的渲染时才发起；`compare_smoke` 当年就是这样抓出来的，该视图已移除）。所以 10 个 GPUI 冒烟都在 `gpui_kit::application()` 之前调 `photo_ui::app::prepare_headless_smoke()`（把 `WAYLAND_DISPLAY` 置空，GPUI 判空即视为未设置）；要真机 Wayland 目检时设 `PHOTO_SMOKE_ALLOW_WAYLAND=1`。
 - **模型/名录库/全局索引库定位（`data_root()`，lib.rs）**：`PHOTO_DATA_DIR` env → exe 同级 `models/`+`data/`（打包便携）→ 仓库根（开发回退，从 CARGO_MANIFEST_DIR/cwd 向上找同时含 `models/` 与 `data/bird_catalog.db` 的目录）；`cargo run -p photo-ui` 下模型在仓库根，否则会报「检测模型文件不存在: <target>/debug/models/org_det.onnx」
 - **识别资产（随包分发，均不入 git）**：`models/org_det.onnx`（通用主体检测）+ `models/bioclip2_model_int8.onnx` + `data/bird_catalog.db`（已瘦身为 `animal_info(id, latin_name, cn_name)` 三列，2026-09-22）+ `data/taxon/`（名录子集包：`txt_emb_bioclip-2.{npy,json}` + `zh_names.json` + `VERSION`）。BioCLIP 的资产目录固定在**名录库同级**的 `taxon/`（即 `data_root()/data/taxon/`）。缺哪个就在 `Recognizer::new` 报对应的 `ModelLoad`，状态栏透传。`bird_model.onnx`（26MB）/ `eye.onnx`（19MB）/ `detect.onnx`（19MB）已删除（备份 /tmp/pt-asset-backup/）；`data/global.db` 是派生索引，删除后重扫自动重建
 - 使用了 let-chains（edition 2024 特性），如 `photo-config/config.rs` 便携路径判断
@@ -149,9 +149,9 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 
 ## 测试与 QA
 
-- Rust：`#[test]` 分布在 5 个 crate 的源文件内联 `#[cfg(test)] mod tests`（domain 34 / config 18 / engine 185 / recognize 27 / photo-ui 61），另有 1 个 `#[ignore]` 真机冒烟
+- Rust：`#[test]` 分布在 5 个 crate 的源文件内联 `#[cfg(test)] mod tests`（domain 34 / config 18 / engine 185 / recognize 27 / photo-ui 70），另有 1 个 `#[ignore]` 真机冒烟
 - 真机识别冒烟：`cargo test -p photo-recognize -- --ignored`（需 worktree/发布根有 `models/` 与 `data/bird_catalog.db`）；单文件手动识别工具：`cargo run -p photo-recognize --example recognize_file -- <图片路径> [models_dir] [catalog_db]`
-- 无头冒烟：`lease_smoke` 15 项 / `preview_full_smoke` 5 项 / `clipboard_smoke`（派发 CopyImage 动作 → 解码 → arboard 写剪贴板 → 读回校验尺寸）/ `adjust_smoke` 16 项（自建 1200×800 JPEG：预览装载参数 / 三条滑杆实体 / 面板可渲染 / 滑杆 Change 事件量化 0.37→0.35 / +1 EV 后预览更亮 149.0→202.9 / 350ms 去抖落库 / 原文件字节不变 / 重置回原图并复位）/ `grid_scroll_smoke` 4 项（自建 48 张 JPEG：网格滚动句柄拿到真实视口 / 内容高于视口 / 写句柄偏移跨帧保留；另支持 `PHOTO_SMOKE_HOLD_MS` 保持窗口供 Xvfb 外部截图目检、`PHOTO_SMOKE_HIDE_PANELS=1` 收起左右侧栏、`PHOTO_SMOKE_COLS=N` 指定列数、`PHOTO_SMOKE_WINDOW=WxH` 指定窗口尺寸、`PHOTO_SMOKE_HOLD_STILL=1` 保持画面静止（注入鼠标做交互验证时要逐像素对比，默认会轻推偏移让滚动条 thumb 停在可见态），并打印 `[diag] 窗口宽/列数/实测容器/列表视口宽`）/ `filter_bar_smoke` 8 项（筛选栏两个下拉：已创建 / 初始选中项与状态一致 / emit `SelectEvent::Confirm` 走真实订阅改排序与列数 / 列数写回配置 / 设置页改列数后下拉同步；不需素材）/ `recognize_smoke` 5 项（需 models/：扫描素材 / 识别途中能观察到中间进度 / 跑完 done==total 且每张有状态 / 取消 5s 内生效）/ `region_smoke` 11 项（需 models/：扫描素材 / 框选模式开关 / **识别器懒装配与常驻**（冷装配→热复用两段计时）/ 首次框选建结论 / 二次框选**追加**为主体 / `folder_db` 持久化同步 / 全局索引落行 / 批量识别复用同一实例 + 清临时行）/ `stats_smoke` 8 项（**不需模型**：扫描+缩略图管线 / 全局索引写行 / 选中物种取记录 / 缩略图按各自目录解析 / 统计视图渲染 / 点击跳转选中 / 清临时行）/ `master_bench` 计时；9 个 GPUI 冒烟都先调 `app::prepare_headless_smoke()` 把后端钉在 Xvfb 的 X11 上（否则 Wayland 会话下窗口落到真实桌面、渲染帧不可控），`xvfb-run` 下无需真实显示器（见开发命令）
+- 无头冒烟：`lease_smoke` 15 项 / `preview_full_smoke` 5 项 / `clipboard_smoke`（派发 CopyImage 动作 → 解码 → arboard 写剪贴板 → 读回校验尺寸）/ `adjust_smoke` 16 项（自建 1200×800 JPEG：预览装载参数 / 三条滑杆实体 / 面板可渲染 / 滑杆 Change 事件量化 0.37→0.35 / +1 EV 后预览更亮 149.0→202.9 / 350ms 去抖落库 / 原文件字节不变 / 重置回原图并复位）/ `grid_scroll_smoke` 4 项（自建 48 张 JPEG：网格滚动句柄拿到真实视口 / 内容高于视口 / 写句柄偏移跨帧保留；另支持 `PHOTO_SMOKE_HOLD_MS` 保持窗口供 Xvfb 外部截图目检、`PHOTO_SMOKE_HIDE_PANELS=1` 收起左右侧栏、`PHOTO_SMOKE_COLS=N` 指定列数、`PHOTO_SMOKE_WINDOW=WxH` 指定窗口尺寸、`PHOTO_SMOKE_HOLD_STILL=1` 保持画面静止（注入鼠标做交互验证时要逐像素对比，默认会轻推偏移让滚动条 thumb 停在可见态），并打印 `[diag] 窗口宽/列数/实测容器/列表视口宽`）/ `filter_bar_smoke` 8 项（筛选栏两个下拉：已创建 / 初始选中项与状态一致 / emit `SelectEvent::Confirm` 走真实订阅改排序与列数 / 列数写回配置 / 设置页改列数后下拉同步；不需素材）/ `export_smoke` 21 项（**不需模型**：顶栏 / Ctrl+E 的 action 真的打开弹窗 / 输入框文本→草稿 / 已选口径只导出 1 张 vs 取消选择导出筛选结果全部 5 张 / `{seq}` 补零渲染 / 同 stem 不同扩展自动 `_1` 去重 / 长边 600 真的生效 / 质量 95 体积大于 85 / 原文件字节不变 / 目标目录写回配置 / 目标目录不可创建时给真实错误；配置目录由冒烟自己钉 `PHOTO_CONFIG_DIR` 隔离）/ `recognize_smoke` 5 项（需 models/：扫描素材 / 识别途中能观察到中间进度 / 跑完 done==total 且每张有状态 / 取消 5s 内生效）/ `region_smoke` 11 项（需 models/：扫描素材 / 框选模式开关 / **识别器懒装配与常驻**（冷装配→热复用两段计时）/ 首次框选建结论 / 二次框选**追加**为主体 / `folder_db` 持久化同步 / 全局索引落行 / 批量识别复用同一实例 + 清临时行）/ `stats_smoke` 8 项（**不需模型**：扫描+缩略图管线 / 全局索引写行 / 选中物种取记录 / 缩略图按各自目录解析 / 统计视图渲染 / 点击跳转选中 / 清临时行）/ `master_bench` 计时；10 个 GPUI 冒烟都先调 `app::prepare_headless_smoke()` 把后端钉在 Xvfb 的 X11 上（否则 Wayland 会话下窗口落到真实桌面、渲染帧不可控），`xvfb-run` 下无需真实显示器（见开发命令）
 
 ### 测试分布
 
@@ -161,7 +161,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 |`photo-config::lib.rs`|18|默认值、TOML 保存/加载往返、配置路径、AppConfig 字段钳制（含 include_subdirectories、export_presets）|
 |`photo-engine`|185 + 1 ignore|scanner 单层/递归、ops 移动/复制/重命名/删除（含 sidecar）、识别行同步、thumbnail 缓存键、exif 摘要、convert、folder_db 建表/迁移/upsert/rename 同步/多表清理、adjustments、global_db 索引、histogram 直方图/剪切、import 分组/去重/复制移动、template 占位符渲染、undo 三类逆操作、keywords 表|
 |`photo-recognize`|27 + 1 ignore|阶段→状态映射、输入源解析（JPEG/RAW）、org_det 输出解码（布局/近满幅让位/越界夹紧）、BioCLIP 后端（npy 解析/species_of/中文名三级回落/top-k 检索）、按学名查名录、进度回调|
-|`photo-ui`|61|筛选/排序/堆叠/连拍/预览数学/调整参数（量化、chip 文案、相对路径、字段操作）纯逻辑（`src/model/`）、Material You 色彩（`theme/`）、剪贴板解码|
+|`photo-ui`|70|筛选/排序/堆叠/连拍/预览数学/调整参数（量化、chip 文案、相对路径、字段操作）/导出草稿（钳制、预设套用、目标集口径、输出名去重）纯逻辑（`src/model/`）、Material You 色彩（`theme/`）、剪贴板解码|
 
 ---
 
@@ -177,7 +177,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 - **主视图**：`ViewMode` 驱动 grid / preview / slideshow / stats；`views/` 下另有 filmstrip、filter_bar、info_panel、left_panel、header、status_bar、dialogs/
 - **纯逻辑**：`model/`（adjust / filter / sort / stacks / burst / preview_math / best_frame）不依赖 GPUI，内联单测——筛选/排序/堆叠/连拍/预览数学/调整换算都在这里
 - **图片**：`image/`（`ImageManager` 进程内解码 + 缓存：缩略图 → 2560 显示母版 → 1:1 全分辨率）；**复制到剪贴板**（Ctrl+C / 预览工具条「复制」）在 `state/engine_ops.rs` 解码全尺寸 RGBA 后走 `arboard`——GPUI 自带的剪贴板在 Linux 只写文本，图片项会被静默丢弃
-- **交互**：`actions.rs` 定义 action，`app.rs` 注册 46 条 `KeyBinding` 并分发（评分/旗标/色标/识别/视图切换/幻灯片/缩放/剪贴板复制等）
+- **交互**：`actions.rs` 定义 action，`app.rs` 注册 47 条 `KeyBinding` 并分发（评分/旗标/色标/识别/视图切换/幻灯片/缩放/剪贴板复制等）
 - **主题**：`theme/`（Material You HCT 动态取色，seed 来自配置；`theme_config` → GPUI `ThemeConfig`）
 
 ### 日志（tracing 统一管道）
@@ -190,6 +190,8 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 
 ## 近期修复记录
 
+- **2026-09-22 feat(photo-ui)：导出整条链路接线（把「只报成功」的假按钮换成真导出）**：`docs/todo.md` #1——导出弹窗以前点「开始导出」只 `set_status_message("已开始导出照片")` 就关窗，而且全仓**没有任何地方设 `ActiveDialog::Export`**（`app.rs` 只有渲染分支），弹窗连入口都没有；引擎侧 `convert::export_with_preset` / `export_adjusted` 早已就绪。① **入口**：新增 `Export` action + `Ctrl+E` + 顶栏「导出」按钮 + 左栏批量面板「导出...」（左栏那个刻意不受「必须存在激活筛选」限制——导出的未选口径就是全量）。② **参数**：目标目录（`InputState` + `rfd` 目录对话框）/ 长边档位 / JPEG 质量滑杆（1-100）/ 命名模板（实时预览第一张），草稿与选项表落进新的纯逻辑模块 `model/export.rs`。③ **执行**：`engine_ops::start_export` 与识别管线同构——前台取快照（目标集 = 选中 ∩ 筛选结果、未选 = 全量；模板渲染 + 输出名 `_1/_2` 去重；逐张读 `folder_db` 调整参数）→ 后台线程 `export_with_preset`（RAW 全尺寸 16-bit 解码）→ 前台 250ms 收结果推进度；状态栏加导出分支（细进度条 + 取消）。④ **诚实性**：逐文件失败原因进 `export_results` 并在弹窗展示，目标目录不可创建时当场报 `导出失败：无法创建目标目录 …（真实 OS 错误）`。⑤ 顺带把目标目录写回 `AppConfig.export_dir`（#14 导出侧一半；旧配置无此键 serde 静默忽略）。
+  **验证**：`cargo check --workspace --all-targets` 0 warning；`cargo test` 全绿（photo-ui 61→70，新增 `model/export` 9 例：草稿钳制 / 预设套用不动目标目录 / 目标集口径 / 选项表 / 同批与磁盘同名去重）；新增无头冒烟 `export_smoke` 21 项全过（真实 action 开窗 / 输入框→草稿 / 已选 1 张 vs 未选 5 张 / `{seq}` 补零 / 同 stem 去重 / 长边 600 / 质量 95 体积 263145 > 85 的 177547 / 原文件字节不变 / 配置记忆 / 目录不可创建报真实错误）——**其中「已选口径只导出 1 张」我最初写成「导出 5 张」而失败，暴露的是冒烟预期错（扫描完成后会自动选中第一张），不是代码错**；`lease_smoke` 15 / `grid_scroll_smoke` 4 / `filter_bar_smoke` 8 / `adjust_smoke` 16 回归全过。**遗留**：手册 §9.10 的预设「新建 / 保存 / 删除」未做（当前只能套用配置文件里的预设）；eBird 导出的入口归 `docs/todo.md` #9。
 - **2026-09-22 chore(配置)：删除 `recognitionThreadCount`（实测并发识别无收益，不值得接线）**：这个配置项（默认 4、钳制 1-4、设置页有 1/2/4/8 档按钮、`AppConfig.recognition_thread_count`）自 Tauri 版起**从未接线**。按「先测再决定接不接」的原则，先量了它到底值不值——**release / 16 核**，单张 294ms、整程 CPU 只用 ~3.5/16 核（ORT 并没吃满机器）：4 worker × ORT 默认线程 **1.10–1.61x**（多次跑波动）/ 峰值 RSS 1340→1866MB；4 worker × 每 session `intra_op_threads=4`（按核数分摊，避免 64 线程挤 16 核）**1.10x** / 1439MB；4 worker × `intra_threads=1` **1.16x** / 2207MB；8 worker × `intra_threads=2` **1.01x** / **4189MB**。结论：**并发基本不提速**——整条链路由 ORT 主导，而 `ort::Session::run` 取 `&mut self`（单 session 无法并发），其内部本就并行；多 session 只是互相争抢同一批硬件，按核数分摊线程也不救。按字面语义实现等于「+0.5~2.8GB 内存换 1.0~1.6x」，故按 ADR 0010 删鸟眼锐度同一条理由**直接删掉**：`AppConfig.recognition_thread_count`（字段/default/serde 属性/`clamped()` 钳制）、设置页「批量识别并发线程数」整项、2 处单测断言。旧 `config.toml` 里的 `recognitionThreadCount` 键被 serde 静默忽略（无 `deny_unknown_fields`，同 ADR 0009 先例）。
   **验证**：`cargo check --workspace --all-targets` 0 warning；`cargo test` 全绿（config 18 / domain 34 / engine 185+1 / recognize 27+1 / photo-ui 61）；全仓已无 `recognition_thread_count` / `recognitionThreadCount` / 「批量识别并发线程数」残留标识符。**方法**：接一个「看起来显然有用」的性能开关之前先量一把——这次量出来的答案是不值得做。
 - **2026-09-22 perf(识别)：debug 下识别慢 4.2 倍的真凶是依赖 `matrixmultiply` 没开优化档**：上一条「识别器常驻」里我用 `region_smoke` 做 A/B，得出「给 `photo-recognize`/`ndarray` 加 debug `opt-level=3` 无收益，瓶颈在 ONNX Runtime 的 C 库」——**这个结论是错的**（A/B 本身没错：photo-recognize 单独确实只值 12%；错在没穷尽依赖就下了「瓶颈在别的运行时」的判断）。这次先采样定位：`perf` 在本环境不可用，改用 `gdb -batch -p <pid> -ex "thread apply all bt"` 连续 attach 十次、按 crate 聚合帧数——热点是 `matrixmultiply::sgemm_kernel::kernel_target_avx512`，即 BioCLIP 余弦检索 `rank()`（名录子集 93,452 类 × 768 维 ≈ 7,180 万次乘加）的 sgemm 内核：**该依赖在 debug 下 AVX512 内核完全没优化，从 ~2ms/图退化成秒级**。修法：根 `Cargo.toml` 的 `[profile.dev.package.*]` 补 **`matrixmultiply`** 与 **`photo-recognize`**，与既有 `image`/`photo-engine`/`jpeg-decoder`/`zune-*` 同一条理由。
