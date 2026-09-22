@@ -36,7 +36,8 @@ BioCLIP 是**余弦相似度 ×100**——实测 top-1 落在 65~79 这个窄带
 把多主体图拆开逐只识别（bioclip_demo 的 `--detect` + 三步 prune 有实测对比数据）。
 - 现状：org_det 多框 → 每主体各分类一次 → 主体列表以 `recognition.subjects` JSON 列持久化
   （主键仍 `rel_path`，顶层列恒 = 主主体，兼容旧展示/旧数据；未采用改主键方案的原因见 ADR 0011）。
-- 统计（global_db 跨文件夹索引）目前无写入方，多主体入库仍未接线。
+- 统计（global_db 跨文件夹索引）已接线（2026-09-22）：扫描完成 `replace_folder` 全量替换、
+  单张识别完成 `upsert_rows`，多主体按主体展开入库（主键扩为 `(folder, rel_path, subject_index)`）。
 
 ### 4. 通用检测器还没接线（**实测有影响**）——**已于 2026-09-22 接入，见 ADR 0010**
 
@@ -85,15 +86,15 @@ BioCLIP int8 ViT-L 在 CPU 上实测 **0.27s/图**（48 张 12.8s），比 `bird
 
 ## 二、已知未做（不用你回答，只是状态记录）
 
-顺带一条：`AGENTS.md` 里「engine 134 个测试」是陈旧数字，实际基线是 **187 passed + 1 ignored**
-（`cargo test -p photo-engine`）。我改文档时会顺手订正。
+顺带一条：`AGENTS.md` 的 engine 测试数随本提交更新为 **185 passed + 1 ignored**
+（`cargo test -p photo-engine`，本次 +6：多主体索引展开 / replace_folder 主体收敛 / 照片去重 / 集成链路）。
 
 ### 整合过程中顺手发现/顺手做的（供你复核）
 
-- **统计页的物种名拿不到 `display_name()`**：它来自 engine 的 `global_db::SpeciesStat.bird_name`，
-  而全仓**没有任何 `species_index` 的写入方**（`GlobalDb::replace_folder`/`upsert_rows` 无人调用）。
-  这看着像既有缺口（不是本次引入），但意味着统计页的数据源本身要接线；接好之后才能把
-  「有中文名用中文名、没有用学名」的回落做进去。
+- **统计页数据源已接线（2026-09-22）**：`SpeciesRow::from_recognition` 直接取 `display_name()`
+  （有中文名用中文名、没有用学名）；扫描完成 `replace_folder` 全量替换、单张识别完成 `upsert_rows`、
+  删除后重扫自动清行；`species_index` 主键扩为 `(folder, rel_path, subject_index)` 支持多主体展开，
+  统计按主体记录计数、照片列表按 `DISTINCT rel_path` 去重。
 - **纠错弹窗以前只改内存、不落库**：改动前 photo-ui 全仓没有调用
   `folder_db.update_recognition_species` 的地方（弹窗只更新内存摘要）。本次把它接上了
   （`apply_species_correction`：内存 + folder_db + `global_db.log_correction`）。
@@ -106,5 +107,5 @@ BioCLIP int8 ViT-L 在 CPU 上实测 **0.27s/图**（48 张 12.8s），比 `bird
 | `backend` / `asset_version` 落库 | **没做**。ADR 里写了要记（切换后端后要能标出「这行是另一个识别器产生的」），但 recognition 表还没加这两列；当前靠 `config.toml` 里的后端 + 手动重跑 |
 | `ranks`（七级分类）持久化 | **没做**。内存里有，落库丢了；重载后只剩学名与中文名 |
 | 世界包 / f16 压缩 / PCA | 没做 |
-| 多主体、通用检测器、拒识阈值 | 没做（见上） |
+| 拒识阈值 | 没做（置信度语义见 §1） |
 | 中国包的 GBIF 抽样验证 | 做了：`bioclip_demo/data/verify_china_pack.py`，结论与误差写在 `bioclip_demo/data/README.md` |

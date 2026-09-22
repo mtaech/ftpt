@@ -204,6 +204,16 @@ fn main() {
                 }
                 check!("置取消标志后识别在 5s 内停下", stopped);
 
+                // 清理：本冒烟在临时目录产生的全局索引行不留在开发库
+                // （统计页数据源聚合所有文件夹，识别冒烟的行会污染统计）。
+                let _ = async_cx.update(|cx| {
+                    let _ = task_state
+                        .read(cx)
+                        .global_db
+                        .as_ref()
+                        .map(|g| g.delete_folder_rows(dir.to_string_lossy().as_ref()));
+                });
+
                 if failures == 0 {
                     println!("全部通过");
                     std::process::exit(0);

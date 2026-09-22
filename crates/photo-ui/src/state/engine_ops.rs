@@ -16,6 +16,7 @@ use photo_domain::{
 use crate::image::{ImageManager, THUMB_SIZE_GRID, source_file_of};
 use crate::model::adjust::rel_path_of;
 use photo_engine::folder_db::{ExifCacheRow, FileEntry, FolderDb};
+use photo_engine::global_db::{GlobalDb, SpeciesRow};
 use photo_engine::scanner;
 
 use super::app_state::AppState;
@@ -41,7 +42,7 @@ pub fn defer_entity_action(
 
 /// 启动目录扫描任务
 pub fn start_scan(state_entity: Entity<AppState>, dir: PathBuf, recursive: bool, cx: &mut App) {
-    let (generation, cancel_token) = state_entity.update(cx, |state, cx| {
+    let (generation, cancel_token, global_db) = state_entity.update(cx, |state, cx| {
         // 换目录前先把上一张未落盘的调整参数写回：flush 用的是旧的 current_dir + folder_db，
         // 一旦 current_dir 先改了，相对路径就会算到新目录上（写错库或干脆写不进去）。
         state.flush_adjustments();
@@ -58,7 +59,7 @@ pub fn start_scan(state_entity: Entity<AppState>, dir: PathBuf, recursive: bool,
         state.scan_total = 0;
         state.current_dir = Some(dir.clone());
         cx.notify();
-        (state.scan_generation, new_cancel)
+        (state.scan_generation, new_cancel, state.global_db.clone())
     });
 
     let entity_clone = state_entity.clone();
@@ -67,7 +68,9 @@ pub fn start_scan(state_entity: Entity<AppState>, dir: PathBuf, recursive: bool,
     cx.spawn(async move |async_cx| {
         let result = async_cx
             .background_executor()
-            .spawn(async move { do_background_scan(&dir_clone, recursive, &cancel_token).await })
+            .spawn(async move {
+                do_background_scan(&dir_clone, recursive, &cancel_token, global_db).await
+            })
             .await;
 
         let _ = async_cx.update(|cx| {
@@ -407,6 +410,7 @@ async fn do_background_scan(
     dir: &Path,
     recursive: bool,
     cancel: &std::sync::atomic::AtomicBool,
+    global_db: Option<GlobalDb>,
 ) -> Result<(Vec<CaptureMeta>, Option<FolderDb>), String> {
     let folder_db = FolderDb::open_in_dir(dir).ok();
 
@@ -488,7 +492,8 @@ async fn do_background_scan(
         })
         .collect();
 
-    // 填充已有识别记录
+    // 填充已有识别记录，并顺带按 rel_path 收集 EXIF 拍摄时间（全局索引的 date_taken 用）
+    let mut date_by_rel: HashMap<String, Option<String>> = HashMap::new();
     if let Some(db) = &folder_db {
         if let Ok(recs) = db.all_recognitions() {
             let rec_map: HashMap<&str, &photo_domain::Recognition> =
@@ -501,6 +506,30 @@ async fn do_background_scan(
                     .unwrap_or_default();
                 if let Some(r) = rec_map.get(rel.as_str()) {
                     enrich_meta_recognition(meta, r);
+                }
+                date_by_rel.insert(rel, meta.date_taken.clone());
+            }
+
+            // 全局索引同步：扫描完成 → 当前文件夹识别行全量替换（多主体按主体展开）。
+            // 派生索引的写入是尽力而为（失败只影响统计页数据源，不阻塞主流程）。
+            if let Some(gdb) = &global_db {
+                let folder_str = dir.to_string_lossy().to_string();
+                let mut rows: Vec<SpeciesRow> = Vec::new();
+                let mut stale: Vec<String> = Vec::new();
+                for (rel, rec) in &recs {
+                    let date = date_by_rel.get(rel.as_str()).and_then(|d| d.clone());
+                    let new_rows =
+                        SpeciesRow::from_recognition(&folder_str, rel, rec, date.as_deref());
+                    if new_rows.is_empty() {
+                        // 识别表里有记录但无任何物种结论（Unrecognized / 全部主体失败）：
+                        // replace_folder 的「磁盘存在就保留」会留着旧行，必须显式清掉
+                        stale.push(rel.clone());
+                    }
+                    rows.extend(new_rows);
+                }
+                let _ = gdb.replace_folder(&folder_str, &rows);
+                if !stale.is_empty() {
+                    let _ = gdb.delete_rows(&folder_str, &stale);
                 }
             }
         }
@@ -730,14 +759,33 @@ fn apply_recognition(
     let Ok(recognition) = result else {
         return;
     };
-    if let Some(meta) = state.items.get_mut(idx) {
+    let date_taken = if let Some(meta) = state.items.get_mut(idx) {
         enrich_meta_recognition(meta, recognition);
-    }
+        meta.date_taken.clone()
+    } else {
+        None
+    };
     // 识别结果写回文件夹级 data.db（连接不能跨线程，所以在前台写）
     if let (Some(db), Some(dir)) = (&state.folder_db, &state.current_dir) {
         if let Ok(rel) = path.strip_prefix(dir) {
             let rel_str = rel.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
             let _ = db.upsert_recognition(&rel_str, recognition);
+            // 全局索引同步：单张识别完成 → 当前照片行 upsert（多主体按主体展开）；
+            // 无任何结论（Unrecognized / 全部主体失败）则清掉旧索引行
+            if let Some(gdb) = &state.global_db {
+                let folder_str = dir.to_string_lossy().to_string();
+                let rows = SpeciesRow::from_recognition(
+                    &folder_str,
+                    &rel_str,
+                    recognition,
+                    date_taken.as_deref(),
+                );
+                if rows.is_empty() {
+                    let _ = gdb.delete_rows(&folder_str, &[rel_str.clone()]);
+                } else {
+                    let _ = gdb.upsert_rows(&rows);
+                }
+            }
         }
     }
 }

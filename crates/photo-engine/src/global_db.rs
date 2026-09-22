@@ -15,6 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use photo_domain::Recognition;
 use rusqlite_migration::{M, Migrations};
 use thiserror::Error;
 
@@ -57,6 +58,24 @@ fn global_migrations() -> Migrations<'static> {
             "DROP TABLE IF EXISTS correction_log;
              ALTER TABLE species_index DROP COLUMN eye_sharpness;",
         ),
+        // 多主体索引（2026-09-22 ADR 0011 落地）：索引行从「一张照片一行」扩展为
+        // 「每主体一行」，主键加 subject_index；bird_name 列随泛化更名为 species_name。
+        // global.db 是派生索引（删除后重扫自动重建，见 crate 文档），直接重建表换主键
+        // 最稳妥——旧库数据无保留价值，避免 ALTER 主键的繁琐与风险。
+        M::up(
+            "DROP TABLE IF EXISTS species_index;
+             CREATE TABLE species_index (
+                 folder        TEXT NOT NULL,
+                 rel_path      TEXT NOT NULL,
+                 subject_index INTEGER NOT NULL,
+                 species_name  TEXT NOT NULL,
+                 confidence    REAL,
+                 status        TEXT NOT NULL,
+                 date_taken    TEXT,
+                 updated_at    TEXT NOT NULL,
+                 PRIMARY KEY (folder, rel_path, subject_index)
+             );",
+        ),
     ])
 }
 
@@ -70,22 +89,66 @@ pub enum GlobalDbError {
     Migration(#[from] rusqlite_migration::Error),
 }
 
-/// 全局索引单行（与 species_index 表一一对应）。
+/// 全局索引单行（与 species_index 表一一对应；一张照片的多主体展开为多行）。
 #[derive(Debug, Clone)]
 pub struct SpeciesRow {
     pub folder: String,
     pub rel_path: String,
-    pub bird_name: String,
+    /// 主体序号（0 = 主主体；旧数据/单主体恒为 0）
+    pub subject_index: i32,
+    /// 物种展示名（有中文名用中文名，否则学名）
+    pub species_name: String,
     pub confidence: Option<f64>,
     pub status: String,
     pub date_taken: Option<String>,
     pub updated_at: String,
 }
 
+impl SpeciesRow {
+    /// 从一条识别记录展开出全局索引行：每个「有物种结论」的主体一行
+    /// （subject_index 展开）。旧数据（subjects 空）以顶层 taxon 退化为单主体；
+    /// 无任何结论（Unrecognized / 全部主体失败）返回空 Vec。
+    pub fn from_recognition(
+        folder: &str,
+        rel_path: &str,
+        rec: &Recognition,
+        date_taken: Option<&str>,
+    ) -> Vec<SpeciesRow> {
+        let mk = |subject_index: i32, name: &str, confidence: Option<f32>| SpeciesRow {
+            folder: folder.to_string(),
+            rel_path: rel_path.to_string(),
+            subject_index,
+            species_name: name.to_string(),
+            confidence: confidence.map(|c| c as f64),
+            status: rec.status.as_str().to_string(),
+            date_taken: date_taken.map(|s| s.to_string()),
+            updated_at: rec.recognized_at.clone(),
+        };
+        if rec.subjects.is_empty() {
+            // 旧数据 / 单主体：顶层 taxon 兜底
+            match rec.taxon.as_ref() {
+                Some(t) if !t.display_name().is_empty() => vec![mk(0, t.display_name(), rec.confidence)],
+                _ => Vec::new(),
+            }
+        } else {
+            rec.subjects
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| {
+                    let t = s.taxon.as_ref()?;
+                    let name = t.display_name();
+                    if name.is_empty() { return None; }
+                    Some(mk(i as i32, name, s.confidence))
+                })
+                .collect()
+        }
+    }
+}
+
 /// 单鸟种聚合统计（species_stats 返回）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpeciesStat {
-    pub bird_name: String,
+    pub species_name: String,
     pub photo_count: i64,
     pub first_date: Option<String>,
     pub last_date: Option<String>,
@@ -112,26 +175,40 @@ impl GlobalDb {
     }
 
     /// 以本次扫描结果替换某文件夹的索引行（扫描完成时调用）。
-    /// 只删除「本次未出现 **且磁盘上确实不存在**」的行：单层扫描时子目录照片不在
-    /// rows 里但文件真实存在，整批清空会丢掉子目录索引（切换扫描深度时常见）。
+    /// 多主体语义：同 rel_path 可有多个 subject_index 行。
+    /// - 本次扫到的照片（rel_path 在 rows 里）：只保留新主体集合中的行，
+    ///   旧主体行清掉（重新识别后主体集合可能变化）。
+    /// - 本次没扫到的照片（单层扫描时子目录照片不在 rows 里但文件真实存在）：
+    ///   磁盘上存在就整行保留，否则删除（文件被外部删除后重扫）。
     /// 事务包裹；幂等——重复调用结果一致。
     pub fn replace_folder(&self, folder: &str, rows: &[SpeciesRow]) -> Result<(), GlobalDbError> {
         let conn = self.conn.lock();
         let tx = conn.unchecked_transaction()?;
         let new_rels: HashSet<&str> = rows.iter().map(|r| r.rel_path.as_str()).collect();
-        let existing: Vec<String> = {
-            let mut stmt = tx.prepare("SELECT rel_path FROM species_index WHERE folder = ?1")?;
-            let iter = stmt.query_map(rusqlite::params![folder], |row| row.get::<_, String>(0))?;
+        let new_keys: HashSet<(String, i32)> = rows
+            .iter()
+            .map(|r| (r.rel_path.clone(), r.subject_index))
+            .collect();
+        let existing: Vec<(String, i32)> = {
+            let mut stmt =
+                tx.prepare("SELECT rel_path, subject_index FROM species_index WHERE folder = ?1")?;
+            let iter = stmt.query_map(rusqlite::params![folder], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?))
+            })?;
             iter.filter_map(|r| r.ok()).collect()
         };
-        for rel in existing {
-            if new_rels.contains(rel.as_str()) {
-                continue;
-            }
-            if !Path::new(folder).join(&rel).exists() {
+        for (rel, subj) in existing {
+            let keep = if new_rels.contains(rel.as_str()) {
+                // 本次扫到了这张照片：主体集合以新 rows 为准
+                new_keys.contains(&(rel.clone(), subj))
+            } else {
+                // 本次没扫到（子目录照片等）：磁盘上存在就保留
+                Path::new(folder).join(&rel).exists()
+            };
+            if !keep {
                 tx.execute(
-                    "DELETE FROM species_index WHERE folder = ?1 AND rel_path = ?2",
-                    rusqlite::params![folder, rel],
+                    "DELETE FROM species_index WHERE folder = ?1 AND rel_path = ?2 AND subject_index = ?3",
+                    rusqlite::params![folder, rel, subj],
                 )?;
             }
         }
@@ -155,14 +232,15 @@ impl GlobalDb {
     ) -> Result<(), GlobalDbError> {
         let mut stmt = tx.prepare_cached(
             "INSERT OR REPLACE INTO species_index
-             (folder, rel_path, bird_name, confidence, status, date_taken, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (folder, rel_path, subject_index, species_name, confidence, status, date_taken, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )?;
         for row in rows {
             stmt.execute(rusqlite::params![
                 row.folder,
                 row.rel_path,
-                row.bird_name,
+                row.subject_index,
+                row.species_name,
                 row.confidence,
                 row.status,
                 row.date_taken,
@@ -205,17 +283,17 @@ impl GlobalDb {
     pub fn species_stats(&self) -> Result<Vec<SpeciesStat>, GlobalDbError> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare_cached(
-            "SELECT bird_name,
-                    COUNT(*)            AS photo_count,
+            "SELECT species_name,
+                    COUNT(*)            AS record_count,
                     MIN(date_taken)     AS first_date,
                     MAX(date_taken)     AS last_date
              FROM species_index
-             GROUP BY bird_name
-             ORDER BY photo_count DESC, bird_name ASC",
+             GROUP BY species_name
+             ORDER BY record_count DESC, species_name ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(SpeciesStat {
-                bird_name: row.get(0)?,
+                species_name: row.get(0)?,
                 photo_count: row.get(1)?,
                 first_date: row.get(2)?,
                 last_date: row.get(3)?,
@@ -229,14 +307,14 @@ impl GlobalDb {
     }
 
     /// 某鸟种全部照片定位（folder, rel_path），按文件夹+路径排序保证确定性。
-    pub fn photos_of_species(&self, bird_name: &str) -> Result<Vec<(String, String)>, GlobalDbError> {
+    pub fn photos_of_species(&self, species_name: &str) -> Result<Vec<(String, String)>, GlobalDbError> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare_cached(
-            "SELECT folder, rel_path FROM species_index
-             WHERE bird_name = ?1
+            "SELECT DISTINCT folder, rel_path FROM species_index
+             WHERE species_name = ?1
              ORDER BY folder ASC, rel_path ASC",
         )?;
-        let rows = stmt.query_map(rusqlite::params![bird_name], |row| {
+        let rows = stmt.query_map(rusqlite::params![species_name], |row| {
             Ok((row.get(0)?, row.get(1)?))
         })?;
         let mut out = Vec::new();
@@ -261,6 +339,9 @@ impl GlobalDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use photo_domain::{
+        BBox, CnLevel, RecognitionStatus, SubjectRecognition, TaxonMatch,
+    };
     use tempfile::TempDir;
 
     fn row(
@@ -274,7 +355,8 @@ mod tests {
         SpeciesRow {
             folder: folder.to_string(),
             rel_path: rel.to_string(),
-            bird_name: bird.to_string(),
+            subject_index: 0,
+            species_name: bird.to_string(),
             confidence: conf,
             status: status.to_string(),
             date_taken: date.map(|s| s.to_string()),
@@ -315,9 +397,9 @@ mod tests {
         let stats = db.species_stats().unwrap();
         assert_eq!(stats.len(), 2);
         // 张数降序：白鹭 2 张在前
-        assert_eq!(stats[0].bird_name, "白鹭");
+        assert_eq!(stats[0].species_name, "白鹭");
         assert_eq!(stats[0].photo_count, 2);
-        assert_eq!(stats[1].bird_name, "翠鸟");
+        assert_eq!(stats[1].species_name, "翠鸟");
         assert_eq!(stats[1].photo_count, 1);
         // 空 rows 替换 = 清空该文件夹（文件被外部删除后重扫场景）
         db.replace_folder("E:/A", &[]).unwrap();
@@ -360,7 +442,7 @@ mod tests {
             .unwrap();
         let stats = db.species_stats().unwrap();
         assert_eq!(stats.len(), 1);
-        assert_eq!(stats[0].bird_name, "苍鹭");
+        assert_eq!(stats[0].species_name, "苍鹭");
         assert_eq!(stats[0].photo_count, 1);
         // 新增键：行数增长
         db.upsert_rows(&[row("E:/A", "2.jpg", "苍鹭", Some(80.0), "needs_review", Some("2026-08-02"))])
@@ -409,7 +491,7 @@ mod tests {
         .unwrap();
         let stats = db.species_stats().unwrap();
         assert_eq!(stats.len(), 2);
-        let bailu = stats.iter().find(|s| s.bird_name == "白鹭").unwrap();
+        let bailu = stats.iter().find(|s| s.species_name == "白鹭").unwrap();
         assert_eq!(bailu.photo_count, 2);
         // 首末见日期（TEXT MIN/MAX）
         assert_eq!(bailu.first_date.as_deref(), Some("2026-08-01"));
@@ -432,9 +514,9 @@ mod tests {
         .unwrap();
         let stats = db.species_stats().unwrap();
         // 张数降序：麻雀 3 张在前
-        assert_eq!(stats[0].bird_name, "麻雀");
+        assert_eq!(stats[0].species_name, "麻雀");
         assert_eq!(stats[0].photo_count, 3);
-        assert_eq!(stats[1].bird_name, "白鹭");
+        assert_eq!(stats[1].species_name, "白鹭");
         assert_eq!(stats[1].photo_count, 1);
     }
 
@@ -484,6 +566,233 @@ mod tests {
         assert_eq!(db.distinct_folder_count().unwrap(), 2);
         db.delete_folder_rows("E:/A").unwrap();
         assert_eq!(db.distinct_folder_count().unwrap(), 1);
+    }
+
+    // ── 多主体：from_recognition 展开 / replace_folder 主体集合收敛 ──
+
+    fn taxon(cn: &str, latin: &str) -> TaxonMatch {
+        TaxonMatch {
+            taxon_id: None,
+            cn_name: cn.to_string(),
+            latin_name: latin.to_string(),
+            cn_level: CnLevel::Species,
+            ranks: vec![],
+        }
+    }
+
+    fn subject(index: u32, cn: &str, latin: &str, conf: Option<f32>) -> SubjectRecognition {
+        SubjectRecognition {
+            index,
+            bbox: BBox::new(0.1, 0.1, 0.5, 0.5),
+            taxon: Some(taxon(cn, latin)),
+            class_index: Some(0),
+            confidence: conf,
+            candidates: vec![],
+            failure: photo_domain::RecognitionFailureStage::None,
+        }
+    }
+
+    /// 多主体识别记录（顶层 = 主主体 subjects[0]）。
+    fn rec(subjects: Vec<SubjectRecognition>) -> Recognition {
+        let primary = subjects.first();
+        Recognition {
+            status: RecognitionStatus::Confirmed,
+            taxon: primary.and_then(|s| s.taxon.clone()),
+            class_index: primary.and_then(|s| s.class_index),
+            confidence: primary.and_then(|s| s.confidence),
+            bbox: primary.map(|s| s.bbox),
+            candidates: vec![],
+            failure_stage: photo_domain::RecognitionFailureStage::None,
+            recognized_at: "2026-09-22T10:00:00Z".to_string(),
+            subjects,
+        }
+    }
+
+    #[test]
+    fn test_global_db_from_recognition_expands_multi_subject() {
+        let rows = SpeciesRow::from_recognition(
+            "E:/A",
+            "1.jpg",
+            &rec(vec![
+                subject(0, "长耳鸮", "Asio otus", Some(71.0)),
+                subject(1, "粉褶蕈属", "Entoloma", Some(60.0)),
+            ]),
+            Some("2026-08-01"),
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].subject_index, 0);
+        assert_eq!(rows[0].species_name, "长耳鸮");
+        assert_eq!(rows[0].confidence, Some(71.0));
+        assert_eq!(rows[0].status, "confirmed");
+        assert_eq!(rows[0].date_taken.as_deref(), Some("2026-08-01"));
+        assert_eq!(rows[1].subject_index, 1);
+        assert_eq!(rows[1].species_name, "粉褶蕈属");
+        assert_eq!(rows[1].confidence, Some(60.0));
+    }
+
+    #[test]
+    fn test_global_db_from_recognition_legacy_single() {
+        // 旧数据：subjects 空，以顶层 taxon 退化为单主体
+        let rec = Recognition {
+            status: RecognitionStatus::Confirmed,
+            taxon: Some(taxon("白鹭", "Egretta garzetta")),
+            class_index: Some(1),
+            confidence: Some(90.0),
+            bbox: Some(BBox::new(0.1, 0.1, 0.5, 0.5)),
+            candidates: vec![],
+            failure_stage: photo_domain::RecognitionFailureStage::None,
+            recognized_at: "2026-09-22T10:00:00Z".to_string(),
+            subjects: vec![],
+        };
+        let rows = SpeciesRow::from_recognition("E:/A", "legacy.jpg", &rec, None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].subject_index, 0);
+        assert_eq!(rows[0].species_name, "白鹭");
+        assert_eq!(rows[0].confidence, Some(90.0));
+    }
+
+    #[test]
+    fn test_global_db_from_recognition_unrecognized_empty() {
+        let rec = Recognition {
+            status: RecognitionStatus::Unrecognized,
+            taxon: None,
+            class_index: None,
+            confidence: None,
+            bbox: None,
+            candidates: vec![],
+            failure_stage: photo_domain::RecognitionFailureStage::Detection,
+            recognized_at: "2026-09-22T10:00:00Z".to_string(),
+            subjects: vec![],
+        };
+        assert!(SpeciesRow::from_recognition("E:/A", "none.jpg", &rec, None).is_empty());
+    }
+
+    #[test]
+    fn test_global_db_replace_folder_multi_subject_converges() {
+        let tmp = TempDir::new().unwrap();
+        let db = GlobalDb::open(tmp.path()).unwrap();
+        // 一张照片两个主体 → 两行
+        let mut r1 = row("E:/A", "1.jpg", "长耳鸮", Some(71.0), "confirmed", Some("2026-08-01"));
+        r1.subject_index = 0;
+        let mut r2 = row("E:/A", "1.jpg", "粉褶蕈属", Some(60.0), "confirmed", Some("2026-08-01"));
+        r2.subject_index = 1;
+        db.replace_folder("E:/A", &[r1, r2]).unwrap();
+        let stats = db.species_stats().unwrap();
+        assert_eq!(stats.len(), 2);
+        // 重新识别后只剩一个主体：旧主体行被清掉，不残留
+        db.replace_folder(
+            "E:/A",
+            &[row("E:/A", "1.jpg", "长耳鸮", Some(80.0), "confirmed", Some("2026-08-01"))],
+        )
+        .unwrap();
+        let stats = db.species_stats().unwrap();
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].species_name, "长耳鸮");
+        assert_eq!(stats[0].photo_count, 1);
+    }
+
+    /// 模拟 engine_ops 扫描完成后的全局索引同步链路：
+    /// folder_db 识别行 → from_recognition 展开（多主体）→ replace_folder → 统计可读。
+    #[test]
+    fn test_global_db_sync_from_folder_db_scan_path() {
+        use crate::folder_db::FolderDb;
+        let tmp = TempDir::new().unwrap();
+        let photo_dir = tmp.path().join("photos");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        // 真实文件（replace_folder 的磁盘存在性判定需要）
+        std::fs::write(photo_dir.join("multi.jpg"), b"x").unwrap();
+        std::fs::write(photo_dir.join("single.jpg"), b"x").unwrap();
+
+        let fdb = FolderDb::open_in_dir(&photo_dir).unwrap();
+        // 多主体照片
+        fdb.upsert_recognition(
+            "multi.jpg",
+            &rec(vec![
+                subject(0, "长耳鸮", "Asio otus", Some(71.0)),
+                subject(1, "粉褶蕈属", "Entoloma", Some(60.0)),
+            ]),
+        )
+        .unwrap();
+        // 单主体照片（subjects 有 1 个元素）
+        fdb.upsert_recognition(
+            "single.jpg",
+            &rec(vec![subject(0, "白鹭", "Egretta garzetta", Some(90.0))]),
+        )
+        .unwrap();
+
+        // engine_ops::do_background_scan 的全局同步段：
+        // for (rel, rec) in &recs { rows.extend(from_recognition(...)) }; replace_folder
+        let folder_str = photo_dir.to_string_lossy().to_string();
+        let gdb = GlobalDb::open(tmp.path()).unwrap();
+        let recs = fdb.all_recognitions().unwrap();
+        let rows: Vec<SpeciesRow> = recs
+            .iter()
+            .flat_map(|(rel, rec)| SpeciesRow::from_recognition(&folder_str, rel, rec, None))
+            .collect();
+        gdb.replace_folder(&folder_str, &rows).unwrap();
+
+        let stats = gdb.species_stats().unwrap();
+        assert_eq!(stats.len(), 3);
+        // 多主体展开：长耳鸮 1 条、粉褶蕈属 1 条、白鹭 1 条
+        let names: Vec<&str> = stats.iter().map(|s| s.species_name.as_str()).collect();
+        assert!(names.contains(&"长耳鸮"));
+        assert!(names.contains(&"粉褶蕈属"));
+        assert!(names.contains(&"白鹭"));
+        // 多主体照片的照片列表：multi.jpg 出现 1 次（DISTINCT 按 rel_path 去重）
+        let photos = gdb.photos_of_species("长耳鸮").unwrap();
+        assert_eq!(photos, vec![(folder_str.clone(), "multi.jpg".to_string())]);
+
+        // ── 场景 2：single.jpg 重识别为 Unrecognized → 旧索引行必须被清掉 ──
+        // （engine_ops 对无结论的行走 delete_rows；replace_folder 的磁盘存在判定会留着旧行）
+        fdb.upsert_recognition(
+            "single.jpg",
+            &Recognition {
+                status: RecognitionStatus::Unrecognized,
+                taxon: None,
+                class_index: None,
+                confidence: None,
+                bbox: None,
+                candidates: vec![],
+                failure_stage: photo_domain::RecognitionFailureStage::Detection,
+                recognized_at: "2026-09-22T11:00:00Z".to_string(),
+                subjects: vec![],
+            },
+        )
+        .unwrap();
+        let recs = fdb.all_recognitions().unwrap();
+        let mut rows = Vec::new();
+        let mut stale = Vec::new();
+        for (rel, rec) in &recs {
+            let new_rows = SpeciesRow::from_recognition(&folder_str, rel, rec, None);
+            if new_rows.is_empty() {
+                stale.push(rel.clone());
+            }
+            rows.extend(new_rows);
+        }
+        gdb.replace_folder(&folder_str, &rows).unwrap();
+        gdb.delete_rows(&folder_str, &stale).unwrap();
+        let stats = gdb.species_stats().unwrap();
+        assert_eq!(stats.len(), 2); // 白鹭 已消失
+        let names: Vec<&str> = stats.iter().map(|s| s.species_name.as_str()).collect();
+        assert!(!names.contains(&"白鹭"));
+        assert!(gdb.photos_of_species("白鹭").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_global_db_photos_of_species_dedup_multi_subject() {
+        let tmp = TempDir::new().unwrap();
+        let db = GlobalDb::open(tmp.path()).unwrap();
+        // 同一物种两个主体（罕见但 DISTINCT 要兜住）→ 照片列表只回 1 条
+        let mut r1 = row("E:/A", "1.jpg", "白鹭", Some(90.0), "confirmed", Some("2026-08-01"));
+        r1.subject_index = 0;
+        let mut r2 = row("E:/A", "1.jpg", "白鹭", Some(85.0), "confirmed", Some("2026-08-01"));
+        r2.subject_index = 1;
+        db.replace_folder("E:/A", &[r1, r2]).unwrap();
+        let photos = db.photos_of_species("白鹭").unwrap();
+        assert_eq!(photos, vec![("E:/A".to_string(), "1.jpg".to_string())]);
+        // 统计按主体记录计：同物种两主体 = 2 条
+        let stats = db.species_stats().unwrap();
+        assert_eq!(stats[0].photo_count, 2);
     }
 
 }

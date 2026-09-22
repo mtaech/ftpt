@@ -57,8 +57,11 @@ open-questions §3 原本设想把主键改成 `(rel_path, subject_index)`，**�
 - 多主体照片的识别耗时 = 每主体一次 BioCLIP（约 0.3s/主体，CPU int8），批量识别在后台线程，
   进度仍按照片粒度；单主体照片耗时不变。
 - 顶层 `Recognition.status`：任一主体有结论 → Confirmed；全部失败 → NeedsReview；无框 → Unrecognized。
-- **遗留**：`global_db` 跨文件夹索引目前无写入方，多主体入库未接线（等索引写入方落地时，
-  `species_index` 需按主体展开——主键从 `(folder, rel_path)` 扩为 `(folder, rel_path, subject_index)`）。
+- **遗留→已做（2026-09-22 同日）**：`global_db` 跨文件夹索引原无写入方，现已接线并支持多主体：
+  扫描完成 `replace_folder` 全量替换、单张识别完成 `upsert_rows`，`SpeciesRow::from_recognition`
+  按主体展开（无结论的主体跳过、旧数据以顶层 taxon 退化为单主体），`species_index` 主键扩为
+  `(folder, rel_path, subject_index)`（派生索引直接重建表换主键，无迁移风险）。统计按主体记录计数，
+  照片列表按 `DISTINCT rel_path` 去重；删除/移出后重扫自动清行。
 - `recognize_file` 示例打印各主体。
 
 ## 实测（真实照片，2026-09-22）

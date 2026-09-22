@@ -85,7 +85,7 @@ pub fn render_stats_view(
                 .child(render_stat_card(
                     "照片总数",
                     &format!("{total_photos}"),
-                    "已识别照片记录",
+                    "已识别主体记录",
                     cx,
                 ))
                 // 卡片 3: 文件夹数
@@ -158,7 +158,7 @@ pub fn render_stats_view(
                                                         div()
                                                             .font_medium()
                                                             .text_color(cx.theme().foreground)
-                                                            .child(item.bird_name),
+                                                            .child(item.species_name),
                                                     ),
                                             )
                                             .child(
@@ -172,7 +172,7 @@ pub fn render_stats_view(
                                                     )
                                                     .child(
                                                         Tag::secondary().small().child(format!(
-                                                            "{} 张",
+                                                            "{} 条",
                                                             item.photo_count
                                                         )),
                                                     ),
