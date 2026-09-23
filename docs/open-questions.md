@@ -77,12 +77,17 @@ BioCLIP 是**余弦相似度 ×100**——实测 top-1 落在 65~79 这个窄带
 - **要你定**：① 接受现状（导出含全部类群，非鸟记录自行剔除；当前实现）；② 还是先落库类群/`ranks`
   再做真正的鸟类门控（会动 schema，而 `ranks` 目前仍无消费方）。
 
-### 8. 发布包与署名
+### 8. 发布包与署名 —— **已做（2026-09-23），但查出新问题**
 
-BioCLIP 2 权重是 **MIT**、TreeOfLife-200M 是 **CC0-1.0**，随包分发没问题，
-但 MIT 要求保留版权声明。
-- 要不要在发布包里放一份 `NOTICE`（写明两者）？`scripts/package.ps1` 也要跟着加
-  `data/taxon/` 与 VERSION 校验，并把 `Compress-Archive` 换掉（2GB+ 随机 float 压不动且慢）。
+- **已做**：仓库根新增 `NOTICE`，逐项写明随包资产与许可：BioCLIP 2 = **MIT**（要求保留版权声明）、
+  TreeOfLife-200M = **CC0-1.0**（数据集自身声明底层图片/文本混有多种 CC 许可）、
+  Catalogue of Life China 名录 = **CC BY**（要求署名，`bird_catalog.db` 同源）。
+  `scripts/package.ps1` 已加 `data/taxon/` 必需校验与收集（**之前根本没拷**）、`VERSION` 字段校验、
+  `NOTICE`/`LICENSE` 随包，并把 `Compress-Archive` 换成系统自带 bsdtar。
+- **新阻塞项（需你拍板）**：`models/org_det.onnx` 基于 **Ultralytics YOLOE**，仓库与权重是
+  **AGPL-3.0**（或商业 Enterprise License）——AGPL 对分发有传染性要求。三选一：
+  ① 仅自用不分发（当下）；② 换一个许可兼容的检测模型；③ 买/申请 Ultralytics Enterprise License。
+  在拍板前，NOTICE 与 README 都把这条标为「待确认」。
 
 ### 9. 性能与并发
 

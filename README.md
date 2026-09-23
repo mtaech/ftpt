@@ -64,4 +64,8 @@ XDG_CONFIG_HOME=/tmp/ptlease-config xvfb-run -a cargo run -p photo-ui --example 
 
 ## 许可
 
-[MIT](LICENSE)
+本程序：[MIT](LICENSE)。
+
+随发布包分发的模型与生物名录资产来自第三方，各自许可与署名要求见 [NOTICE](NOTICE)
+（BioCLIP 2 = MIT；TreeOfLife-200M = CC0-1.0；Catalogue of Life China = CC BY；
+⚠️ org_det.onnx 基于 Ultralytics YOLOE，为 **AGPL-3.0**，对外分发前需确认）。

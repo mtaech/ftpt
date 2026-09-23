@@ -1,0 +1,54 @@
+Photo Tool (ftpt) — 第三方组件与资产声明
+==========================================
+
+本程序自身以 MIT 许可发布（见 LICENSE）。
+随发布包分发的模型与数据资产来自下列第三方项目，各自许可以下逐项列出。
+
+一、识别模型
+------------
+
+1. models/bioclip2_model_int8.onnx — BioCLIP 2（图像塔，int8 量化）
+   来源：https://huggingface.co/imageomics/bioclip-2
+   许可：MIT
+   版权与引用：Gu, Jianyang; Stevens, Samuel; Campolongo, Elizabeth G.; Thompson, Matthew J.;
+   Zhang, Net; Wu, Jiaman; Mai, Zheda; et al. "BioCLIP 2", 2025.
+   https://doi.org/10.5281/zenodo.15644363
+   本程序使用的是官方权重的 int8 量化导出，未修改权重内容。
+
+2. models/org_det.onnx — YOLOE-26s-seg（开放词表通用主体检测）
+   来源：Ultralytics YOLOE（https://github.com/ultralytics/ultralytics）
+   许可：**AGPL-3.0**（或 Ultralytics 商业许可）
+   ⚠️ 待确认：AGPL-3.0 对「随包分发 + 闭源」有传染性要求。若本程序以非 AGPL 方式分发，
+   需向 Ultralytics 申请 Enterprise License（https://www.ultralytics.com/license）
+   或替换为许可兼容的检测模型。**这是当前发布前唯一的合规阻塞项。**
+
+二、物种标签与文本向量
+----------------------
+
+3. data/taxon/ — 中国名录子集包（label 文本向量 + 中文名 + 学名）
+   - 文本 embedding 与标签列表：由 TreeOfLife-200M 的文本标签空间导出
+     来源：https://huggingface.co/datasets/imageomics/TreeOfLife-200M
+     许可：CC0-1.0（数据集卡片）。注意数据集自身声明：其图片与文本混有多种 CC 许可，
+     逐条许可见数据集内的 license 字段；本程序只使用**标签文本**的 embedding，不含图片。
+   - 学名与中文名：Catalogue of Life China 年度名录（物种2000 中国节点）
+     来源：https://www.catalogueoflife.org/ （COL-China 年度清单，如 2025 年度清单）
+     许可：CC BY —— **要求署名**（本文件即署名声明）。
+     中文名另合并了 iNaturalist 分类名（iNaturalist 内容默认 CC BY-NC，仅用于非商业分发时需注意）。
+
+4. data/bird_catalog.db — animal_info(id, latin_name, cn_name) 名录库
+   由 Catalogue of Life China 名录导出（同上 CC BY，要求署名）。
+
+三、运行时组件（随包收集，非本仓库源码）
+----------------------------------------
+
+5. onnxruntime（静态链接进 exe）— MIT
+6. DirectML.dll — Microsoft，随 Windows / DirectX 分发条款
+7. exiftool/ — ExifTool（Perl 运行时 + exiftool.pl）
+   来源：https://exiftool.org/  许可：Perl Artistic License / GPL
+8. LibRaw（libraw.so / 静态库）— LGPL-2.1 / CDDL-1.0
+9. 其余 Rust 依赖的许可与版权见 Cargo.lock 与各 crate 的 LICENSE 文件。
+
+四、本文件不构成法律意见
+------------------------
+
+上述「待确认」项（第 2 条 AGPL-3.0）需要在对外分发前由发布者自行确认或处理。

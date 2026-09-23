@@ -12,9 +12,10 @@
 # GPUI 版说明（2026-09-18 删除 Tauri 版后重写）：
 # - 前端 crate 为 photo-ui（workspace 成员），二进制名 ftpt；没有前端构建步骤，
 #   也没有 tauri-build / custom-protocol —— cargo build 出的 exe 就是完整应用
-# - 运行时资产：models/*.onnx + data/bird_catalog.db（data_root() 定位：
-#   PHOTO_DATA_DIR → exe 同级 models/ → 仓库根回退，见
-#   crates/photo-ui/src/state/app_state.rs）
+# - 运行时资产：models/*.onnx + data/bird_catalog.db + data/taxon/（名录子集包，
+#   缺它识别器会报 ModelLoad；data_root() 定位：PHOTO_DATA_DIR → exe 同级 models/ → 仓库根回退，
+#   见 crates/photo-ui/src/state/app_state.rs）
+# - 署名：NOTICE（BioCLIP 2 MIT / TreeOfLife-200M CC0-1.0 / CoL China CC BY）随包发
 # - DirectML.dll 由 ort(directml) 构建时自动拷入 target 目录，随包收集
 #   （onnxruntime 已静态链接进 exe）
 
@@ -59,11 +60,24 @@ if ($LASTEXITCODE -ne 0) { throw "cargo build 失败" }
 $exe = Join-Path $targetDir $exeName
 $modelsDir = Join-Path $root "models"
 $catalogDb = Join-Path $root "data/bird_catalog.db"
-foreach ($required in @($exe, $modelsDir, $catalogDb)) {
+$taxonDir = Join-Path $root "data/taxon"
+$taxonFiles = @("txt_emb_bioclip-2.npy", "txt_emb_bioclip-2.json", "zh_names.json", "VERSION")
+$notice = Join-Path $root "NOTICE"
+foreach ($required in @($exe, $modelsDir, $catalogDb, $taxonDir, $notice)) {
     if (-not (Test-Path $required)) {
-        throw "缺少发布资产：$required（模型放 models/，名录库放 data/bird_catalog.db）"
+        throw "缺少发布资产：$required（模型放 models/，名录库 data/bird_catalog.db，名录子集包 data/taxon/，署名 NOTICE）"
     }
 }
+$taxonMissing = $taxonFiles | Where-Object { -not (Test-Path (Join-Path $taxonDir $_)) }
+if ($taxonMissing) {
+    throw "data/taxon/ 缺少文件：$($taxonMissing -join ', ')（用 bioclip_demo/data/build_taxon_pack.py 重建）"
+}
+# VERSION 是名录子集包的版本卡（schema/dim/labels）；dim 与识别代码常量不符时识别必错，先拦下
+$taxonVersion = Get-Content (Join-Path $taxonDir "VERSION") -Raw | ConvertFrom-Json
+foreach ($key in @("schema", "dim", "labels")) {
+    if ($null -eq $taxonVersion.$key) { throw "data/taxon/VERSION 缺少字段：$key" }
+}
+Write-Host "==> 名录子集包：schema $($taxonVersion.schema) / dim $($taxonVersion.dim) / labels $($taxonVersion.labels)"
 
 # 3. 收集到暂存目录
 if (Test-Path $stageDir) { Remove-Item -Recurse -Force $stageDir }
@@ -74,6 +88,11 @@ Copy-Item $exe "$stageDir/$exeName"
 Get-ChildItem $targetDir -Filter "*.dll" | Copy-Item -Destination $stageDir
 Copy-Item "$modelsDir/*.onnx" "$stageDir/models/"
 Copy-Item $catalogDb "$stageDir/data/bird_catalog.db"
+# 名录子集包：识别器的文本向量与中文名（走 data_root() 的 data/taxon/）
+Copy-Item $taxonDir "$stageDir/data/taxon" -Recurse -Force
+# 署名（BioCLIP 2 是 MIT、CoL China 是 CC BY，两者都要求保留声明，源码 LICENSE 也一并带）
+Copy-Item $notice "$stageDir/NOTICE"
+Copy-Item (Join-Path $root "LICENSE") "$stageDir/LICENSE"
 
 # EXIF 后端：ExifTool 本地运行时（local-lib/exiftool，跨平台各自打包对应平台目录）
 # 运行时定位优先级：exe 同级 exiftool/ → local-lib/exiftool/ → PATH（见 docs/exiftool-update.md）
@@ -83,8 +102,19 @@ if (Test-Path $exifToolDir) {
 }
 
 # 4. 打 zip
+# 用系统自带的 bsdtar（Windows 10 1803+ 的 C:\Windows\System32\tar.exe），不用 Compress-Archive：
+# 后者对 2GB+ 有已知上限，而且包里的 .onnx/.npy 本就是接近随机的字节，deflate 基本压不动、只在浪费时间。
+# 必须确认是 bsdtar：若 PATH 前面是 Git/MSYS 的 GNU tar，`-a` 不认 zip，会静默产出 tar 文件。
+$tarVersion = (& tar --version 2>&1 | Select-Object -First 1)
+if ($tarVersion -notmatch "bsdtar") { throw "需要 bsdtar（Windows 自带 tar.exe），当前 tar 是：$tarVersion" }
 if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
-Compress-Archive -Path $stageDir -DestinationPath $zipPath
+# 在 dist 目录里用相对路径调用（避开 tar 对 C:\ 盘符参数的处理差异）
+Push-Location (Split-Path -Parent $stageDir)
+try {
+    & tar -a -c -f (Split-Path -Leaf $zipPath) (Split-Path -Leaf $stageDir)
+    if ($LASTEXITCODE -ne 0) { throw "tar 打包失败（需要 Windows 10 1803+ 的 tar.exe）" }
+}
+finally { Pop-Location }
 
 # 5. 汇总
 $zipSize = "{0:N1} MB" -f ((Get-Item $zipPath).Length / 1MB)
