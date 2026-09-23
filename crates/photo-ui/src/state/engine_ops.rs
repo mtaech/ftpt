@@ -1200,9 +1200,24 @@ fn apply_region_recognition(
 /// 统一改写成 TaxonMatch::display_name()（有中文名用中文名，没有用学名）。
 fn enrich_meta_recognition(meta: &mut CaptureMeta, recognition: &photo_domain::Recognition) {
     meta.enrich_with_recognition(recognition);
-    if let Some(taxon) = &recognition.taxon {
+    // 主主体没结论时**回退到第一个有结论的主体**：框选识别是「追加主体」，旧记录是
+    // Unrecognized（顶层无结论、subjects 空）时顶层可能仍为 None，而照片状态已是 Confirmed——
+    // 信息栏/网格只读顶层 taxon_name，不兜底就显示「无记录」，用户以为识别白做了。
+    // 旧库里的存量行（`append_subject` 修复前写下的）也靠这条兜底显示。
+    let concluded = recognition.subjects.iter().find(|s| {
+        s.failure == photo_domain::RecognitionFailureStage::None && s.taxon.is_some()
+    });
+    let taxon = recognition
+        .taxon
+        .as_ref()
+        .or_else(|| concluded.and_then(|s| s.taxon.as_ref()));
+    if let Some(taxon) = taxon {
         let display = taxon.display_name();
         meta.taxon_name = (!display.is_empty()).then(|| display.to_string());
+        // 顶层没结论时，置信度取回退主体的（否则会留着顶层那个 None）
+        if recognition.taxon.is_none() {
+            meta.taxon_confidence = concluded.and_then(|s| s.confidence);
+        }
     }
 }
 
@@ -2253,6 +2268,38 @@ mod recognition_tests {
         let r = recognition(None);
         enrich_meta_recognition(&mut meta, &r);
         assert_eq!(meta.taxon_name, None);
+    }
+
+    /// 回归（用户报「框选识别出来了，结果栏却显示『无记录』」）：框选是把新主体**追加**进
+    /// 已有记录，若这张照片此前是 Unrecognized（顶层无结论、subjects 空），追加后
+    /// subjects[0] 就是新主体、状态变 Confirmed，但顶层字段（主主体）可能仍为空。
+    /// 信息栏/网格只读顶层 taxon_name，于是显示「无记录」——这里必须回退到
+    /// 第一个有结论的主体，否则用户会以为识别白做了。
+    #[test]
+    fn test_enrich_meta_recognition_falls_back_to_concluded_subject() {
+        let mut meta = empty_meta();
+        let mut r = recognition(None);
+        r.status = RecognitionStatus::Confirmed;
+        r.confidence = None;
+        r.subjects = vec![photo_domain::SubjectRecognition {
+            index: 0,
+            bbox: BBox::new(0.1, 0.1, 0.5, 0.5),
+            taxon: Some(TaxonMatch {
+                taxon_id: None,
+                cn_name: String::new(),
+                latin_name: "Padda oryzivora".to_string(),
+                cn_level: CnLevel::Missing,
+                ranks: vec![],
+            }),
+            class_index: Some(7),
+            confidence: Some(68.3),
+            candidates: vec![],
+            failure: RecognitionFailureStage::None,
+        }];
+        enrich_meta_recognition(&mut meta, &r);
+        assert_eq!(meta.taxon_name.as_deref(), Some("Padda oryzivora"));
+        assert_eq!(meta.taxon_confidence, Some(68.3));
+        assert_eq!(meta.recognition_status, Some(RecognitionStatus::Confirmed));
     }
 
 }

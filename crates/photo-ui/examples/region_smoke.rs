@@ -270,6 +270,115 @@ fn main() {
                         && !read_state!(|s: &AppState| s.is_recognizing)
                 );
 
+                // ── 9) 回归（用户报「框选识别出来了，结果栏却显示『无记录』」）──
+                // 信息栏主行只读顶层 taxon_name；框选是「追加主体」，若旧记录是
+                // Unrecognized（顶层无结论、subjects 空），顶层不同步就会一直空白。
+                // 这里把 reg_0 打回「旧记录」形状再框选一次，断言内存摘要与落库顶层都有名字。
+                let legacy_unrecognized = photo_domain::Recognition {
+                    status: photo_domain::RecognitionStatus::Unrecognized,
+                    taxon: None,
+                    class_index: None,
+                    confidence: None,
+                    bbox: None,
+                    candidates: vec![],
+                    failure_stage: photo_domain::RecognitionFailureStage::Detection,
+                    recognized_at: "2026-09-23T10:00:00Z".to_string(),
+                    subjects: vec![],
+                };
+                let wrote = read_state!(|s: &AppState| {
+                    if let Some(db) = s.folder_db.as_ref() {
+                        db.upsert_recognition("reg_0.jpg", &legacy_unrecognized).is_ok()
+                    } else {
+                        false
+                    }
+                });
+                async_cx.update(|cx| {
+                    task_state.update(cx, |s, _| {
+                        // 同步内存形状（模拟「之前跑过批量识别但没结论」的现场）
+                        s.items[0].recognition_status = Some(photo_domain::RecognitionStatus::Unrecognized);
+                        s.items[0].taxon_name = None;
+                        s.items[0].taxon_confidence = None;
+                        s.items[0].subjects.clear();
+                    });
+                });
+                check!("把 reg_0 打回 Unrecognized 旧记录形状", wrote);
+
+                async_cx.update(|cx| {
+                    start_region_recognition(
+                        task_state.clone(),
+                        path.clone(),
+                        BBox::new(0.2, 0.2, 0.7, 0.8),
+                        cx,
+                    );
+                });
+                for _ in 0..800 {
+                    pump(async_cx, 50).await;
+                    if !read_state!(|s: &AppState| s.region_recognizing) {
+                        break;
+                    }
+                }
+                let (mem_name, mem_status, mem_subjects, db_taxon) = read_state!(|s: &AppState| {
+                    (
+                        s.items[0].taxon_name.clone(),
+                        s.items[0].recognition_status,
+                        s.items[0].subjects.len(),
+                        s.folder_db
+                            .as_ref()
+                            .and_then(|db| db.get_recognition("reg_0.jpg").ok().flatten())
+                            .and_then(|r| r.taxon.map(|t| t.display_name().to_string())),
+                    )
+                });
+                check!(
+                    format!("旧 Unrecognized 记录框选后内存摘要显示物种（{mem_name:?}，状态 {mem_status:?}）"),
+                    mem_name.is_some() && mem_status == Some(photo_domain::RecognitionStatus::Confirmed)
+                );
+                check!("框选结果作为唯一主体落进内存摘要", mem_subjects == 1);
+                check!(
+                    format!("落库记录的顶层字段同步为 subjects[0]（{db_taxon:?}）"),
+                    db_taxon.is_some()
+                );
+
+                // ── 10) 存量坏数据（修复前写下的：顶层 NULL + subjects 里有结论）也要显示 ──
+                let legacy_broken = photo_domain::Recognition {
+                    status: photo_domain::RecognitionStatus::Confirmed,
+                    taxon: None,
+                    class_index: None,
+                    confidence: None,
+                    bbox: None,
+                    candidates: vec![],
+                    failure_stage: photo_domain::RecognitionFailureStage::None,
+                    recognized_at: "2026-09-23T11:00:00Z".to_string(),
+                    subjects: vec![photo_domain::SubjectRecognition {
+                        index: 0,
+                        bbox: BBox::new(0.1, 0.1, 0.5, 0.5),
+                        taxon: Some(photo_domain::TaxonMatch {
+                            taxon_id: None,
+                            cn_name: String::new(),
+                            latin_name: "Padda oryzivora".to_string(),
+                            cn_level: photo_domain::CnLevel::Missing,
+                            ranks: vec![],
+                        }),
+                        class_index: Some(7),
+                        confidence: Some(68.3),
+                        candidates: vec![],
+                        failure: photo_domain::RecognitionFailureStage::None,
+                    }],
+                };
+                let _ = read_state!(|s: &AppState| {
+                    s.folder_db
+                        .as_ref()
+                        .map(|db| db.upsert_recognition("reg_0.jpg", &legacy_broken).is_ok())
+                });
+                fire(async_cx, handle, Box::new(Rescan));
+                pump(async_cx, 3000).await;
+                let (reload_name, reload_conf) = read_state!(|s: &AppState| {
+                    (s.items[0].taxon_name.clone(), s.items[0].taxon_confidence)
+                });
+                check!(
+                    format!("存量坏数据重扫后仍显示物种（{reload_name:?} / {reload_conf:?}）"),
+                    reload_name.as_deref() == Some("Padda oryzivora")
+                );
+
                 // 清理：本冒烟在临时目录产生的全局索引行不留在开发库
                 let _ = async_cx.update(|cx| {
                     let _ = task_state

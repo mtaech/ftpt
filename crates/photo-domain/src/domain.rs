@@ -894,6 +894,16 @@ impl Recognition {
             .unwrap_or(0);
         subject.index = next_index;
         self.subjects.push(subject);
+        // 顶层字段恒 = 主主体（subjects[0]）：旧记录无结论且 subjects 为空时，subjects[0]
+        // 就是刚追加的这个主体——不同步的话顶层 taxon 永远是 None，而读侧（信息栏/网格）
+        // 只看顶层，于是状态已 Confirmed 却显示「无记录」（用户报过「框选识别出来了却不显示」）。
+        if let Some(primary) = self.subjects.first().cloned() {
+            self.taxon = primary.taxon;
+            self.class_index = primary.class_index;
+            self.confidence = primary.confidence;
+            self.bbox = Some(primary.bbox);
+            self.candidates = primary.candidates;
+        }
         // 状态重新聚合：任一主体有结论 → Confirmed；否则 NeedsReview（首个失败阶段）
         if self
             .subjects
@@ -1362,6 +1372,41 @@ mod tests {
         let rec = all_fail.append_subject(subject(1, "c", "d", RecognitionFailureStage::Mapping));
         assert_eq!(rec.status, RecognitionStatus::NeedsReview);
         assert_eq!(rec.failure_stage, RecognitionFailureStage::Classification);
+    }
+
+    /// 回归（用户报「框选识别出来了，结果栏却显示『无记录』」）：照片此前是 Unrecognized
+    /// （subjects 空、顶层无结论），框选补到一个有结论的主体 → 该主体成为 subjects[0]，
+    /// **顶层字段必须跟着 subjects[0]**（文档承诺「顶层恒 = 主主体」）。不同步的话
+    /// 展示层只读顶层 taxon 就会显示成「无记录」，而状态却是 Confirmed。
+    #[test]
+    fn test_append_subject_into_conclusionless_record_syncs_top_level() {
+        let legacy = Recognition {
+            status: RecognitionStatus::Unrecognized,
+            taxon: None,
+            class_index: None,
+            confidence: None,
+            bbox: None,
+            candidates: vec![],
+            failure_stage: RecognitionFailureStage::Detection,
+            recognized_at: "2026-09-23T10:00:00Z".to_string(),
+            subjects: vec![],
+        };
+        let rec = legacy.append_subject(subject(
+            0,
+            "Padda oryzivora",
+            "爪哇禾雀",
+            RecognitionFailureStage::None,
+        ));
+        // 无结论的旧记录不该凭空多出一个「空主体」
+        assert_eq!(rec.subjects.len(), 1);
+        assert_eq!(rec.status, RecognitionStatus::Confirmed);
+        assert_eq!(
+            rec.taxon.as_ref().map(|t| t.latin_name.as_str()),
+            Some("Padda oryzivora"),
+            "顶层必须同步为主主体（subjects[0]），否则展示层显示空"
+        );
+        assert_eq!(rec.confidence, Some(80.0));
+        assert_eq!(rec.class_index, Some(0));
     }
 
     #[test]
