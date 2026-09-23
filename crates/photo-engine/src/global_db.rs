@@ -126,8 +126,8 @@ impl SpeciesRow {
         };
         if rec.subjects.is_empty() {
             // 旧数据 / 单主体：顶层 taxon 兜底
-            match rec.taxon.as_ref() {
-                Some(t) if !t.display_name().is_empty() => vec![mk(0, t.display_name(), rec.confidence)],
+            match rec.taxon.as_ref().map(|t| t.display_name()) {
+                Some(name) if !name.is_empty() => vec![mk(0, &name, rec.confidence)],
                 _ => Vec::new(),
             }
         } else {
@@ -138,7 +138,7 @@ impl SpeciesRow {
                     let t = s.taxon.as_ref()?;
                     let name = t.display_name();
                     if name.is_empty() { return None; }
-                    Some(mk(i as i32, name, s.confidence))
+                    Some(mk(i as i32, &name, s.confidence))
                 })
                 .collect()
         }

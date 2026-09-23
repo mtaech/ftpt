@@ -133,7 +133,7 @@ pub struct Capture {
 pub struct SubjectSummary {
     /// 主体展示名（有中文名用中文名，否则学名）
     pub display_name: String,
-    /// 主体置信度（0–100）
+    /// 主体相似度（余弦相似度 × 100，0–100）
     pub confidence: Option<f32>,
 }
 
@@ -173,7 +173,10 @@ pub struct CaptureMeta {
     pub keywords: Vec<String>,
     // --- 识别摘要字段（从文件夹数据目录的 recognition 表填充，None = 未识别） ---
     pub taxon_name: Option<String>,
+    /// Top-1 相似度（余弦相似度 × 100，跨物种不可比；见 docs/open-questions.md §1）
     pub taxon_confidence: Option<f32>,
+    /// Top-1 与 Top-2 的相似度间隔（相对判据，替代跨物种不可比的绝对阈值；无候选为 None）
+    pub taxon_gap: Option<f32>,
     pub recognition_status: Option<RecognitionStatus>,
     pub taxon_bbox: Option<BBox>,
     /// 多主体识别摘要（与 Recognition.subjects 对应；主主体在前，旧数据退化为单主体）
@@ -248,6 +251,7 @@ impl CaptureMeta {
             keywords: Vec::new(),
             taxon_name: None,
             taxon_confidence: None,
+            taxon_gap: None,
             recognition_status: None,
             taxon_bbox: None,
             subjects: Vec::new(),
@@ -295,19 +299,20 @@ impl CaptureMeta {
     pub fn enrich_with_recognition(&mut self, recognition: &Recognition) {
         self.taxon_name = recognition.taxon.as_ref().map(|t| t.cn_name.clone());
         self.taxon_confidence = recognition.confidence;
+        self.taxon_gap = gap_to_runner_up(recognition.confidence, &recognition.candidates);
         self.recognition_status = Some(recognition.status);
         self.taxon_bbox = recognition.bbox;
         // 多主体：有 subjects 用 subjects；旧数据（空）以顶层字段退化为单主体
         self.subjects = if recognition.subjects.is_empty() {
             recognition.taxon.as_ref().map(|t| {
                 vec![SubjectSummary {
-                    display_name: t.display_name().to_string(),
+                    display_name: t.display_name(),
                     confidence: recognition.confidence,
                 }]
             }).unwrap_or_default()
         } else {
             recognition.subjects.iter().map(|s| SubjectSummary {
-                display_name: s.taxon.as_ref().map(|t| t.display_name().to_string())
+                display_name: s.taxon.as_ref().map(|t| t.display_name())
                     .unwrap_or_else(|| "<未识别>".to_string()),
                 confidence: s.confidence,
             }).collect()
@@ -758,10 +763,19 @@ pub struct TaxonMatch {
 }
 
 impl TaxonMatch {
-    /// 展示名：有中文名就用中文名，没有就退到学名。
-    /// 全量标签空间里 26% 的类群三个中文名源都收不到，这类只能显示学名。
-    pub fn display_name(&self) -> &str {
-        if self.cn_name.is_empty() { &self.latin_name } else { &self.cn_name }
+    /// 展示名（见 docs/open-questions.md §5）：
+    /// - 种级中文名 → 直接用
+    /// - 只有属/科级中文名（种级缺失）→ 「属中文名 + 学名」（`粉褶蕈属 Entoloma` 式），
+    ///   单看属名会被当成种名
+    /// - 三级中文名都没有（全量标签空间 26%）→ 只能显示学名
+    pub fn display_name(&self) -> String {
+        if self.cn_name.is_empty() {
+            self.latin_name.clone()
+        } else if self.cn_level == CnLevel::Species {
+            self.cn_name.clone()
+        } else {
+            format!("{} {}", self.cn_name, self.latin_name)
+        }
     }
 }
 
@@ -810,10 +824,20 @@ impl CnLevel {
 pub struct TaxonCandidate {
     /// 识别器原始类别号（BioCLIP 标签下标）
     pub class_index: u32,
-    /// 置信度（0–100）
+    /// 相似度（余弦相似度 × 100，跨物种不可比）
     pub confidence: f32,
     /// 该候选对应的物种（未命中为 None）
     pub taxon: Option<TaxonMatch>,
+}
+
+/// Top-1 与 Top-2 的相似度间隔（相对判据）；没有候选（分类失败）时为 None。
+///
+/// `candidates` 不含 Top-1 自身（见 `Classifier::classify`），所以首位就是第二名。
+/// 绝对相似度跨物种不可比（实测没有干净阈值），间隔是替代判据——见 docs/open-questions.md §1。
+pub fn gap_to_runner_up(top1: Option<f32>, candidates: &[TaxonCandidate]) -> Option<f32> {
+    let top1 = top1?;
+    let runner_up = candidates.first()?.confidence;
+    Some(top1 - runner_up)
 }
 
 /// 一次识别的完整结果（不含路径；路径是持久化层的键）
@@ -826,7 +850,7 @@ pub struct Recognition {
     pub taxon: Option<TaxonMatch>,
     /// Top-1 原始类别号（诊断用）
     pub class_index: Option<u32>,
-    /// Top-1 置信度（0–100）
+    /// Top-1 相似度（余弦相似度 × 100，0–100；跨物种不可比，见 docs/open-questions.md §1）
     pub confidence: Option<f32>,
     /// 检测框（检测失败为 None）
     pub bbox: Option<BBox>,
@@ -854,7 +878,7 @@ pub struct SubjectRecognition {
     pub taxon: Option<TaxonMatch>,
     /// 该主体 Top-1 原始类别号（诊断用）
     pub class_index: Option<u32>,
-    /// 该主体 Top-1 置信度（0–100）
+    /// 该主体 Top-1 相似度（余弦相似度 × 100，0–100）
     pub confidence: Option<f32>,
     /// 该主体 Top-5 候选
     pub candidates: Vec<TaxonCandidate>,
@@ -1111,6 +1135,7 @@ mod tests {
             keywords: Vec::new(),
             taxon_name: None,
             taxon_confidence: None,
+            taxon_gap: None,
             recognition_status: None,
             taxon_bbox: None,
             subjects: vec![],
@@ -1537,6 +1562,72 @@ mod tests {
         assert_eq!(cm.taxon_confidence, Some(85.3));
         assert_eq!(cm.recognition_status, Some(RecognitionStatus::Confirmed));
         assert!(cm.taxon_bbox.is_some());
+        assert_eq!(cm.taxon_gap, None, "没有候选就没有间隔");
+    }
+
+    #[test]
+    fn test_display_name_falls_back_by_cn_level() {
+        let mk = |cn: &str, level: CnLevel| TaxonMatch {
+            taxon_id: None,
+            cn_name: cn.into(),
+            latin_name: "Entoloma nitidum".into(),
+            cn_level: level,
+            ranks: vec![],
+        };
+        // 种级中文名：直接用
+        assert_eq!(mk("大山雀", CnLevel::Species).display_name(), "大山雀");
+        // 只有属/科级中文名：附上学名（单看属名会被当成种名）
+        assert_eq!(
+            mk("粉褶蕈属", CnLevel::Genus).display_name(),
+            "粉褶蕈属 Entoloma nitidum"
+        );
+        assert_eq!(
+            mk("膨痂锈菌科", CnLevel::Family).display_name(),
+            "膨痂锈菌科 Entoloma nitidum"
+        );
+        // 三级中文名都没有：只能显示学名
+        assert_eq!(
+            mk("", CnLevel::Missing).display_name(),
+            "Entoloma nitidum"
+        );
+    }
+
+    #[test]
+    fn test_gap_to_runner_up() {
+        // candidates 不含 Top-1 自身（classifier 已 skip(1)），所以首位就是第二名
+        let cands = vec![
+            TaxonCandidate { class_index: 2, confidence: 60.0, taxon: None },
+            TaxonCandidate { class_index: 3, confidence: 30.0, taxon: None },
+        ];
+        assert_eq!(gap_to_runner_up(Some(72.5), &cands), Some(12.5));
+        assert_eq!(gap_to_runner_up(Some(72.5), &[]), None, "分类失败无候选 → 无间隔");
+        assert_eq!(gap_to_runner_up(None, &cands), None, "无 Top-1 → 无间隔");
+
+        // 摘要回填走同一条口径
+        let mut cm = CaptureMeta::from(&Capture {
+            base_name: "A".into(),
+            source_files: vec![],
+            primary_index: 0,
+        });
+        cm.enrich_with_recognition(&Recognition {
+            status: RecognitionStatus::Confirmed,
+            taxon: Some(TaxonMatch {
+                taxon_id: None,
+                cn_name: "粉褶蕈属".into(),
+                latin_name: "Entoloma nitidum".into(),
+                cn_level: CnLevel::Genus,
+                ranks: vec![],
+            }),
+            class_index: Some(1),
+            confidence: Some(72.5),
+            bbox: None,
+            candidates: cands,
+            failure_stage: RecognitionFailureStage::None,
+            recognized_at: "2026-09-23T00:00:00Z".into(),
+            subjects: vec![],
+        });
+        assert_eq!(cm.taxon_gap, Some(12.5));
+        assert_eq!(cm.subjects[0].display_name, "粉褶蕈属 Entoloma nitidum");
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! - Info Tab（七张卡）：
 //!   1. Hero：直方图与基本文件信息
 //!   2. 拍摄信息：2x2 曝光四格（焦距/光圈/快门/ISO）+ 扩展信息
-//!   3. 识别：状态 Chip、物种名、置信度条、重测
+//!   3. 识别：状态 Chip、物种名、相似度与 top1−top2 间隔、重测
 //!   4. 评分：五星点选
 //!   5. 颜色标签：红黄绿蓝紫 + 无
 //!   6. 旗标：入选 / 淘汰 / 无
@@ -201,8 +201,12 @@ pub fn render_info_tab(
                                 .text_xs()
                                 .font_medium()
                                 .text_color(cx.theme().muted_foreground)
-                                // Recognition.confidence 本身就是 0–100 的百分数，别再乘 100
-                                .child(format!("{conf:.1}%"))
+                                // 相似度 = 余弦相似度 × 100（0–100，跨物种不可比，所以不叫置信度）；
+                                // 间隔 = top1−top2，两个物种贴得越近越该怀疑（见 open-questions §1）
+                                .child(match meta.taxon_gap {
+                                    Some(gap) => format!("相似度 {conf:.1}% · 间隔 {gap:.1}"),
+                                    None => format!("相似度 {conf:.1}%"),
+                                })
                         } else {
                             div().child("")
                         }),

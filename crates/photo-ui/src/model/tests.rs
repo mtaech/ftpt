@@ -36,6 +36,7 @@ fn make_meta(base_name: &str, primary_path: &str, primary_format: &str) -> Captu
         keywords: vec![],
         taxon_name: None,
         taxon_confidence: None,
+        taxon_gap: None,
         recognition_status: None,
         taxon_bbox: None,
         subjects: vec![],

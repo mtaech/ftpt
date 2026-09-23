@@ -1134,7 +1134,7 @@ fn apply_region_recognition(
     let display = subject
         .taxon
         .as_ref()
-        .map(|t| t.display_name().to_string())
+        .map(|t| t.display_name())
         .unwrap_or_default();
 
     // 先 clone 出数据库句柄与目录，避免与后面对 state.items 的可变借用冲突
@@ -1213,10 +1213,13 @@ fn enrich_meta_recognition(meta: &mut CaptureMeta, recognition: &photo_domain::R
         .or_else(|| concluded.and_then(|s| s.taxon.as_ref()));
     if let Some(taxon) = taxon {
         let display = taxon.display_name();
-        meta.taxon_name = (!display.is_empty()).then(|| display.to_string());
-        // 顶层没结论时，置信度取回退主体的（否则会留着顶层那个 None）
+        meta.taxon_name = (!display.is_empty()).then_some(display);
+        // 顶层没结论时，相似度与间隔取回退主体的（否则会留着顶层那个 None）
         if recognition.taxon.is_none() {
             meta.taxon_confidence = concluded.and_then(|s| s.confidence);
+            meta.taxon_gap = concluded
+                .map(|s| photo_domain::gap_to_runner_up(s.confidence, &s.candidates))
+                .unwrap_or_default();
         }
     }
 }
@@ -2245,6 +2248,7 @@ mod recognition_tests {
         enrich_meta_recognition(&mut meta, &r);
         assert_eq!(meta.taxon_name.as_deref(), Some("Corvus corax"));
         assert_eq!(meta.taxon_confidence, Some(88.5));
+        assert_eq!(meta.taxon_gap, None, "制造器没给候选 → 无间隔");
         assert_eq!(meta.recognition_status, Some(RecognitionStatus::Confirmed));
     }
 
@@ -2293,12 +2297,19 @@ mod recognition_tests {
             }),
             class_index: Some(7),
             confidence: Some(68.3),
-            candidates: vec![],
+            candidates: vec![photo_domain::TaxonCandidate {
+                class_index: 9,
+                confidence: 60.0,
+                taxon: None,
+            }],
             failure: RecognitionFailureStage::None,
         }];
         enrich_meta_recognition(&mut meta, &r);
         assert_eq!(meta.taxon_name.as_deref(), Some("Padda oryzivora"));
         assert_eq!(meta.taxon_confidence, Some(68.3));
+        // 间隔取回退主体的（68.3 − 60.0）——顶层自身没结论时不能留着 None
+        let gap = meta.taxon_gap.expect("回退主体有候选 → 应有间隔");
+        assert!((gap - 8.3).abs() < 0.01, "间隔应约为 8.3，实际 {gap}");
         assert_eq!(meta.recognition_status, Some(RecognitionStatus::Confirmed));
     }
 

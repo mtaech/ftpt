@@ -134,6 +134,7 @@ mod tests {
             keywords: vec![],
             taxon_name: None,
             taxon_confidence: None,
+            taxon_gap: None,
             recognition_status: None,
             taxon_bbox: None,
             subjects: vec![],

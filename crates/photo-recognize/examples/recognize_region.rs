@@ -114,7 +114,7 @@ fn main() {
             .taxon
             .as_ref()
             .map(|t| t.display_name())
-            .unwrap_or("<未映射>");
+            .unwrap_or("<未映射>".to_string());
         println!("  - cls={} {name} {:.1}%", c.class_index, c.confidence);
     }
 }
