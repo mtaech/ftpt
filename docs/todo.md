@@ -240,7 +240,7 @@
 
 ### 15. ✅ 发布与署名
 
-- **已完成（2026-09-23 · `3f9c46c`）**：① 新增仓库根 `NOTICE`（README「许可」一节指向它）——
+- **已完成（2026-09-23 · `60b1a57`，AGPL 边界补充 `a8e506b`）**：① 新增仓库根 `NOTICE`（README「许可」一节指向它）——
   逐项列出随包分发的第三方资产与许可：BioCLIP 2（MIT，要求保留版权声明，附 Zenodo 引用）、
   TreeOfLife-200M（CC0-1.0，且数据集自身声明底层图片/文本混有多种 CC 许可，本程序只用标签文本
   embedding）、Catalogue of Life China 名录（**CC BY，要求署名**）、`bird_catalog.db`（同源）、
