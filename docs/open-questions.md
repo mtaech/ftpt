@@ -22,8 +22,8 @@ BioCLIP 是**余弦相似度 ×100**——实测 top-1 落在 65~79 这个窄带
 
 ### 2. 随包的是中国包，世界包要不要 —— **已定（2026-09-23）**
 
-现在随包的是**中国名录子集**：**93,480 类 / 301MB**（`data/taxon/`），由
-`bioclip_demo/data/build_taxon_pack.py --match proxy --extra data/domestic_exotic.txt` 生成。
+现在随包的是**中国名录子集**：**93,484 类 / 301MB**（`data/taxon/`），由
+`bioclip_demo/data/build_taxon_pack.py --match proxy --extra data/domestic_exotic.txt --computed class_emb/extra_emb` 生成。
 - **世界包（851,968 类 / 2.62GB）：不随包，也不做 f16 压缩 / PCA 降维。**
   理由：体积与收益不成比例，而家养这个真实痛点已在同一包里解决（见下）。
   **要自制时路径不变**：把它当包用只需把 `class_emb/` 指向 `data/taxon/`（同构，Rust 零改动）。
@@ -31,9 +31,14 @@ BioCLIP 是**余弦相似度 ×100**——实测 top-1 落在 65~79 这个窄带
   `Bos taurus` 家牛、`Bubalus bubalis` 家水牛、绵羊/山羊/马/驴、宠物鸟/鼠/鱼、主要栽培作物与园艺花卉
   共 27 个学名并进同一个包（`data/domestic_exotic.txt`，可带 `<TAB>中文名` 补缺/纠正）。
   **实测**：两张真猫图旧包 → 新包 = 云猫 `Pardofelis marmorata` 67.6% → **家猫 69.5%**；64.5% → **70.4%**。
-  **做不到的**：**家犬**（标签空间里没有 `Canis lupus familiaris`，只有 `Canis lupus` 狼）；
-  `Sansevieria trifasciata` 虎尾兰标签空间没有；`Solanum tuberosum`/`Vitis vinifera`/`Platycladus orientalis`
-  落在全零填充区（无 embedding）——都写在名单文件的注释里。
+  **犬与猪（重点）**：上游标签空间**没有独立的家犬/家猪条目**——犬压在 `Canis lupus`
+  （上游俗名就是 **Domestic Dog**）、猪压在 `Sus scrofa`（俗名 **Pig**）这同一列里。
+  用文本塔单独算过 `Canis lupus familiaris` 一列，在 8 张真狗照上与狼文本列互有胜负（差 ≤1.5 分）→
+  **分不开**，已放弃；改为把这一列的中文名定成「家犬（狼）」「家猪（野猪）」。8 张真狗照实测：
+  旧包 7/8 显示「狼」，新包 7/8 显示「家犬（狼）」（另 1 张是松狮，新旧都判成川金丝猴）。
+  **现在真做不到的**：`Solanum tuberosum`/`Vitis vinifera`/`Platycladus orientalis` 名字在标签空间里
+  但列落在全零填充区 → 已用文本塔补上（`data/computed_taxa.json`）；`Sansevieria trifasciata` 旧名
+  没收录 → 用现行名 `Dracaena trifasciata`（中文名仍给「虎尾兰」）。
   **仍存的地理先验**：境外物种、动物园动物仍会被归到相近的中国物种。
   实施见 `docs/todo.md` #7 / #8。
 

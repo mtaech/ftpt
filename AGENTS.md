@@ -140,7 +140,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 - **arboard 剪贴板必须留常驻持有者（X11）**：X11 剪贴板的数据是进程应答 X 请求时才提供的，`arboard::Clipboard` 一 drop，选择所有权就没了——「复制图片到剪贴板」会静默变成什么都没复制。`engine_ops` 用 `CLIPBOARD_OWNER` 静态把实例持有到进程退出（Wayland 的 data-control 由合成器接管，不受影响）。`clipboard_smoke` 长期没抓到这条：它以前跑在用户的 Wayland 会话上（窗口根本没落到 Xvfb），读回的是合成器接管的那份数据。
 - **无头冒烟必须钉住 X11 后端**：GPUI 选后端只看环境变量（`platform::guess_compositor()`）：`WAYLAND_DISPLAY` 非空 → Wayland，其次 `DISPLAY` → X11。而 `xvfb-run` 只准备 X 显示：在 Wayland 会话里跑冒烟时窗口会落到**用户真实桌面**，帧由真实合成器决定（被遮挡/最小化时不产帧），于是**渲染驱动的行为根本没被测**——渲染驱动的检查（如「对比窗格加载母版」）就因此同一份代码一会儿 13/13 一会儿 12/13（母版加载只在视图真的渲染时才发起；`compare_smoke` 当年就是这样抓出来的，该视图已移除）。所以 11 个 GPUI 冒烟都在 `gpui_kit::application()` 之前调 `photo_ui::app::prepare_headless_smoke()`（把 `WAYLAND_DISPLAY` 置空，GPUI 判空即视为未设置）；要真机 Wayland 目检时设 `PHOTO_SMOKE_ALLOW_WAYLAND=1`。
 - **模型/名录库/全局索引库定位（`data_root()`，lib.rs）**：`PHOTO_DATA_DIR` env → exe 同级 `models/`+`data/`（打包便携）→ 仓库根（开发回退，从 CARGO_MANIFEST_DIR/cwd 向上找同时含 `models/` 与 `data/bird_catalog.db` 的目录）；`cargo run -p photo-ui` 下模型在仓库根，否则会报「检测模型文件不存在: <target>/debug/models/org_det.onnx」
-- **识别资产（随包分发，均不入 git）**：`models/org_det.onnx`（通用主体检测）+ `models/bioclip2_model_int8.onnx` + `data/bird_catalog.db`（已瘦身为 `animal_info(id, latin_name, cn_name)` 三列，2026-09-22）+ `data/taxon/`（名录子集包：`txt_emb_bioclip-2.{npy,json}` + `zh_names.json` + `VERSION`，**93,480 类**）。BioCLIP 的资产目录固定在**名录库同级**的 `taxon/`（即 `data_root()/data/taxon/`）。包 = CoL China 中国名录（硬地理先验）+ **家养/外来补充名单**（家猫/家畜/宠物/栽培作物 27 个学名，2026-09-23 起）——工具与名单在 `bioclip_demo/data/build_taxon_pack.py --extra data/domestic_exotic.txt`，可进包的前提是该学名在 TreeOfLife 标签空间里有 embedding（家犬、虎尾兰、马铃薯等都不满足，见名单内注释）。缺哪个就在 `Recognizer::new` 报对应的 `ModelLoad`，状态栏透传。`bird_model.onnx`（26MB）/ `eye.onnx`（19MB）/ `detect.onnx`（19MB）已删除（备份 /tmp/pt-asset-backup/）；`data/global.db` 是派生索引，删除后重扫自动重建
+- **识别资产（随包分发，均不入 git）**：`models/org_det.onnx`（通用主体检测）+ `models/bioclip2_model_int8.onnx` + `data/bird_catalog.db`（已瘦身为 `animal_info(id, latin_name, cn_name)` 三列，2026-09-22）+ `data/taxon/`（名录子集包：`txt_emb_bioclip-2.{npy,json}` + `zh_names.json` + `VERSION`，**93,484 类**）。BioCLIP 的资产目录固定在**名录库同级**的 `taxon/`（即 `data_root()/data/taxon/`）。包 = CoL China 中国名录（硬地理先验）+ **家养/外来补充名单**（30 个学名，2026-09-23 起）+ **3 个文本塔另算列**（马铃薯/葡萄/侧柏——名字在标签空间里但列落在全零填充区）。工具与名单都在 `bioclip_demo/data/`：`build_taxon_pack.py --extra domestic_exotic.txt --computed <dir>`、`compute_text_embedding.py`（文本塔，配方与上游 `make_txt_embedding.py` 逐字一致）。**没有独立的家犬/家猪类**：上游把犬/猪压在 `Canis lupus`（俗名 Domestic Dog）/`Sus scrofa`（俗名 Pig）这同一列里，只能改中文名口径（家犬（狼）/家猪（野猪）），理由与实测见 `docs/todo.md` #7。缺哪个就在 `Recognizer::new` 报对应的 `ModelLoad`，状态栏透传。`bird_model.onnx`（26MB）/ `eye.onnx`（19MB）/ `detect.onnx`（19MB）已删除（备份 /tmp/pt-asset-backup/）；`data/global.db` 是派生索引，删除后重扫自动重建
 - 使用了 let-chains（edition 2024 特性），如 `photo-config/config.rs` 便携路径判断
 - **评分/旗标/色标筛选在 UI 侧执行**（`crates/photo-ui/src/model/filter.rs`）；`FilterCriteria::has_active_filter` 语义 = 批量操作安全边界（无筛选时禁用）
 - **窗口根视图必须是 gpui-component 的 `Root`**：`Button::tooltip` 最终调 `Root::tooltip_overlay(window, cx)`，而它靠 `window.root::<Root>()` 查找——根视图不是 `Root`（例如直接把 `AppState` 当根视图）时**所有 tooltip 被静默丢弃**，表现就是「图标按钮悬停没有提示」（曾把整个 app 的 tooltip 都吃掉：侧边栏 5 个图标、Dock 折叠按钮、预览工具条）。`main.rs` 已用 `Root::new(app_state, window, cx).bordered(false)` 包一层（系统装饰窗口不要再叠自绘边框），无头冒烟 `clipboard_smoke` 会断言根视图是 `Root`。另注意 gpui 的 `InteractiveElement::disabled` 会屏蔽 hover，**disabled 按钮不显示 tooltip**（如未选中照片时的「识别」）
@@ -198,6 +198,30 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 ---
 
 ## 近期修复记录
+
+- **2026-09-23 feat(识别资产)：家犬/家猪口径修正 —— 用文本塔分犬与狼失败，改用中文名口径**（`docs/todo.md` #7 续）：
+  用户要求「家犬重新算一下」。先把事实查清楚：**上游标签空间里根本没有独立的家犬条目**——犬的存在
+  `Canis lupus` 这一列里，而该列的上游英文俗名就是 **`Domestic Dog`**（`txt_emb_bioclip-2.json` 第 354571 条；
+  猪同理：`Sus scrofa` 俗名 `Pig`）。所以“狗照命中狼”从来不是“没算家犬向量”，而是**这一列本来就是狗味的，
+  只是我们的中文名按学名显示成了「狼」**（本仓显示名完全跟学名走，从不看上游俗名）。
+  **我确实按上游配方算了一列**：从 `hf-mirror` 拿下 BioCLIP 2 的完整 open_clip 检查点（`open_clip_model.safetensors`
+  1.71 GB，`~/.cache/huggingface`），用上游 `TreeOfLife-toolbox/processing/scripts/make_txt_embedding.py`
+  的逐字配方（`an image of <七级路径> with common name <俗名>.` + L2 归一化）另算了
+  `Canis lupus familiaris`（家犬）与 `Canis lupus`（Gray Wolf）两列，并用 `replaces` 顶掉旧列。
+  **结果被数据否决**：① 同配方重算已有列的自检保真度只有 **cos mean 0.9736 / p10 0.960**（少数条目 0.90）；
+  ② 8 张真狗照（dog.ceo 临时下载，仅本地验证、未入库）上两个文本列**互有胜负、差 ≤1.5 分**（家犬 3 / 平 1 / 狼 4）。
+  要区分的差距（≤1.5 分）**小于重算带来的保真度噪声**，所以“用文本塔把狗从狼里分出来”在这套空间里做不到。
+  **最终做法**：删掉另算的两列，只把这一列的中文名定成「**家犬（狼）**」「**家猪（野猪）**」（走 `domestic_exotic.txt` 的中文名覆盖，不动列）。
+  8 张狗照：旧包 7/8 显示「狼」→ 新包 7/8 显示「家犬（狼）」（剩 1 张松狮新旧都判川金丝猴）。
+  **顺带**：`--computed` 通路留下了，把 3 个「名字在但没 embedding」的类补上——马铃薯/葡萄/侧柏
+  （列号 > 851,968 落在全零填充区）；虎尾兰改用现行名 `Dracaena trifasciata` 就能切到真列。
+  包 93,480 → **93,484 类**（93,481 来自标签空间 + 3 文本塔另算）。新增工具 `bioclip_demo/data/compute_text_embedding.py`
+  （带配方自检，不给“必须≈1.0”的假门限，只拦均值 < 0.95 这种真错）+ `data/computed_taxa.json`。
+  **验证**：`cargo check --workspace --all-targets` 0 warning；`cargo test` 全绿；`recognize_smoke` 5/5、
+  `region_smoke` 16/16（新包下装配/常驻/框选全过）；三宝鸟 73.8%、家猫 70.4% 无回归。
+  **踩到的坑**（留给以后）：① 用 `hf-hub:` 加载时走 `HF_ENDPOINT=https://hf-mirror.com` + `HF_HUB_DISABLE_XET=1`；
+  ② 抽样自检要避开尾部 15,487 个全零填充列，否则 min=0 会把均值拖低、误判成配方错了；
+  ③ 别把「自检必须 ≈1.0」当门限——上游 json 的俗名与生成 embedding 时的俗名并非逐条一致。
 
 - **2026-09-23 feat(识别资产)：名录包补「家养/外来」名单——拍猫不再被强行判成云猫**（`docs/todo.md` #7 · `9a70423`）：
   **现象（open-questions §2 记了很久）**：中国包是**硬地理先验**，CoL China 里没有家养种（家猫 `Felis catus`、

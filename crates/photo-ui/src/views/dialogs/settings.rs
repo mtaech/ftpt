@@ -757,13 +757,14 @@ fn build_recognition_page(app: &Entity<AppState>) -> SettingPage {
                     SettingItem::new(
                         "离线物种标签包",
                         SettingField::render(|_options, _window, _cx| {
-                            Tag::secondary().small().child("data/taxon/ (93,480 类 · 含家养/外来)")
+                            Tag::secondary().small().child("data/taxon/ (93,484 类 · 含家养/外来)")
                         }),
                     )
                     .description(
                         "TreeOfLife 子集文本向量 + 七级分类路径 + 中文名映射，是 BioCLIP 的标签空间；\
-                         以 CoL China 中国名录为底（硬地理先验），另补了家猫/家畜/宠物/栽培作物等 \
-                         家养与常见外来种 ⟶ 境外物种与动物园动物仍可能被归到相近的中国物种，缺失时报错",
+                         以 CoL China 中国名录为底（硬地理先验），另补家猫/家犬/家畜/宠物/栽培作物等 \
+                         家养与常见外来种（犬与猪是上游把它们归进了狼/野猪的同一个类）⟶ 境外物种与 \
+                         动物园动物仍可能被归到相近的中国物种，缺失时报错",
                     )
                     .keywords(["taxon", "标签", "向量", "embedding", "名录子集", "资产", "家养", "外来"]),
 
