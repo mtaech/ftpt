@@ -283,12 +283,11 @@ fn test_preview_math() {
 
 #[test]
 fn test_region_bbox_from_drag_normalizes_and_clamps() {
-    // 正常框选：offset (100,50) disp (800,600)，拖 (300,200)→(500,350)
+    // 图片显示 div 在窗口里 (100,50) 起、800x600；拖 (300,200)→(500,350)
     let b = region_bbox_from_drag(
         (300.0, 200.0),
         (500.0, 350.0),
-        (100.0, 50.0),
-        (800.0, 600.0),
+        (100.0, 50.0, 800.0, 600.0),
     )
     .unwrap();
     assert!((b.x1 - 0.25).abs() < 1e-6);
@@ -300,8 +299,7 @@ fn test_region_bbox_from_drag_normalizes_and_clamps() {
     let b = region_bbox_from_drag(
         (500.0, 350.0),
         (300.0, 200.0),
-        (100.0, 50.0),
-        (800.0, 600.0),
+        (100.0, 50.0, 800.0, 600.0),
     )
     .unwrap();
     assert!(b.x1 <= b.x2 && b.y1 <= b.y2);
@@ -311,14 +309,49 @@ fn test_region_bbox_from_drag_normalizes_and_clamps() {
     let b = region_bbox_from_drag(
         (-200.0, -100.0),
         (2000.0, 1500.0),
-        (100.0, 50.0),
-        (800.0, 600.0),
+        (100.0, 50.0, 800.0, 600.0),
     )
     .unwrap();
     assert_eq!((b.x1, b.y1, b.x2, b.y2), (0.0, 0.0, 1.0, 1.0));
 
-    // disp 非法（图片未布局）：None
-    assert!(region_bbox_from_drag((0.0, 0.0), (10.0, 10.0), (0.0, 0.0), (0.0, 0.0)).is_none());
+    // 图片未布局（宽高为 0）：None
+    assert!(region_bbox_from_drag((0.0, 0.0), (10.0, 10.0), (0.0, 0.0, 0.0, 0.0)).is_none());
+}
+
+/// 回归（用户报「框选时鼠标位置和框的位置不在一个地方」）：GPUI 鼠标事件给的是**窗口**
+/// 坐标，而叠加框画在图片显示 div 的坐标系里。两者必须锚在同一个元素上——这里的
+/// `image_rect` 就是那个 div 在窗口里的 bounds（由它自己的 `on_prepaint` 实测），
+/// 里面已经包含了视口在窗口中的原点（约 313,80：左活动栏 48 + 左停靠区 265、标题栏 36
+/// + 顶栏 44）与图片居中/平移偏移。换任何窗口尺寸、侧栏宽度、缩放平移，框都跟着走。
+#[test]
+fn test_region_bbox_from_drag_anchors_to_image_rect_in_window_space() {
+    // 图片 div 落在窗口 (413,130)，尺寸 800x600（= 视口原点 313,80 + 视口内偏移 100,50）
+    let image_rect = (413.0, 130.0, 800.0, 600.0);
+
+    // 拖拽起点恰好是图片左上角 → bbox 从 0,0 开始；终点 (613,280) → +200,+150 = 25%
+    let b = region_bbox_from_drag((413.0, 130.0), (613.0, 280.0), image_rect).unwrap();
+    assert!((b.x1 - 0.0).abs() < 1e-6 && (b.y1 - 0.0).abs() < 1e-6);
+    assert!((b.x2 - 0.25).abs() < 1e-6 && (b.y2 - 0.25).abs() < 1e-6);
+
+    // 侧栏/窗口变化 → image_rect 变了，同样的物理拖拽（窗口坐标 +Δ）结果不变：
+    // 原点是绝对窗口坐标，偏移多少跟着挪多少
+    let shifted = region_bbox_from_drag((913.0, 530.0), (1113.0, 680.0), (913.0, 530.0, 800.0, 600.0))
+        .unwrap();
+    assert_eq!(
+        (b.x1, b.y1, b.x2, b.y2),
+        (shifted.x1, shifted.y1, shifted.x2, shifted.y2),
+    );
+
+    // 反例（旧 bug 口径）：把窗口坐标直接当「图片内坐标」用，框会整体偏到右下——
+    // 明确钉住「不能那样」
+    let wrong = region_bbox_from_drag((413.0, 130.0), (613.0, 280.0), (0.0, 0.0, 800.0, 600.0))
+        .unwrap();
+    assert!(
+        (wrong.x1 - b.x1).abs() > 0.4,
+        "旧口径应当明显偏移（x1 {} vs {}）",
+        wrong.x1,
+        b.x1
+    );
 }
 
 #[test]

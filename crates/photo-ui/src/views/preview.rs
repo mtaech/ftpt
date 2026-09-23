@@ -222,6 +222,8 @@ pub fn render_photo_preview(
     };
 
     let entity = cx.entity().clone();
+    // 图片显示 div 的 prepaint 需要第二个句柄（`entity` 已被视口 prepaint 的闭包吃掉）
+    let image_entity = cx.entity().clone();
     let is_dragging = state.preview_drag_start.is_some();
     let can_pan = disp_w > container_w || disp_h > container_h;
     // 框选：叠加层用值 + 触发识别要的文件路径（BBox 是 Copy）
@@ -302,13 +304,11 @@ pub fn render_photo_preview(
                                     f32::from(event.position.y) as f64,
                                 );
                                 // 面积过小的框视为误点击（不触发识别）
-                                let bbox = region_bbox_from_drag(
-                                    start,
-                                    end,
-                                    (offset_x, offset_y),
-                                    (disp_w, disp_h),
-                                )
-                                .filter(|b| (b.x2 - b.x1) * (b.y2 - b.y1) >= 0.0004);
+                                // 鼠标事件是窗口坐标，锚在图片显示 div 的窗口 bounds 上换算
+                                let bbox = state
+                                    .preview_image_rect
+                                    .and_then(|rect| region_bbox_from_drag(start, end, rect))
+                                    .filter(|b| (b.x2 - b.x1) * (b.y2 - b.y1) >= 0.0004);
                                 state.region_bbox = bbox;
                                 if let Some(b) = bbox {
                                     // listener 内 AppState 已租借，直接 update 会 panic：
@@ -333,8 +333,9 @@ pub fn render_photo_preview(
                             f32::from(event.position.x) as f64,
                             f32::from(event.position.y) as f64,
                         );
-                        state.region_bbox =
-                            region_bbox_from_drag(start, end, (offset_x, offset_y), (disp_w, disp_h));
+                        state.region_bbox = state
+                            .preview_image_rect
+                            .and_then(|rect| region_bbox_from_drag(start, end, rect));
                         cx.notify();
                     } else if let Some((start_x, start_y)) = state.preview_drag_start {
                         let dx = f32::from(event.position.x - start_x) as f64;
@@ -371,6 +372,32 @@ pub fn render_photo_preview(
                         .left(px(offset_x as f32))
                         .w(px(disp_w as f32))
                         .h(px(disp_h as f32))
+                        // 图片显示 div 在**窗口**里的 bounds：框选拖拽（鼠标事件=窗口坐标）
+                        // 与叠加框（画在这个 div 里）共用这一个坐标系 → 由构造保证对齐。
+                        // 只记「变化 ≥0.5px」的更新，拖动/缩放/侧栏变化都会自然刷新。
+                        .on_prepaint(move |bounds, _window, cx| {
+                            let rect = (
+                                f32::from(bounds.origin.x) as f64,
+                                f32::from(bounds.origin.y) as f64,
+                                f32::from(bounds.size.width) as f64,
+                                f32::from(bounds.size.height) as f64,
+                            );
+                            image_entity.update(cx, |state, cx| {
+                                let changed = match state.preview_image_rect {
+                                    Some((x, y, w, h)) => {
+                                        (x - rect.0).abs() >= 0.5
+                                            || (y - rect.1).abs() >= 0.5
+                                            || (w - rect.2).abs() >= 0.5
+                                            || (h - rect.3).abs() >= 0.5
+                                    }
+                                    None => true,
+                                };
+                                if changed {
+                                    state.preview_image_rect = Some(rect);
+                                    cx.notify();
+                                }
+                            });
+                        })
                         .child(if one_to_one {
                             // 1:1 原图：只有用户显式放大到实际像素才付这个代价
                             img(original_path).w_full().h_full().into_any_element()

@@ -53,27 +53,43 @@ pub fn fit_scale(container_w: f64, container_h: f64, img_w: f64, img_h: f64) -> 
     (container_w / img_w).min(container_h / img_h).min(1.0)
 }
 
-/// 框选拖拽（视口坐标两点）→ 图片归一化 bbox（0-1，左上/右下规范化）。
+/// 框选拖拽 → 图片归一化 bbox（0-1，左上/右下规范化）。
 ///
-/// 视口坐标系：offset = 图片显示区左上角在视口里的位置，disp = 显示区尺寸。
-/// 超出图片显示区的部分夹到 0-1（框选可以拖到图外，不应产生越界 bbox）。
-/// disp 任一维 <= 0（图片未就绪/未布局）时返回 None。
+/// **两个坐标必须锚在同一个元素上**：
+/// - `start_window` / `end_window`：GPUI 鼠标事件的 `position`，是**窗口**坐标
+///   （gpui 原文：“The position of the mouse on the window”）；
+/// - `image_rect`：**图片显示 div 在窗口里的 bounds** `(x, y, w, h)`，由该 div 自己的
+///   `on_prepaint` 实测；叠加框就是这个 div 的绝对定位子节点 → 同坐标系。
+///
+/// 这样写就不需要知道「视口在窗口里的位置」「图片在视口里的居中/平移偏移」这些中间量
+/// （踩过的坑：直接把鼠标的窗口坐标当视口坐标用，框会整体偏移「左活动栏 + 左停靠区 +
+/// 顶栏」两三百像素——用 `preview_viewport_origin` 补一层也能对，但多一个可能错的假设；
+/// 锚在同一个元素上则由构造保证对齐）。
+///
+/// 超出显示区的部分夹到 0-1（框选可以拖到图外，不应产生越界 bbox）。
+/// `image_rect` 宽或高 <= 0（图片未就绪/未布局）时返回 None。
 pub fn region_bbox_from_drag(
-    start: Vec2,
-    end: Vec2,
-    offset: Vec2,
-    disp: Vec2,
+    start_window: Vec2,
+    end_window: Vec2,
+    image_rect: (f64, f64, f64, f64),
 ) -> Option<photo_domain::BBox> {
-    if disp.0 <= 0.0 || disp.1 <= 0.0 {
+    let (origin_x, origin_y, disp_w, disp_h) = image_rect;
+    if disp_w <= 0.0 || disp_h <= 0.0 {
         return None;
     }
     let norm = |v: f64, off: f64, d: f64| ((v - off) / d).clamp(0.0, 1.0) as f32;
     let (x1, x2) = {
-        let (a, b) = (norm(start.0, offset.0, disp.0), norm(end.0, offset.0, disp.0));
+        let (a, b) = (
+            norm(start_window.0, origin_x, disp_w),
+            norm(end_window.0, origin_x, disp_w),
+        );
         if a <= b { (a, b) } else { (b, a) }
     };
     let (y1, y2) = {
-        let (a, b) = (norm(start.1, offset.1, disp.1), norm(end.1, offset.1, disp.1));
+        let (a, b) = (
+            norm(start_window.1, origin_y, disp_h),
+            norm(end_window.1, origin_y, disp_h),
+        );
         if a <= b { (a, b) } else { (b, a) }
     };
     Some(photo_domain::BBox::new(x1, y1, x2, y2))

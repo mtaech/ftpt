@@ -235,6 +235,10 @@ pub struct AppState {
     pub show_clipping: bool,
     /// 预览视口实际容器尺寸 (width, height)；由视口容器 prepaint 动态更新
     pub preview_viewport_size: Option<(f64, f64)>,
+    /// 图片显示 div 在**窗口**里的 bounds `(x, y, w, h)`（该 div 自己的 `on_prepaint` 实测）。
+    /// 框选拖拽（鼠标事件 = 窗口坐标）与叠加框（画在该 div 里）都锚在它上面，
+    /// 否则框会整体偏移「左活动栏 + 左停靠区 + 顶栏」那么多（用户报过）。
+    pub preview_image_rect: Option<(f64, f64, f64, f64)>,
     /// 预览图片拖拽平移的鼠标起点 (x, y)
     pub preview_drag_start: Option<(gpui_kit::Pixels, gpui_kit::Pixels)>,
     /// 预览「框选识别」模式开关（工具条按钮 toggle；开启时左键拖拽画框而非平移）
@@ -709,6 +713,7 @@ impl AppState {
             show_focus: false,
             show_clipping: false,
             preview_viewport_size: None,
+            preview_image_rect: None,
             preview_drag_start: None,
             region_select: false,
             region_drag_start: None,

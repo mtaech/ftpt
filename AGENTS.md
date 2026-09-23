@@ -144,13 +144,21 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 - 使用了 let-chains（edition 2024 特性），如 `photo-config/config.rs` 便携路径判断
 - **评分/旗标/色标筛选在 UI 侧执行**（`crates/photo-ui/src/model/filter.rs`）；`FilterCriteria::has_active_filter` 语义 = 批量操作安全边界（无筛选时禁用）
 - **窗口根视图必须是 gpui-component 的 `Root`**：`Button::tooltip` 最终调 `Root::tooltip_overlay(window, cx)`，而它靠 `window.root::<Root>()` 查找——根视图不是 `Root`（例如直接把 `AppState` 当根视图）时**所有 tooltip 被静默丢弃**，表现就是「图标按钮悬停没有提示」（曾把整个 app 的 tooltip 都吃掉：侧边栏 5 个图标、Dock 折叠按钮、预览工具条）。`main.rs` 已用 `Root::new(app_state, window, cx).bordered(false)` 包一层（系统装饰窗口不要再叠自绘边框），无头冒烟 `clipboard_smoke` 会断言根视图是 `Root`。另注意 gpui 的 `InteractiveElement::disabled` 会屏蔽 hover，**disabled 按钮不显示 tooltip**（如未选中照片时的「识别」）
+- **GPUI 鼠标事件给的是「窗口坐标」，不是元素坐标**：`MouseDownEvent` / `MouseUpEvent` /
+  `MouseMoveEvent` 的 `position`，gpui 原文是 “The position of the mouse on the window”；
+  而 `div().absolute().top(...).left(...)` 画的叠加层是**父元素坐标**——两者直接混用，叠加层会
+  整体偏移一个「元素在窗口里的位置」（预览框选曾因此偏出侧栏 + 顶栏约 313,80，用户报「鼠标位置
+  和框的位置不在一个地方」）。**正解是锚在同一个元素上**：给画叠加层的那个 div 挂 `on_prepaint`，
+  存下它的 `bounds`（`(x, y, w, h)`，窗口坐标），按 `(鼠标窗口坐标 - bounds.origin) / bounds.size`
+  归一化——布局怎么嵌套/滚动/平移都不用管。**别用**「视口原点 + 图片偏移」两层相减去凑：能凑对，
+  但多一个会写错的假设（第一版就这么修的）。相对量（拖拽平移的 dx/dy）不受影响，只有绝对定位需要换算。
 - **GPUI 的溢出滚动容器只滚不画，且内容必须防压缩**：`overflow_y_scroll()` 不产生滚动条——要把容器 `track_scroll` 到跨帧持有的 `ScrollHandle` 上，再把 `Scrollbar` 当兄弟节点叠在 relative 容器里（规格统一在 `views/scroll_area.rs`）。**更坑的是第二个条件**：滚动容器里的内容若是 flex 子项，会被压缩到容器高（横向会被拉伸到容器宽）→ `max_offset = 0`，表现是「滚动条有、thumb 满格、滚不动」。所以纵向内容要 `flex_shrink_0`、横向内容要显式给宽度（胶片条 = n × 96 + (n−1) × 6 + padding）。`stats_smoke` 会断言两处列表的 `max_offset > 0`，这条就是它的回归网。
 
 ---
 
 ## 测试与 QA
 
-- Rust：`#[test]` 分布在 5 个 crate 的源文件内联 `#[cfg(test)] mod tests`（domain 34 / config 18 / engine 191 / recognize 27 / photo-ui 79），另有 1 个 `#[ignore]` 真机冒烟
+- Rust：`#[test]` 分布在 5 个 crate 的源文件内联 `#[cfg(test)] mod tests`（domain 34 / config 18 / engine 191 / recognize 27 / photo-ui 80），另有 1 个 `#[ignore]` 真机冒烟
 - 真机识别冒烟：`cargo test -p photo-recognize -- --ignored`（需 worktree/发布根有 `models/` 与 `data/bird_catalog.db`）；单文件手动识别工具：`cargo run -p photo-recognize --example recognize_file -- <图片路径> [models_dir] [catalog_db]`
 - 无头冒烟：`lease_smoke` 15 项 / `preview_full_smoke` 5 项 / `clipboard_smoke`（派发 CopyImage 动作 → 解码 → arboard 写剪贴板 → 读回校验尺寸）/ `adjust_smoke` 16 项（自建 1200×800 JPEG：预览装载参数 / 三条滑杆实体 / 面板可渲染 / 滑杆 Change 事件量化 0.37→0.35 / +1 EV 后预览更亮 149.0→202.9 / 350ms 去抖落库 / 原文件字节不变 / 重置回原图并复位）/ `grid_scroll_smoke` 4 项（自建 48 张 JPEG：网格滚动句柄拿到真实视口 / 内容高于视口 / 写句柄偏移跨帧保留；另支持 `PHOTO_SMOKE_HOLD_MS` 保持窗口供 Xvfb 外部截图目检、`PHOTO_SMOKE_HIDE_PANELS=1` 收起左右侧栏、`PHOTO_SMOKE_COLS=N` 指定列数、`PHOTO_SMOKE_WINDOW=WxH` 指定窗口尺寸、`PHOTO_SMOKE_HOLD_STILL=1` 保持画面静止（注入鼠标做交互验证时要逐像素对比，默认会轻推偏移让滚动条 thumb 停在可见态），并打印 `[diag] 窗口宽/列数/实测容器/列表视口宽`）/ `filter_bar_smoke` 8 项（筛选栏两个下拉：已创建 / 初始选中项与状态一致 / emit `SelectEvent::Confirm` 走真实订阅改排序与列数 / 列数写回配置 / 设置页改列数后下拉同步；不需素材）/ `export_smoke` 27 项（**不需模型**：顶栏 / Ctrl+E 的 action 真的打开弹窗 / 输入框文本→草稿 / 已选口径只导出 1 张 vs 取消选择导出筛选结果全部 5 张 / `{seq}` 补零渲染 / 同 stem 不同扩展自动 `_1` 去重 / 长边 600 真的生效 / 质量 95 体积大于 85 / 原文件字节不变 / 目标目录写回配置 / 目标目录不可创建时给真实错误 / **eBird CSV（#9）**：造识别记录 → 门控放行 → 落盘 + BOM 表头 + 物种聚合行；配置目录由冒烟自己钉 `PHOTO_CONFIG_DIR` 隔离）/ `recognize_smoke` 5 项（需 models/：扫描素材 / 识别途中能观察到中间进度 / 跑完 done==total 且每张有状态 / 取消 5s 内生效）/ `region_smoke` 11 项（需 models/：扫描素材 / 框选模式开关 / **识别器懒装配与常驻**（冷装配→热复用两段计时）/ 首次框选建结论 / 二次框选**追加**为主体 / `folder_db` 持久化同步 / 全局索引落行 / 批量识别复用同一实例 + 清临时行）/ `stats_smoke` 15 项（**不需模型**：扫描+缩略图管线 / 全局索引写行 / 选中物种取记录 / 缩略图按各自目录解析 / 统计视图渲染 / 点击跳转选中 / **滚动条（#4/#3）**：物种榜 max_offset 850 / 照片网格 1531 / 偏移跨帧保留 / 胶片条横向 862 / 导入弹窗视口 502 / 清临时行）/ `duplicates_smoke` **25 项**（**不需模型**、自建位模式素材：入口开窗 / 作用域 8 张 / 2 组各 2 张 / 无关照片不误报 / keeper = 路径首张 / 落库阈值 + keeper + 时间 / 标 Rejected 不动文件且同步 xmp / 重开弹窗读回落库结果 / 同 stem 多格式被排除 / **空文件健壮性**（0 字节文件进扫描结果但不卡管线、收尾汇总一次、检测仍能收尾）/ 渲染多帧不 panic；支持 `PHOTO_SMOKE_HOLD_MS` 保持窗口截图目检）/ `master_bench` 计时；11 个 GPUI 冒烟都先调 `app::prepare_headless_smoke()` 把后端钉在 Xvfb 的 X11 上（否则 Wayland 会话下窗口落到真实桌面、渲染帧不可控），`xvfb-run` 下无需真实显示器（见开发命令）
 
@@ -162,7 +170,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 |`photo-config::lib.rs`|18|默认值、TOML 保存/加载往返、配置路径、AppConfig 字段钳制（含 include_subdirectories、export_presets）|
 |`photo-engine`|191 + 1 ignore|scanner 单层/递归、ops 移动/复制/重命名/删除（含 sidecar）、识别行同步、thumbnail 缓存键 + **空文件早判**、exif 摘要、convert、folder_db 建表/迁移/upsert/rename 同步/多表清理、adjustments、global_db 索引、histogram 直方图/剪切、**phash dHash/汉明距离/聚类/取消语义与 duplicates 表读写**、import 分组/去重/复制移动、template 占位符渲染、undo 三类逆操作、keywords 表|
 |`photo-recognize`|27 + 1 ignore|阶段→状态映射、输入源解析（JPEG/RAW）、org_det 输出解码（布局/近满幅让位/越界夹紧）、BioCLIP 后端（npy 解析/species_of/中文名三级回落/top-k 检索）、按学名查名录、进度回调|
-|`photo-ui`|79|筛选/排序/堆叠/连拍/预览数学/调整参数（量化、chip 文案、相对路径、字段操作）/导出草稿（钳制、预设套用、目标集口径、输出名去重）/eBird 门控纯逻辑/**近重复检测纯逻辑**（作用域剔除同 stem 多格式、keeper 分组、相对/完整路径互转，`src/model/`）、Material You 色彩（`theme/`）、剪贴板解码、全局索引日期回写（`rewrite_folder_index_dates`）|
+|`photo-ui`|80|筛选/排序/堆叠/连拍/预览数学/调整参数（量化、chip 文案、相对路径、字段操作）/导出草稿（钳制、预设套用、目标集口径、输出名去重）/eBird 门控纯逻辑/**近重复检测纯逻辑**（作用域剔除同 stem 多格式、keeper 分组、相对/完整路径互转，`src/model/`）、Material You 色彩（`theme/`）、剪贴板解码、全局索引日期回写（`rewrite_folder_index_dates`）|
 
 ---
 
@@ -191,6 +199,9 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 
 ## 近期修复记录
 
+- **2026-09-23 fix(photo-ui)：框选识别的框与鼠标位置对不上（坐标口径 bug）**：用户报「按住 shift 画框的时候鼠标位置和框的位置不在一个地方」。**根因**：GPUI 鼠标事件给的是**窗口坐标**（gpui 源码原文 “The position of the mouse on the window”），而橙色框选叠加层是图片显示 div 的绝对定位子节点、按**该 div 的坐标系**绘制。中间少了「图片显示 div 在窗口里的原点」（≈313,80：左活动栏 48 + 左停靠区 265、标题栏 36 + 顶栏 44），于是框整体偏到右下。第一版修法是用「视口 `on_prepaint` 的 bounds.origin」补一层减法——但那是**多一个假设**（视口原点必须是窗口坐标、图片偏移必须与渲染一致）；最终改成**锚在同一个元素上**（去掉所有中间量）：给图片显示 div 自己挂 `on_prepaint` 存 `preview_image_rect = (x, y, w, h)`（窗口坐标），`region_bbox_from_drag(start_window, end_window, image_rect)` 直接按 `(鼠标 - rect.origin) / rect.size` 归一化——由构造保证与叠加层同坐标系，缩放/平移/侧栏宽度变化都自动跟随。
+  **验证（这次是真实注入鼠标，不只看单测）**：`region_bbox_from_drag` 加回归测试（photo-ui 79→**80**，含「窗口坐标口径 vs 旧 bug 口径必须明显不同」）；再用 XTest（ctypes 调 `libXtst`）把真实鼠标注入 Xvfb 里的应用——点开预览 → 点工具条「框选」→ 拖框，**截两张图求像素差异区域的 bbox**：正向拖 `200x150+700+400`，屏幕差异正好 `200x150+700+400`；反向拖 `180x180+820+520`，差异正好 `180x180+820+520`（框 1:1 跟随光标）；松手后状态栏「框选识别：大紫胸鹦鹉（已作为新主体加入，共 14 个主体）」→ 整条链路（画框 → 识别 → 追加主体）在真实鼠标下跑通。
+  **踩坑（留给以后）**：① 跑真实二进制做 Xvfb 实测时必须 `env -u WAYLAND_DISPLAY`——`WAYLAND_DISPLAY` 非空时 GPUI 走 Wayland，`DISPLAY=:78` 会被忽略，**窗口会落到用户真实桌面**（第一次就撞上了，还在用户桌面上留了个野窗口）；冒烟之所以没这问题是因为它们都调 `prepare_headless_smoke()`。② 「用户报还是不对」先查**二进制/进程是否为旧构建**：当时 `target/debug/ftpt` 是前一天的（09-22 18:41），源码修复是次日 09:33——运行中的实例不会自动吃新代码，改完必须 rebuild + 重启。
 - **2026-09-22 fix(photo-engine/photo-ui)：空文件不再让 LibRaw 报 I/O error，扫描收尾汇总一次**：用户贴出运行日志里的 `LibRaw error -100009: Input/output error`（`P1082852.RW2`）。**根因调查**：该文件磁盘上就是 **0 字节**（`stat` 大小 0、`file` 报 empty、`dd` 读 0 字节），而配对 `P1082852.JPG` 完好（18MB）——`-100009` 只是 LibRaw 对「无内容可读」的通用说法，不是驱动或程序故障；日志回溯到 **2026-09-18** 就已存在（当天 49 次、09-19 13 次、今天 1 次，全是同一个文件），**与本次改动无关**（同一次启动里 folder_db 的 7→10 migration 正常跑完）。改动（用户选的「空文件早判 + WARN + 扫描汇总」）：① 新增 `ThumbnailError::EmptyFile`（文案「源文件为空（0 字节），可能是复制或传输中断」）+ `ensure_non_empty(path, known_size)`；② 在 `get_or_generate` / `get_or_generate_embedded` / `decode_raw_impl` / `decode_raw_embedded_thumb` / `decode_raw_full` / `decode_raw16_with_options` 入口早判 → **不进 LibRaw / image 解码器**，日志 WARN 而不再每轮 ERROR；③ 缩略图管线（`start_thumb_pipeline`）统计失败数 + 前 3 个样例（文件名：原因），收尾 `warn!` 一次并在状态栏报「N 张无法生成缩略图（空文件或损坏），已跳过」（取消不计入失败）。**注意**：失败结果**仍然不落缓存**（瞬时读错误可恢复），只是「空文件」这一确定性条件不再走解码器。
   **验证**：先写失败测试再实现（`test_empty_raw_file_reports_empty` / `test_empty_jpeg_reports_empty`，覆盖 `file_size` 已知与现场 stat 两条分支）；`cargo test` 全绿（engine 189→**191**）；`duplicates_smoke` 21→**25 项**（新增：空文件仍进扫描结果=11 张 / 不卡缩略图管线 / 收尾汇总文案「2 张无法生成缩略图（空文件或损坏），已跳过」/ 空文件存在时检测仍收尾且分组不变）；`lease` / `stats` / `export` / `grid_scroll` / `filter_bar` / `adjust` 冒烟回归全过。**遗留**：数据侧那个 0 字节 RW2 仍在（RAW 内容已丢、JPG 完好，建议从备份找回或清理）；按用户选择**没做**网格「损坏」徽标。
 - **2026-09-22 feat(photo-ui)：重复/相似照片检测接线（`docs/todo.md` #2 / #1b）**：引擎侧 `photo-engine/src/phash.rs`（2026-08-30 起就有 dHash / 汉明距离 / 贪心聚类 + 9 个单测，还做了「命中缩略图缓存则零解码」）**全仓 0 调用方**，而左栏入口打开的 `duplicates_dialog.rs` 是**纯占位**——`_state`/`_window` 两个参数都不用，点「开始检测当前目录」只 `set_status_message("正在进行相似照片检测...")` 就关窗（与 #1 导出按钮同一种「谎报成功」）。本次纯接线 + 补弹窗，同时把「同 stem 多格式」这类假重复挡在作用域外。
