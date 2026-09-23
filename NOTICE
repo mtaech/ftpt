@@ -17,10 +17,15 @@ Photo Tool (ftpt) — 第三方组件与资产声明
 
 2. models/org_det.onnx — YOLOE-26s-seg（开放词表通用主体检测）
    来源：Ultralytics YOLOE（https://github.com/ultralytics/ultralytics）
-   许可：**AGPL-3.0**（或 Ultralytics 商业许可）
-   ⚠️ 待确认：AGPL-3.0 对「随包分发 + 闭源」有传染性要求。若本程序以非 AGPL 方式分发，
-   需向 Ultralytics 申请 Enterprise License（https://www.ultralytics.com/license）
-   或替换为许可兼容的检测模型。**这是当前发布前唯一的合规阻塞项。**
+   许可：**AGPL-3.0**（或 Ultralytics 商业许可）。完整许可文本见 LICENSE-AGPL-3.0.txt。
+   **这意味着什么（本项目是开源、不收费，所以不构成障碍，但要知道边界）**：
+   AGPL 是 **copyleft（传染性）** 许可，不是「非商业」限制——免不免费与它无关。
+   它的实际要求是：**分发**包含 AGPL 组件的软件时，必须① 以 AGPL-3.0 授权整个组合作品、
+   ② 向接收者提供完整对应源码、③ 附上许可文本。本项目代码本来就公开、不收费，
+   这条已满足；所以**发布包含 org_det.onnx 的包时，该包整体按 AGPL-3.0 分发，
+   仓库自身的文件仍按 MIT 授权**（MIT 与 AGPL 兼容，允许被并入 AGPL 作品）。
+   唯一实质影响：别人不能把你这份代码连同该权重搬进闭源产品。若想彻底避开，
+   可换一个许可宽松的检测模型；若想简单，也可把整个仓库改成 AGPL-3.0。
 
 二、物种标签与文本向量
 ----------------------
@@ -48,7 +53,12 @@ Photo Tool (ftpt) — 第三方组件与资产声明
 8. LibRaw（libraw.so / 静态库）— LGPL-2.1 / CDDL-1.0
 9. 其余 Rust 依赖的许可与版权见 Cargo.lock 与各 crate 的 LICENSE 文件。
 
-四、本文件不构成法律意见
-------------------------
+四、分发说明
+------------
 
-上述「待确认」项（第 2 条 AGPL-3.0）需要在对外分发前由发布者自行确认或处理。
+发布包（含 models/org_det.onnx）作为整体按 **AGPL-3.0** 分发，完整文本见
+LICENSE-AGPL-3.0.txt；仓库自身源码按 MIT 分发（见 LICENSE）。两者兼容。
+若需商业授权下的非 AGPL 分发，请向 Ultralytics 申请 Enterprise License
+（https://www.ultralytics.com/license）或替换为许可宽松的检测模型。
+
+本文件不构成法律意见。

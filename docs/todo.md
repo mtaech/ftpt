@@ -245,12 +245,16 @@
   TreeOfLife-200M（CC0-1.0，且数据集自身声明底层图片/文本混有多种 CC 许可，本程序只用标签文本
   embedding）、Catalogue of Life China 名录（**CC BY，要求署名**）、`bird_catalog.db`（同源）、
   onnxruntime（MIT）/ DirectML / ExifTool / LibRaw，以及本程序自身的 MIT。
-  **⚠️ 核定中发现的一个新问题**：`models/org_det.onnx` 基于 **Ultralytics YOLOE**，
-  而 Ultralytics 仓库与模型权重是 **AGPL-3.0**（或商业 Enterprise License）——
-  AGPL 对分发有传染性要求，**这是当前唯一的发布合规阻塞项**，已写进 NOTICE「待确认」与 README。
+  **⚠️ 核定中发现的一个新问题（已按「开源不收费」拍定，不再阻塞）**：`models/org_det.onnx` 基于
+  **Ultralytics YOLOE**，而 Ultralytics 仓库与模型权重是 **AGPL-3.0**。**注意：AGPL 是 copyleft，
+  不是「非商业」限制，「不收费」并不豁免它**——它的实际要求是分发时① 整个组合作品按 AGPL-3.0
+  授权、② 提供完整对应源码、③ 附许可文本。本项目代码公开且不收费，三条本来就满足：
+  **含 org_det.onnx 的发布包整体按 AGPL-3.0 分发，仓库自身文件仍 MIT**（MIT 允许被并入 AGPL 作品）。
+  已新增 `LICENSE-AGPL-3.0.txt`（GNU 原文）并随包收集；唯一实质影响是别人不能把你这份代码
+  连同该权重搬进闭源产品。要彻底避开可换许可宽松的检测模型，要简单可把整仓改 AGPL。
   ② `scripts/package.ps1`：把 `data/taxon/` 加进必需资产与收集步骤（**此前根本没拷**——
   打出来的包缺名录子集包，识别器会直接报 ModelLoad），并校验四个必需文件与
-  `VERSION` 的 `schema`/`dim`/`labels` 字段；`NOTICE` 与 `LICENSE` 随包；
+  `VERSION` 的 `schema`/`dim`/`labels` 字段；`NOTICE` / `LICENSE` / `LICENSE-AGPL-3.0.txt` 随包；
   zip 从 `Compress-Archive` 换成系统自带 bsdtar（`tar -a -c -f`，带 **bsdtar 身份校验**——
   PATH 前面若是 Git/MSYS 的 GNU tar，`-a` 不认 zip 会静默产出 tar 文件；另避开 `C:\` 参数差异），
   理由：2GB+ 上限 + 包里的 .onnx/.npy 接近随机字节，deflate 基本压不动只浪费时间。
@@ -294,8 +298,9 @@
    中文名缺失回落「属中文名 + 学名」；domain 35→**37** 测试）。
    **#7 / #8 资产类按需触发**：#7 暂不补家养/外来小包（只把「境内先验」写进说明）、#8 世界包不随包。
 7. **⏸ #10 / #11**——收益低于维护成本，等第二个识别后端出现再动。
-8. **P3（#13–#18）**——✅ #15（NOTICE / 打包校验）已于 2026-09-23 做掉，但**核定中发现新阻塞项**：
-   `org_det.onnx`（Ultralytics YOLOE）是 AGPL-3.0，对外分发前要拍板（换模型 / 商用许可 / 只用自用）；
+8. **P3（#13–#18）**——✅ #15（NOTICE / 打包校验）已于 2026-09-23 做掉；核定中查出的
+   `org_det.onnx`（Ultralytics YOLOE）**AGPL-3.0** 已按「开源不收费」定妥：
+   含该权重的发布包整体按 AGPL-3.0 分发（`LICENSE-AGPL-3.0.txt` 随包），本仓源码仍 MIT。
    #18 已核实为过期条目并关闭。
 9. ⏭ **Batch 3（一次 migration）**：#11 `ranks` + #10 `backend`/`asset_version` 落库，随后把 #9 的 eBird
    门控从「有物种结论」收紧成「鸟纲」——这两条此前暂缓是因为**没有消费方**，现在有了。

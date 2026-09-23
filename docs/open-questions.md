@@ -84,10 +84,13 @@ BioCLIP 是**余弦相似度 ×100**——实测 top-1 落在 65~79 这个窄带
   Catalogue of Life China 名录 = **CC BY**（要求署名，`bird_catalog.db` 同源）。
   `scripts/package.ps1` 已加 `data/taxon/` 必需校验与收集（**之前根本没拷**）、`VERSION` 字段校验、
   `NOTICE`/`LICENSE` 随包，并把 `Compress-Archive` 换成系统自带 bsdtar。
-- **新阻塞项（需你拍板）**：`models/org_det.onnx` 基于 **Ultralytics YOLOE**，仓库与权重是
-  **AGPL-3.0**（或商业 Enterprise License）——AGPL 对分发有传染性要求。三选一：
-  ① 仅自用不分发（当下）；② 换一个许可兼容的检测模型；③ 买/申请 Ultralytics Enterprise License。
-  在拍板前，NOTICE 与 README 都把这条标为「待确认」。
+- **新问题（已定，非阻塞）**：`models/org_det.onnx` 基于 **Ultralytics YOLOE**，仓库与权重是
+  **AGPL-3.0**（或商业 Enterprise License）。**AGPL 是 copyleft，不是「非商业」限制，不收费不豁免它**；
+  它的要求是分发时整体按 AGPL-3.0 授权 + 提供对应源码 + 附许可文本——本项目源码公开且不收费，
+  三条本就满足。所以取定：**含该权重的发布包整体按 AGPL-3.0 分发（`LICENSE-AGPL-3.0.txt` 随包），
+  本仓源码仍 MIT**。唯一实质影响是别人不能把你这份代码连同该权重搬进闭源产品。
+  若以后想彻底避开：换一个许可宽松的检测模型（如 Apache-2.0 家系的 RT-DETR / YOLOX 类），
+  或把整仓改成 AGPL-3.0。
 
 ### 9. 性能与并发
 

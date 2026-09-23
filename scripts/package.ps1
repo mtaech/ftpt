@@ -15,7 +15,8 @@
 # - 运行时资产：models/*.onnx + data/bird_catalog.db + data/taxon/（名录子集包，
 #   缺它识别器会报 ModelLoad；data_root() 定位：PHOTO_DATA_DIR → exe 同级 models/ → 仓库根回退，
 #   见 crates/photo-ui/src/state/app_state.rs）
-# - 署名：NOTICE（BioCLIP 2 MIT / TreeOfLife-200M CC0-1.0 / CoL China CC BY）随包发
+# - 署名与许可：NOTICE + LICENSE + LICENSE-AGPL-3.0.txt 随包发（包内含 AGPL-3.0 的
+#   org_det.onnx，所以整个发布包按 AGPL-3.0 分发，AGPL 全文必须随包）
 # - DirectML.dll 由 ort(directml) 构建时自动拷入 target 目录，随包收集
 #   （onnxruntime 已静态链接进 exe）
 
@@ -63,7 +64,8 @@ $catalogDb = Join-Path $root "data/bird_catalog.db"
 $taxonDir = Join-Path $root "data/taxon"
 $taxonFiles = @("txt_emb_bioclip-2.npy", "txt_emb_bioclip-2.json", "zh_names.json", "VERSION")
 $notice = Join-Path $root "NOTICE"
-foreach ($required in @($exe, $modelsDir, $catalogDb, $taxonDir, $notice)) {
+$agpl = Join-Path $root "LICENSE-AGPL-3.0.txt"
+foreach ($required in @($exe, $modelsDir, $catalogDb, $taxonDir, $notice, $agpl)) {
     if (-not (Test-Path $required)) {
         throw "缺少发布资产：$required（模型放 models/，名录库 data/bird_catalog.db，名录子集包 data/taxon/，署名 NOTICE）"
     }
@@ -90,9 +92,11 @@ Copy-Item "$modelsDir/*.onnx" "$stageDir/models/"
 Copy-Item $catalogDb "$stageDir/data/bird_catalog.db"
 # 名录子集包：识别器的文本向量与中文名（走 data_root() 的 data/taxon/）
 Copy-Item $taxonDir "$stageDir/data/taxon" -Recurse -Force
-# 署名（BioCLIP 2 是 MIT、CoL China 是 CC BY，两者都要求保留声明，源码 LICENSE 也一并带）
+# 署名与许可文本（BioCLIP 2 是 MIT、CoL China 是 CC BY，两者都要求保留声明；
+# 包内含 AGPL-3.0 的 org_det.onnx，所以 AGPL 全文也必须随包分发）
 Copy-Item $notice "$stageDir/NOTICE"
 Copy-Item (Join-Path $root "LICENSE") "$stageDir/LICENSE"
+Copy-Item (Join-Path $root "LICENSE-AGPL-3.0.txt") "$stageDir/LICENSE-AGPL-3.0.txt"
 
 # EXIF 后端：ExifTool 本地运行时（local-lib/exiftool，跨平台各自打包对应平台目录）
 # 运行时定位优先级：exe 同级 exiftool/ → local-lib/exiftool/ → PATH（见 docs/exiftool-update.md）
