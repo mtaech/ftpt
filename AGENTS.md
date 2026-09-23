@@ -140,7 +140,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 - **arboard 剪贴板必须留常驻持有者（X11）**：X11 剪贴板的数据是进程应答 X 请求时才提供的，`arboard::Clipboard` 一 drop，选择所有权就没了——「复制图片到剪贴板」会静默变成什么都没复制。`engine_ops` 用 `CLIPBOARD_OWNER` 静态把实例持有到进程退出（Wayland 的 data-control 由合成器接管，不受影响）。`clipboard_smoke` 长期没抓到这条：它以前跑在用户的 Wayland 会话上（窗口根本没落到 Xvfb），读回的是合成器接管的那份数据。
 - **无头冒烟必须钉住 X11 后端**：GPUI 选后端只看环境变量（`platform::guess_compositor()`）：`WAYLAND_DISPLAY` 非空 → Wayland，其次 `DISPLAY` → X11。而 `xvfb-run` 只准备 X 显示：在 Wayland 会话里跑冒烟时窗口会落到**用户真实桌面**，帧由真实合成器决定（被遮挡/最小化时不产帧），于是**渲染驱动的行为根本没被测**——渲染驱动的检查（如「对比窗格加载母版」）就因此同一份代码一会儿 13/13 一会儿 12/13（母版加载只在视图真的渲染时才发起；`compare_smoke` 当年就是这样抓出来的，该视图已移除）。所以 11 个 GPUI 冒烟都在 `gpui_kit::application()` 之前调 `photo_ui::app::prepare_headless_smoke()`（把 `WAYLAND_DISPLAY` 置空，GPUI 判空即视为未设置）；要真机 Wayland 目检时设 `PHOTO_SMOKE_ALLOW_WAYLAND=1`。
 - **模型/名录库/全局索引库定位（`data_root()`，lib.rs）**：`PHOTO_DATA_DIR` env → exe 同级 `models/`+`data/`（打包便携）→ 仓库根（开发回退，从 CARGO_MANIFEST_DIR/cwd 向上找同时含 `models/` 与 `data/bird_catalog.db` 的目录）；`cargo run -p photo-ui` 下模型在仓库根，否则会报「检测模型文件不存在: <target>/debug/models/org_det.onnx」
-- **识别资产（随包分发，均不入 git）**：`models/org_det.onnx`（通用主体检测）+ `models/bioclip2_model_int8.onnx` + `data/bird_catalog.db`（已瘦身为 `animal_info(id, latin_name, cn_name)` 三列，2026-09-22）+ `data/taxon/`（名录子集包：`txt_emb_bioclip-2.{npy,json}` + `zh_names.json` + `VERSION`）。BioCLIP 的资产目录固定在**名录库同级**的 `taxon/`（即 `data_root()/data/taxon/`）。缺哪个就在 `Recognizer::new` 报对应的 `ModelLoad`，状态栏透传。`bird_model.onnx`（26MB）/ `eye.onnx`（19MB）/ `detect.onnx`（19MB）已删除（备份 /tmp/pt-asset-backup/）；`data/global.db` 是派生索引，删除后重扫自动重建
+- **识别资产（随包分发，均不入 git）**：`models/org_det.onnx`（通用主体检测）+ `models/bioclip2_model_int8.onnx` + `data/bird_catalog.db`（已瘦身为 `animal_info(id, latin_name, cn_name)` 三列，2026-09-22）+ `data/taxon/`（名录子集包：`txt_emb_bioclip-2.{npy,json}` + `zh_names.json` + `VERSION`，**93,480 类**）。BioCLIP 的资产目录固定在**名录库同级**的 `taxon/`（即 `data_root()/data/taxon/`）。包 = CoL China 中国名录（硬地理先验）+ **家养/外来补充名单**（家猫/家畜/宠物/栽培作物 27 个学名，2026-09-23 起）——工具与名单在 `bioclip_demo/data/build_taxon_pack.py --extra data/domestic_exotic.txt`，可进包的前提是该学名在 TreeOfLife 标签空间里有 embedding（家犬、虎尾兰、马铃薯等都不满足，见名单内注释）。缺哪个就在 `Recognizer::new` 报对应的 `ModelLoad`，状态栏透传。`bird_model.onnx`（26MB）/ `eye.onnx`（19MB）/ `detect.onnx`（19MB）已删除（备份 /tmp/pt-asset-backup/）；`data/global.db` 是派生索引，删除后重扫自动重建
 - 使用了 let-chains（edition 2024 特性），如 `photo-config/config.rs` 便携路径判断
 - **评分/旗标/色标筛选在 UI 侧执行**（`crates/photo-ui/src/model/filter.rs`）；`FilterCriteria::has_active_filter` 语义 = 批量操作安全边界（无筛选时禁用）
 - **窗口根视图必须是 gpui-component 的 `Root`**：`Button::tooltip` 最终调 `Root::tooltip_overlay(window, cx)`，而它靠 `window.root::<Root>()` 查找——根视图不是 `Root`（例如直接把 `AppState` 当根视图）时**所有 tooltip 被静默丢弃**，表现就是「图标按钮悬停没有提示」（曾把整个 app 的 tooltip 都吃掉：侧边栏 5 个图标、Dock 折叠按钮、预览工具条）。`main.rs` 已用 `Root::new(app_state, window, cx).bordered(false)` 包一层（系统装饰窗口不要再叠自绘边框），无头冒烟 `clipboard_smoke` 会断言根视图是 `Root`。另注意 gpui 的 `InteractiveElement::disabled` 会屏蔽 hover，**disabled 按钮不显示 tooltip**（如未选中照片时的「识别」）
@@ -198,6 +198,26 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 ---
 
 ## 近期修复记录
+
+- **2026-09-23 feat(识别资产)：名录包补「家养/外来」名单——拍猫不再被强行判成云猫**（`docs/todo.md` #7 · `60e44b3`）：
+  **现象（open-questions §2 记了很久）**：中国包是**硬地理先验**，CoL China 里没有家养种（家猫 `Felis catus`、
+  家牛 `Bos taurus`、家水牛 `Bubalus bubalis`、绵羊/山羊/马/驴都不在），而 TreeOfLife 标签空间里有它们的 embedding——
+  于是拍一只家猫只能往中国野生猫科上挤。**实测（本次先取旧包做对照）**：两张真猫图旧包都给
+  **云猫 `Pardofelis marmorata` 67.6% / 64.5%**，修后给 **家猫 `Felis catus` 69.5% / 70.4%**。
+  **做法（不写一行 Rust）**：包构建器 `bioclip_demo/data/build_taxon_pack.py` 加 `--extra FILE`（按**学名精确**补收，
+  可带 `<TAB>中文名` 补缺/纠正），名单放 `bioclip_demo/data/domestic_exotic.txt`（27 个学名：家畜家禽 / 宠物 /
+  城市常见 / 栽培作物园艺花卉），重生成 `data/taxon/` → 93,452 → **93,480 类**、目录 293→301MB。
+  中文名同步补上：`Ovis aries`→绵羊、`Capra hircus`→山羊、`Equus caballus`→马、`Equus asinus`→驴（全局表里都没有），
+  并把 `Meleagris gallopavo` 从「吐綬雞」纠成「火鸡」、`Serinus canaria` 纠成「金丝雀」——机制就是名单里可带中文名覆盖。
+  **进不来的已写进名单注释**（不猜不编）：家犬（标签空间里根本没有 `Canis lupus familiaris`，只有 `Canis lupus` 狼）、
+  `Sansevieria trifasciata`（虎尾兰，同样没有）、`Solanum tuberosum`/`Vitis vinifera`/`Platycladus orientalis`
+  （名字在、但列号 > 851,968 落在**全零填充区**、无 embedding）——这三条最初被我的探测脚本误判为「可加」，
+  是构建器跑完报 `not_in_pack` 才发现的；`VERSION.extra` 现在记 `requested/matched/not_in_pack/zh_overrides`。
+  **验证**：同两张猫图的旧包/新包对照（见上）；鸟照无回归——`三宝鸟.png` 新包仍是 `三宝鸟 Eurystomus orientalis 73.8%`
+  且 bbox 完全一致（只有类别下标整体位移）；`cargo check --workspace --all-targets` 0 warning。
+  **旧包没删**：留在 `bioclip_demo/class_emb/cn_pack/`（`data/taxon/` 里那批是它的硬链接，已断开重写，对照随时可重跑）。
+  **局限**：家犬仍无解（需要 BioCLIP 文本塔重算 embedding，未验证过），狗照大概会落到狼或相似犬科；
+  境外物种/动物园动物仍会被归到相近的中国物种——设置页「离线物种标签包」的说明与 open-questions §2 都写明了。
 
 - **2026-09-23 chore(发布)：补 `NOTICE` + 修 `scripts/package.ps1`（此前根本不拷 `data/taxon/`）——顺手查出 AGPL 阻塞项**（`docs/todo.md` #15 · `60b1a57` + AGPL 边界 `a8e506b`）：
   ① **新增仓库根 `NOTICE`**（README「许可」指向它）：逐项列随包分发的第三方资产与许可——BioCLIP 2 = **MIT**（要求保留版权声明，附 Zenodo `10.5281/zenodo.15644363` 引用）、TreeOfLife-200M = **CC0-1.0**（数据集卡片声明底层图片/文本混有多种 CC 许可，逐条许可见数据集内 license 字段；本程序只用**标签文本**的 embedding，不含图片）、Catalogue of Life China 年度名录 = **CC BY**（要求署名，`bird_catalog.db` 同源）、onnxruntime (MIT) / DirectML / ExifTool (Perl Artistic/GPL) / LibRaw (LGPL-2.1/CDDL)。许可与版本都是现查现引的（HF 模型卡 `license: mit`、数据集卡 `license: cc0-1.0`、CoL 年度清单在 ChecklistBank 上的 `license: cc by`、Ultralytics 仓库 LICENSE）。
