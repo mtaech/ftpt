@@ -5,6 +5,8 @@
 //!   - 主体检测框（V 键）：2px accent 描边 + 20% 填充
 //!   - 对焦点（F 键）：十字准星（focus 颜色）
 //!   - 剪切警告（O 键）：高光溢出与死黑叠加
+//!   - 手动框选矩形：工具条「框选」toggle 或**按住 Shift + 左键拖拽**（快捷键），warning 橙
+//! - 视口左上角常驻框选文字提示：把 Shift 快捷键摆出来，文案/颜色随 Shift 与框选模式切换
 //! - 底部胶囊工具条：
 //!   - 放大 / 缩小 / 适应 / 1:1
 //!   - 堆叠分段选择器
@@ -36,6 +38,7 @@ use crate::image::{MASTER_SIZE, THUMB_SIZE_GRID, source_file_of};
 use crate::model::preview_math::{
     clamp_pan_axis, exceeds_master_res, fit_scale, preview_center_offset, region_bbox_from_drag,
 };
+use crate::model::region::{region_hint_text, starts_region_drag};
 use crate::state::AppState;
 use crate::state::engine_ops::{
     defer_entity_action, load_preview_full, load_preview_image, start_region_recognition,
@@ -246,6 +249,12 @@ pub fn render_photo_preview(
                 .overflow_hidden()
                 .cursor(if is_dragging {
                     CursorStyle::ClosedHand
+                } else if state.region_select
+                    || state.region_shift_held
+                    || state.region_drag_start.is_some()
+                {
+                    // 画框态（toggle 开启 / 按住 Shift / 拖拽中）：十字光标
+                    CursorStyle::Crosshair
                 } else if can_pan {
                     CursorStyle::OpenHand
                 } else {
@@ -269,6 +278,16 @@ pub fn render_photo_preview(
                         });
                     }
                 })
+                // 跟踪 Shift（光标 + 左上角提示文字实时切到「已按住 Shift」）；
+                // 只在状态真变化时 notify，修饰符事件来得很密
+                .on_modifiers_changed(cx.listener(
+                    |state, event: &gpui_kit::ModifiersChangedEvent, _window, cx| {
+                        if state.region_shift_held != event.modifiers.shift {
+                            state.region_shift_held = event.modifiers.shift;
+                            cx.notify();
+                        }
+                    },
+                ))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|state, event: &gpui_kit::MouseDownEvent, _window, cx| {
@@ -281,8 +300,9 @@ pub fn render_photo_preview(
                             }
                             state.preview_pan = (0.0, 0.0);
                             cx.notify();
-                        } else if state.region_select {
-                            // 框选模式：左键拖拽画框（不进入平移）
+                        } else if starts_region_drag(state.region_select, event.modifiers.shift) {
+                            // 框选：工具条 toggle 开启，或按住 Shift（快捷键）——左键拖拽画框，
+                            // 都不进入平移
                             state.region_drag_start = Some((
                                 f32::from(event.position.x) as f64,
                                 f32::from(event.position.y) as f64,
@@ -297,36 +317,43 @@ pub fn render_photo_preview(
                 .on_mouse_up(
                     MouseButton::Left,
                     cx.listener(move |state, event: &gpui_kit::MouseUpEvent, _window, cx| {
-                        if state.region_select {
-                            if let Some(start) = state.region_drag_start.take() {
-                                let end = (
-                                    f32::from(event.position.x) as f64,
-                                    f32::from(event.position.y) as f64,
-                                );
-                                // 面积过小的框视为误点击（不触发识别）
-                                // 鼠标事件是窗口坐标，锚在图片显示 div 的窗口 bounds 上换算
-                                let bbox = state
-                                    .preview_image_rect
-                                    .and_then(|rect| region_bbox_from_drag(start, end, rect))
-                                    .filter(|b| (b.x2 - b.x1) * (b.y2 - b.y1) >= 0.0004);
-                                state.region_bbox = bbox;
-                                if let Some(b) = bbox {
-                                    // listener 内 AppState 已租借，直接 update 会 panic：
-                                    // 用 defer_entity_action 排到本轮 effect 之后（同识别/扫描入口）
-                                    let entity = cx.entity().clone();
-                                    let path = PathBuf::from(region_path.clone());
-                                    defer_entity_action(cx, entity, move |entity, cx| {
-                                        start_region_recognition(entity, path, b, cx);
-                                    });
-                                }
-                                cx.notify();
+                        // 拖拽模式在 mouse_down 时就定了（工具条 toggle 或按住 Shift）：这里只看
+                        // 有没有框选起点。若改回看 region_select，「Shift 画框、松手前先放掉 Shift」
+                        // 就会掉进平移分支——框画了却不识别。
+                        if let Some(start) = state.region_drag_start.take() {
+                            let end = (
+                                f32::from(event.position.x) as f64,
+                                f32::from(event.position.y) as f64,
+                            );
+                            // 面积过小的框视为误点击（不触发识别）
+                            // 鼠标事件是窗口坐标，锚在图片显示 div 的窗口 bounds 上换算
+                            let bbox = state
+                                .preview_image_rect
+                                .and_then(|rect| region_bbox_from_drag(start, end, rect))
+                                .filter(|b| (b.x2 - b.x1) * (b.y2 - b.y1) >= 0.0004);
+                            state.region_bbox = bbox;
+                            if let Some(b) = bbox {
+                                // listener 内 AppState 已租借，直接 update 会 panic：
+                                // 用 defer_entity_action 排到本轮 effect 之后（同识别/扫描入口）
+                                let entity = cx.entity().clone();
+                                let path = PathBuf::from(region_path.clone());
+                                defer_entity_action(cx, entity, move |entity, cx| {
+                                    start_region_recognition(entity, path, b, cx);
+                                });
                             }
+                            cx.notify();
                         } else {
                             state.preview_drag_start = None;
                         }
                     }),
                 )
                 .on_mouse_move(cx.listener(move |state, event: &gpui_kit::MouseMoveEvent, _window, cx| {
+                    // 鼠标事件本身带着修饰符：平台没投递 ModifiersChanged（无 WM / 无键盘焦点）
+                    // 时，指针一动也能把提示文字与光标切到「已按住 Shift」
+                    let shift = event.modifiers.shift;
+                    let shift_changed = state.region_shift_held != shift;
+                    state.region_shift_held = shift;
+
                     if let Some(start) = state.region_drag_start {
                         // 框选进行中：实时更新叠加框
                         let end = (
@@ -346,6 +373,9 @@ pub fn render_photo_preview(
                             state.preview_drag_start = Some((event.position.x, event.position.y));
                             cx.notify();
                         }
+                    } else if shift_changed {
+                        // 只有 Shift 状态变了、又没在拖拽：重绘提示与光标
+                        cx.notify();
                     }
                 }))
                 .on_scroll_wheel(cx.listener(|state, event: &gpui_kit::ScrollWheelEvent, _window, cx| {
@@ -497,6 +527,27 @@ pub fn render_photo_preview(
                                     ),
                             )
                         }),
+                )
+                // ── 叠加层：框选操作文字提示（Shift 快捷键；纯展示，不接收指针事件）──
+                // 置于图片视口左上角；三态文案见 model::region::region_hint_text
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(12.))
+                        .left(px(12.))
+                        .px_2()
+                        .py(px(3.))
+                        .rounded_full()
+                        .bg(cx.theme().popover.opacity(0.85))
+                        .border_1()
+                        .border_color(cx.theme().border.opacity(0.45))
+                        .text_xs()
+                        .text_color(if state.region_select || state.region_shift_held {
+                            cx.theme().warning
+                        } else {
+                            cx.theme().muted_foreground
+                        })
+                        .child(region_hint_text(state.region_select, state.region_shift_held)),
                 ),
         )
         // ── 2. 底部浮动胶囊工具条 (Material You Floating Pill Toolbar) ──
@@ -592,7 +643,7 @@ pub fn render_photo_preview(
                                 .ghost()
                                 .xsmall()
                                 .icon(gpui_kit::assets::IconName::Scan)
-                                .tooltip("框选识别：检测漏检时手动框选补充主体")
+                                .tooltip("框选识别：检测漏检时手动框选补充主体（也可按住 Shift + 左键直接拖框）")
                                 .selected(state.region_select)
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(Box::new(ToggleRegionSelect), cx);

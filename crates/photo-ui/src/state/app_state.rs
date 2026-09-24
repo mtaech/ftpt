@@ -243,6 +243,8 @@ pub struct AppState {
     pub preview_drag_start: Option<(gpui_kit::Pixels, gpui_kit::Pixels)>,
     /// 预览「框选识别」模式开关（工具条按钮 toggle；开启时左键拖拽画框而非平移）
     pub region_select: bool,
+    /// 是否按住 Shift（预览区 modifier 事件跟踪）：按住时左键拖拽也画框，提示文字与十字光标随之切换
+    pub region_shift_held: bool,
     /// 框选拖拽起点（图片视口坐标）；None = 未在拖拽
     pub region_drag_start: Option<(f64, f64)>,
     /// 进行中/最近一次的框选矩形（归一化 0-1，叠加层绘制用）
@@ -716,6 +718,7 @@ impl AppState {
             preview_image_rect: None,
             preview_drag_start: None,
             region_select: false,
+            region_shift_held: false,
             region_drag_start: None,
             region_bbox: None,
             region_recognizing: false,

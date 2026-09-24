@@ -10,6 +10,7 @@ pub mod ebird;
 pub mod export;
 pub mod filter;
 pub mod preview_math;
+pub mod region;
 pub mod sort;
 pub mod stacks;
 
@@ -38,6 +39,7 @@ pub use preview_math::{
     clamp_pan_axis, exceeds_master_res, fit_scale, pan_after_cursor_zoom, preview_center_offset,
     region_bbox_from_drag,
 };
+pub use region::{region_hint_text, starts_region_drag};
 pub use sort::{
     GRID_COL_OPTIONS, SORT_OPTIONS, apply_filter_and_sort, compare_captures,
     grid_columns_from_value, sort_by_from_value, sort_by_value,

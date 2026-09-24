@@ -199,6 +199,30 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 
 ## 近期修复记录
 
+- **2026-09-24 feat(photo-ui)：框选识别加 Shift 快捷键 —— 按住 Shift + 左键直接拖框，视口左上角常驻文字提示**：
+  用户要求「给画框自定义识别加一个 shift 快捷键，按住 shift，然后左键拖动画框，在界面上用文字提示」。
+  以前只有工具条那个 icon-only 的「框选」toggle（发现漏检 → 先找到按钮 → 开模式 → 再拖框），本次把
+  **Shift 这条捷径**接上，并把这条捷径**写在界面上**（不再只藏在 tooltip 里）。
+  **做法**：① 新增纯逻辑模块 `crates/photo-ui/src/model/region.rs`——`starts_region_drag(region_select, shift_held)`
+  = 二者任一即进入画框，`region_hint_text(...)` 出三态文案（常驻 / 按住 Shift / toggle 已开启）；
+  ② `views/preview.rs`：`on_mouse_down` 用 `MouseDownEvent::modifiers.shift` 判定，**拖拽模式在按下那一刻定死**，
+  `on_mouse_up` 只看 `region_drag_start.is_some()`（原来的 `if state.region_select` 会让「Shift 画框、松手前先放掉 Shift」
+  掉进平移分支——框画了却不识别）；③ 视口左上角加常驻文字胶囊（warning 色 + 十字光标随态切换）；
+  ④ `on_modifiers_changed` + 鼠标事件自带修饰符双通道更新 Shift 态；⑤ 工具条按钮 tooltip 补「也可按住 Shift + 左键直接拖框」。
+  **为什么双通道**：GPUI X11 后端的 `ModifiersChanged` 只在 `XkbStateNotify` 且**该窗口有键盘焦点**时投递
+  （`client.rs` 里 `keyboard_focused_window?`）——无 WM 的 Xvfb 下窗口从来没焦点，这个事件根本不来；鼠标事件
+  自身带 modifiers，所以「移动指针」也能把提示与光标切过来（顺带这也解释了为什么冒烟里 Shift 提示不动过）。
+  **验证（真实鼠标注入，不只看单测）**：`cargo check --workspace --all-targets` 0 warning；`cargo test -p photo-ui`
+  81→**83**（新增 `test_starts_region_drag_accepts_toggle_or_shift`、`test_region_hint_text_mentions_shift_and_active_mode`）。
+  再用 ctypes 调 `libXtst` 在 Xvfb :79 里注入真实键鼠：截图目检到常驻胶囊「按住 Shift + 左键拖拽，框选识别补充主体」；
+  按住 Shift 并移动指针后，**像素差异正好落在提示胶囊区域 (372,188)-(575,213)**、文字变成 warning 「已按住 Shift：左键拖拽即可框选识别」，
+  松开 Shift 后与常驻态逐像素相同；**在 toggle 关闭状态下** Shift+左键拖 (600,400)→(800,550)，拖拽中截图与起始截图的
+  **像素差异 bbox 正好 (600,400,800,550)**（框 1:1 跟随光标），松手后日志 `进入框选识别: e2e_0`、信息栏「已识别 血色脊茧蜂 66.1%」、
+  状态栏「框选识别：血色脊茧蜂（已作为新主体加入，共 1 个主体）」——整条链路（Shift → 画框 → 松开 → 识别 → 追加主体）跑通。
+  **踩坑**：`pkill -f 'Xvfb :79'` 会**匹配到执行命令的那个 bash 自己**（`bash -c` 的 cmdline 里含这个字符串）——它把自己杀了，
+  表现是「exit null、stdout 空」；验证环境里改用 `pkill -x Xvfb` / `pkill -x ftpt`。**遗留**：无 WM 环境下 `ModifiersChanged` 不投递已如上兜底；
+  手册 §9.6 的表格与「框选」段落已同步（含提示胶囊三态与「按下定死」这条语义）。
+
 - **2026-09-23 feat(识别资产)：家犬/家猪口径修正 —— 用文本塔分犬与狼失败，改用中文名口径**（`docs/todo.md` #7 续 · `cdf82e1`）：
   用户要求「家犬重新算一下」。先把事实查清楚：**上游标签空间里根本没有独立的家犬条目**——犬的存在
   `Canis lupus` 这一列里，而该列的上游英文俗名就是 **`Domestic Dog`**（`txt_emb_bioclip-2.json` 第 354571 条；

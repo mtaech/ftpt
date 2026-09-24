@@ -355,6 +355,36 @@ fn test_region_bbox_from_drag_anchors_to_image_rect_in_window_space() {
     );
 }
 
+/// Shift 快捷键（用户要求）：按住 Shift + 左键拖拽 = 画框，不必先开工具条 toggle。
+#[test]
+fn test_starts_region_drag_accepts_toggle_or_shift() {
+    // toggle 开 / 按住 Shift，任一即进入画框；两者都没有才是平移
+    assert!(starts_region_drag(true, false));
+    assert!(starts_region_drag(false, true));
+    assert!(starts_region_drag(true, true));
+    assert!(!starts_region_drag(false, false));
+}
+
+#[test]
+fn test_region_hint_text_mentions_shift_and_active_mode() {
+    // 常驻态必须把 Shift 快捷键写出来（「在界面上用文字提示」这条需求本身就是它）
+    let idle = region_hint_text(false, false);
+    assert!(idle.contains("Shift"), "常驻提示要提到 Shift：{idle}");
+    assert!(idle.contains("拖拽"), "常驻提示要说明操作方式：{idle}");
+
+    // 按住 Shift 与常驻是两种文案：用户要能看出「现在按着 Shift」
+    let held = region_hint_text(false, true);
+    assert!(held.contains("Shift") && held != idle, "按住 Shift 应有独立文案：{held}");
+
+    // 显式框选模式：说明松开即识别
+    let active = region_hint_text(true, false);
+    assert!(active.contains("框选识别已开启"), "开启态文案：{active}");
+    assert!(active.contains("松开"), "开启态要说明松开即识别：{active}");
+
+    // 模式优先于 Shift 态（开着 toggle 时按 Shift 不改文案）
+    assert_eq!(region_hint_text(true, true), active);
+}
+
 #[test]
 fn test_preview_dynamic_fit_and_centering() {
     // 模拟用户截图场景：原图 7232 x 5424 (4:3)
