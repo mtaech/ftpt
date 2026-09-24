@@ -140,6 +140,11 @@ fn main() {
                     }
                 }
                 let _ = async_cx.update(|cx| cx.quit());
+                println!("全部通过");
+                // 同 lease_smoke：examples 带 test-support（含 leak-detection），
+                // 而 detached 任务仍持有 task_state，App 正常析构会被判成泄漏；
+                // 冒烟自己就是「报完结果即退出」的抛头进程。
+                std::process::exit(0);
             })
             .detach();
 

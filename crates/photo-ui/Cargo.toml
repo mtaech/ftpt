@@ -33,3 +33,9 @@ open = "5"
 # 图片项会被静默丢弃，所以图片复制直接走 arboard；
 # wayland-data-control：Wayland 会话下用 wl-clipboard-rs 的 data-control 协议。
 arboard = { version = "3", features = ["wayland-data-control"] }
+
+[dev-dependencies]
+# 无头冒烟读 a11y 语义要用 gpui-base 的观察点（ElementSnapshot 能读 role /
+# aria_label / selected），它由 gpui-kit 的 test-support 特性开启。
+# dev-dependencies 的特性只在测试/示例构建里生效，正常 cargo build 不带它。
+gpui-kit = { version = "0.6.1", features = ["test-support"] }

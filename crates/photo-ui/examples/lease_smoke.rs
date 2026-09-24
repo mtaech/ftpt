@@ -300,6 +300,12 @@ fn main() {
                     std::process::exit(1);
                 }
                 println!("全部通过");
+                // 报完结果直接退出进程（与其余冒烟同一约定）：examples 会带上
+                // dev-dependencies 的 gpui test-support，其中包含 leak-detection——
+                // 而本冒烟的 detached 任务仍持有 task_state（Entity<AppState>），
+                // 让 App 正常析构就会被那条断言判成「泄漏」。那是冒烟自身的产物，
+                // 不是产品泄漏：冒烟进程本来就要在断言完成后立刻结束。
+                std::process::exit(0);
             })
             .detach();
 

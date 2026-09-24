@@ -7,7 +7,10 @@
 //! - 单击切图，右键上下文操作
 
 use gpui_kit::component::{ActiveTheme as _, h_flex};
-use gpui_kit::{Context, IntoElement, MouseButton, Window, div, img, prelude::*, px};
+use gpui_kit::{
+    Context, IntoElement, MouseButton, Role, TestSupportExt as _, Window, div, img, prelude::*,
+    px,
+};
 
 use crate::image::THUMB_SIZE_GRID;
 use crate::state::AppState;
@@ -84,6 +87,15 @@ pub fn render_filmstrip(
                             },
                         ),
                     )
+                    // 无障碍（§13.4）：胶片条是 List，每一项是 ListItem（带文件名与当前态）。
+                    // 名字由 model::a11y 的纯函数拼，视图里不拼字符串。
+                    .role(Role::ListItem)
+                    .aria_label(crate::model::filmstrip_item_label(
+                        &meta.display_name(),
+                        is_active,
+                    ))
+                    .aria_selected(is_active)
+                    .test_support()
                     .child(div().w_full().h_full().bg(cx.theme().background).child(
                         if let Some(path) = thumb_path {
                             img(path).w_full().h_full().into_any_element()
@@ -105,6 +117,10 @@ pub fn render_filmstrip(
         &state.filmstrip_scroll,
         content_w,
         h_flex()
+            .id("filmstrip-list")
+            .role(Role::List)
+            .aria_label(crate::model::filmstrip_label(thumbs.len()))
+            .test_support()
             .h_full()
             .px_2()
             .py_1()

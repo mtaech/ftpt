@@ -8,7 +8,10 @@
 //! on_key_down + handle_escape 里（根视图持有焦点，菜单作为子节点不用抢焦点）。
 
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
-use gpui_kit::{Context, IntoElement, MouseButton, SharedString, Window, div, prelude::*, px};
+use gpui_kit::{
+    Context, IntoElement, MouseButton, Role, SharedString, TestSupportExt as _, Window, div,
+    prelude::*, px,
+};
 
 use crate::model::context_menu::ContextMenuAction;
 use crate::state::AppState;
@@ -92,6 +95,12 @@ pub fn render_photo_context_menu(
                         run_context_menu_action(state, action, target.clone(), cx);
                     }))
                 })
+                // 无障碍（§13.4）：菜单项 = MenuItem + 名称；键盘高亮项报 selected。
+                // a11y 里没有 aria-disabled 通道，置灰项在名称里明说「（不可用）」。
+                .role(Role::MenuItem)
+                .aria_label(crate::model::menu_item_label(&item.label, disabled))
+                .aria_selected(highlighted)
+                .test_support()
         }));
 
     div()
@@ -113,6 +122,10 @@ pub fn render_photo_context_menu(
         )
         .child(
             v_flex()
+                .id("context-menu-card")
+                .role(Role::Menu)
+                .aria_label("照片操作菜单")
+                .test_support()
                 .absolute()
                 .left(px(x))
                 .top(px(y))

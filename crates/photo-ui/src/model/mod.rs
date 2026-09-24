@@ -2,6 +2,7 @@
 //!
 //! 对应《GUI 设计手册》§4 与附录 B。
 
+pub mod a11y;
 pub mod adjust;
 pub mod best_frame;
 pub mod context_menu;
@@ -24,6 +25,9 @@ pub use adjust::{
     format_exposure, format_tone, has_adjustments, quantize_exposure, quantize_tone, rel_path_of,
 };
 pub use best_frame::{non_best_paths, pick_best_frame};
+pub use a11y::{
+    filmstrip_item_label, filmstrip_label, grid_cell_label, grid_container_label, menu_item_label,
+};
 pub use context_menu::{
     ContextMenuAction, MenuItem, initial_selection, move_selection, photo_menu_items,
 };

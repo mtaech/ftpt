@@ -16,7 +16,10 @@ use gpui_kit::component::{
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::dock::DockPlacement;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarHandle as _};
-use gpui_kit::{Context, IntoElement, MouseButton, Window, div, img, prelude::*, px, uniform_list};
+use gpui_kit::{
+    Context, IntoElement, MouseButton, Role, TestSupportExt as _, Window, div, img, prelude::*,
+    px, uniform_list,
+};
 use photo_domain::{ColorLabel, Flag, Rating};
 
 use crate::actions::OpenDirectory;
@@ -97,7 +100,22 @@ pub fn render_photo_grid(
             }
         })
         .child(
+            // 无障碍（§13.4「网格无表格语义」）：网格 = Grid 容器（带行列数），
+            // 行 = Row，格子 = GridCell（带行列下标 + 名称 + 选中态）。
+            // 读屏软件靠 role + aria_label 才能念出「第几行第几列、哪张、选没选中」。
+            // `.test_support()` 是 gpui-base 的观察点（未启用 test-support 时原样返回），
+            // `a11y_smoke` 用它把 role / label / selected 读回来做断言。
             div()
+                .id("photo-grid-a11y")
+                .role(Role::Grid)
+                .aria_label(crate::model::grid_container_label(
+                    state.display_order.len(),
+                    cols,
+                    state.selected_indices.len(),
+                ))
+                .aria_row_count(row_count)
+                .aria_column_count(cols)
+                .test_support()
                 .relative()
                 .size_full()
                 .child(
@@ -112,14 +130,29 @@ pub fn render_photo_grid(
                                 let groups_in_row = &state.stack_groups[start..end];
 
                                 rows.push(
-                                    div().w_full().pb(px(8.)).child(
+                                    div()
+                                        .id(("grid-row", row_idx as usize))
+                                        .role(Role::Row)
+                                        .aria_row_index(row_idx as usize)
+                                        .test_support()
+                                        .w_full()
+                                        .pb(px(8.))
+                                        .child(
                                         h_flex()
                                             .w_full()
                                             .gap(px(8.))
                                             .children(groups_in_row.iter().enumerate().map(
                                                 |(c_idx, group)| {
                                                     let global_group_idx = start + c_idx;
-                                                    render_grid_cell(state, group, global_group_idx, thumb_edge, cx)
+                                                    render_grid_cell(
+                                                        state,
+                                                        group,
+                                                        global_group_idx,
+                                                        thumb_edge,
+                                                        cols,
+                                                        row_count,
+                                                        cx,
+                                                    )
                                                 },
                                             ))
                                             .when(groups_in_row.len() < cols, |this| {
@@ -281,11 +314,16 @@ fn estimate_grid_width(state: &AppState, window: &mut Window, cx: &mut Context<A
 fn render_grid_cell(
     state: &AppState,
     group: &crate::model::stacks::StackGroup,
-    _group_idx: usize,
+    group_idx: usize,
     thumb_edge: f32,
+    cols: usize,
+    row_count: usize,
     cx: &Context<AppState>,
 ) -> impl IntoElement {
     let active_item_idx = group.active;
+    // 表格语义里的行列下标（0 基）：uniform_list 按行喂数据，格子位置由组序号推出
+    let cell_row = group_idx / cols.max(1);
+    let cell_col = group_idx % cols.max(1);
     let meta = state.items.get(active_item_idx);
 
     let is_selected = state.selected_indices.contains(&active_item_idx);
@@ -419,6 +457,22 @@ fn render_grid_cell(
                 },
             ),
         )
+        // 表格语义（§13.4）：角色 + 名称 + 行列下标 + 选中态。
+        // 名称由 model::a11y 的纯函数拼（可单测）：文件名 + 已选中 + N 星 + Pick/Reject + 物种。
+        .role(Role::GridCell)
+        .aria_label(crate::model::grid_cell_label(
+            &file_name,
+            is_selected,
+            rating,
+            flag,
+            taxon_name.as_deref(),
+        ))
+        .aria_selected(is_selected)
+        .aria_row_index(cell_row)
+        .aria_column_index(cell_col)
+        .aria_row_count(row_count)
+        .aria_column_count(cols)
+        .test_support()
         // ── 1. 图片区 ──
         // 正方形裁切（§9.5）：边长由网格容器实测宽度推出。以前写死 170px，侧栏一收
         // cell 变宽，ObjectFit::Cover 就把照片裁成 1.9:1 的扁横条，观感很差。
