@@ -12,6 +12,7 @@ use photo_engine::folder_db::FolderDb;
 use photo_engine::global_db::GlobalDb;
 use photo_engine::undo::OpJournal;
 
+use gpui_kit::component::combobox::ComboboxState;
 use gpui_kit::component::dock::{DockArea, DockEvent, DockPlacement};
 use gpui_kit::component::input::InputState;
 use gpui_kit::component::slider::{SliderEvent, SliderState};
@@ -100,6 +101,22 @@ impl SearchableListItem for ChoiceOption {
 }
 
 pub type ChoiceSelectState = SelectState<SearchableVec<ChoiceOption>>;
+
+/// 多选下拉状态（镜头 / 物种筛选器，§13.3）：候选项随目录变化，扫描后重建
+pub type ChoiceComboboxState = ComboboxState<SearchableVec<ChoiceOption>>;
+
+/// 由标签列表构造下拉候选项（value = label，多选筛选按原字符串比对）
+fn options_from_labels(labels: Vec<String>) -> SearchableVec<ChoiceOption> {
+    SearchableVec::new(
+        labels
+            .into_iter()
+            .map(|label| ChoiceOption {
+                value: label.clone().into(),
+                label: label.into(),
+            })
+            .collect::<Vec<_>>(),
+    )
+}
 
 /// 构造静态下拉选项（value/label 成对，顺序即显示顺序）
 pub fn choice_options(items: &[(&str, &str)]) -> SearchableVec<ChoiceOption> {
@@ -214,6 +231,17 @@ pub struct AppState {
     /// 最近一次批量操作结果（含「Ctrl+Z 可撤销」提示）。状态栏消息会被随后的重扫
     /// 「扫描完成，共 N 张照片」覆盖，所以在这里留一份常驻，左栏批量面板显示。
     pub batch_result: Option<String>,
+
+    // ── 多选筛选器（§13.3：镜头 / 物种；筛选栏展开面板里的两个可搜索多选下拉）──
+    /// 镜头多选（候选 = 当前目录照片的 EXIF lens）
+    pub lens_filter_select: Option<Entity<ChoiceComboboxState>>,
+    /// 物种多选（候选 = 顶层展示名 + 各主体展示名）
+    pub species_filter_select: Option<Entity<ChoiceComboboxState>>,
+    /// 候选下拉的选中项由 criteria 驱动，改动经这两个订阅写回
+    pub _lens_filter_sub: Option<Subscription>,
+    pub _species_filter_sub: Option<Subscription>,
+    /// 已经同步过候选项的扫描世代：与 scan_generation 不同才重建（避免每帧重设）
+    pub filter_options_generation: u64,
 
     // ── 派生管线 ──
     pub criteria: FilterCriteria,
@@ -707,6 +735,11 @@ impl AppState {
             rename_template_input: None,
             batch_ignore_filter: false,
             batch_result: None,
+            lens_filter_select: None,
+            species_filter_select: None,
+            _lens_filter_sub: None,
+            _species_filter_sub: None,
+            filter_options_generation: 0,
 
             criteria: default_filter_criteria(),
             sort_by: SortBy::FileName,
@@ -1017,6 +1050,47 @@ impl AppState {
         }
         if let Some(input) = self.export_template_input.clone() {
             self.export.template = input.read(cx).value().to_string();
+        }
+    }
+
+    // ── 多选筛选器（§13.3）──
+
+    /// 重建镜头 / 物种下拉的候选项（每次扫描完成后一次，渲染期经 defer_in 调用）。
+    ///
+    /// 候选项来自当前目录（镜头 = EXIF lens、物种 = 顶层展示名 + 主体展示名），
+    /// 选中集始终以 criteria 为准——**候选里找不到的旧筛选值不会在这里被清掉**，
+    /// 用户仍能在筛选栏 chip 上看到并手动清除（避免切换目录时静默改筛选）。
+    pub fn sync_filter_option_selects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter_options_generation = self.scan_generation;
+
+        let lens_options = options_from_labels(crate::model::filter::lens_options(&self.items));
+        let taxon_options = options_from_labels(crate::model::filter::taxon_options(&self.items));
+        let lens_selected: Vec<SharedString> = self
+            .criteria
+            .lens_filter
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect();
+        let taxon_selected: Vec<SharedString> = self
+            .criteria
+            .taxon_names
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect();
+
+        if let Some(select) = self.lens_filter_select.clone() {
+            select.update(cx, |state, cx| {
+                state.set_items(lens_options, window, cx);
+                state.set_selected_values(&lens_selected, window, cx);
+            });
+        }
+        if let Some(select) = self.species_filter_select.clone() {
+            select.update(cx, |state, cx| {
+                state.set_items(taxon_options, window, cx);
+                state.set_selected_values(&taxon_selected, window, cx);
+            });
         }
     }
 

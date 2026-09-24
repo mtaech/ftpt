@@ -32,8 +32,8 @@ pub use export::{
     ExportDraft, LONG_EDGE_OPTIONS, QUALITY_OPTIONS, export_targets, unique_output_path,
 };
 pub use filter::{
-    FilterCriteria, default_filter_criteria, filter_captures, has_active_filters,
-    parse_focal_length_mm,
+    FilterCriteria, default_filter_criteria, filter_captures, has_active_filters, lens_options,
+    parse_focal_length_mm, taxon_options,
 };
 pub use preview_math::{
     clamp_pan_axis, exceeds_master_res, fit_scale, pan_after_cursor_zoom, preview_center_offset,

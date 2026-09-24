@@ -6,6 +6,7 @@
 use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
+    combobox::Combobox,
     h_flex,
     select::Select,
     tag::Tag,
@@ -19,11 +20,19 @@ use crate::state::AppState;
 
 pub fn render_filter_bar(
     state: &AppState,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<AppState>,
 ) -> impl IntoElement + use<> {
     let has_filter = has_active_filters(&state.criteria);
     let is_expanded = state.filter_bar_expanded;
+
+    // 镜头 / 物种下拉的候选项随目录变化：扫描完成后重建一次。
+    // 渲染期才有 window（set_items 需要），所以走 defer_in 把实体先归还再改。
+    if state.filter_options_generation != state.scan_generation {
+        cx.defer_in(window, |state, window, cx| {
+            state.sync_filter_option_selects(window, cx);
+        });
+    }
 
     v_flex()
         .w_full()
@@ -189,7 +198,16 @@ pub fn render_filter_bar(
                                     ),
                                 )
                             },
-                        ),
+                        )
+                        // 镜头 / 物种多选：激活后在折叠行里给出可清除的 chip
+                        .when(!state.criteria.lens_filter.is_empty(), |this| {
+                            let values = state.criteria.lens_filter.clone();
+                            this.child(multi_value_chip(MultiFilter::Lens, &values, cx))
+                        })
+                        .when(!state.criteria.taxon_names.is_empty(), |this| {
+                            let values = state.criteria.taxon_names.clone();
+                            this.child(multi_value_chip(MultiFilter::Taxon, &values, cx))
+                        }),
                 )
                 // 右侧：排序选项与网格列数
                 .child(
@@ -535,6 +553,68 @@ pub fn render_filter_bar(
                                 }),
                             )),
                     )
+                    // 5. 镜头（多选 + 可搜索；候选 = 当前目录照片的 EXIF lens）
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .w(px(60.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("镜头"),
+                            )
+                            .when_some(state.lens_filter_select.clone(), |this, select| {
+                                this.child(
+                                    div().w(px(300.)).child(
+                                        Combobox::new(&select)
+                                            .placeholder("全部镜头")
+                                            .menu_width(px(320.))
+                                            .menu_max_h(px(320.))
+                                            .search_placeholder("搜索镜头…")
+                                            .cleanable(true),
+                                    ),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("多选：命中任一即保留（候选来自本目录 EXIF）"),
+                            ),
+                    )
+                    // 6. 物种（多选 + 可搜索；候选 = 顶层展示名 + 各主体展示名）
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .w(px(60.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("物种"),
+                            )
+                            .when_some(state.species_filter_select.clone(), |this, select| {
+                                this.child(
+                                    div().w(px(300.)).child(
+                                        Combobox::new(&select)
+                                            .placeholder("全部物种")
+                                            .menu_width(px(320.))
+                                            .menu_max_h(px(320.))
+                                            .search_placeholder("搜索物种…")
+                                            .cleanable(true),
+                                    ),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("多选：命中任一即保留（含多主体的次要物种）"),
+                            ),
+                    )
                     // 重置全部按钮
                     .when(has_filter, |this| {
                         this.child(
@@ -545,6 +625,13 @@ pub fn render_filter_bar(
                                     .label("重置全部筛选")
                                     .on_click(cx.listener(|state, _, _, cx| {
                                         state.criteria = default_filter_criteria();
+                                        // 两个多选下拉也要清，否则界面上还勾着已重置的选项
+                                        if let Some(select) = state.lens_filter_select.clone() {
+                                            select.update(cx, |s, cx| s.clear_selection(cx));
+                                        }
+                                        if let Some(select) = state.species_filter_select.clone() {
+                                            select.update(cx, |s, cx| s.clear_selection(cx));
+                                        }
                                         state.recompute_pipeline();
                                         cx.notify();
                                     })),
@@ -553,6 +640,80 @@ pub fn render_filter_bar(
                     }),
             )
         })
+}
+
+/// 多值筛选的种类（chip 的 × 要同时清 criteria 与下拉选中集）
+#[derive(Clone, Copy)]
+enum MultiFilter {
+    Lens,
+    Taxon,
+}
+
+/// 多值筛选的激活 chip：显示前 2 个值（更多则「等 N 项」），× 一次清空该筛选。
+///
+/// 清除必须**同时**清 criteria 与下拉选中集：只清 criteria 的话下拉里还勾着，
+/// 用户再点一下就会把刚清掉的筛选值加回来（候选同步只在扫描后跑，不会兜这个底）。
+fn multi_value_chip(
+    kind: MultiFilter,
+    values: &[String],
+    cx: &Context<AppState>,
+) -> impl IntoElement {
+    let shown = values
+        .iter()
+        .take(2)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" / ");
+    let suffix = if values.len() > 2 {
+        format!(" 等 {} 项", values.len())
+    } else {
+        String::new()
+    };
+    let text = match kind {
+        MultiFilter::Lens => format!("镜头: {shown}{suffix}"),
+        MultiFilter::Taxon => format!("物种: {shown}{suffix}"),
+    };
+
+    Tag::secondary()
+        .small()
+        .rounded_full()
+        .child(
+            h_flex()
+                .items_center()
+                .gap_1()
+                .child(text)
+                .child(
+                    Button::new(match kind {
+                        MultiFilter::Lens => "clear-lens-filter",
+                        MultiFilter::Taxon => "clear-taxon-filter",
+                    })
+                    .icon(IconName::Close)
+                    .ghost()
+                    .xsmall()
+                    .tooltip(match kind {
+                        MultiFilter::Lens => "清除镜头筛选",
+                        MultiFilter::Taxon => "清除物种筛选",
+                    })
+                    .on_click(cx.listener(move |state, _, _window, cx| {
+                        match kind {
+                            MultiFilter::Lens => {
+                                state.criteria.lens_filter.clear();
+                                if let Some(select) = state.lens_filter_select.clone() {
+                                    select.update(cx, |s, cx| s.clear_selection(cx));
+                                }
+                            }
+                            MultiFilter::Taxon => {
+                                state.criteria.taxon_names.clear();
+                                if let Some(select) = state.species_filter_select.clone() {
+                                    select.update(cx, |s, cx| s.clear_selection(cx));
+                                }
+                            }
+                        }
+                        state.recompute_pipeline();
+                        cx.notify();
+                    })),
+                ),
+        )
 }
 
 fn render_filter_chip(

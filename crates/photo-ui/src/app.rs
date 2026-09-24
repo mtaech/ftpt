@@ -7,6 +7,7 @@
 //! - 模态弹窗系统（设置、导入、导出、查重、纠错、连拍选优、批量确认）
 //! - 全局动作分发与快捷键（§5.4 Esc 优先级链与 §5.6 键位总表）
 
+use gpui_kit::component::combobox::{ComboboxEvent, ComboboxState};
 use gpui_kit::component::dock::DockPlacement;
 use gpui_kit::component::searchable_list::{SearchableListDelegate as _, SearchableVec};
 use gpui_kit::component::select::{SelectEvent, SelectState};
@@ -26,6 +27,16 @@ use crate::views::dialogs::*;
 use crate::views::*;
 
 pub type AppRoot = AppState;
+
+/// 从多选下拉事件里取当前选中值：Change（每次勾选）与 Confirm（关窗）都带完整选中集。
+fn combobox_values(
+    event: &ComboboxEvent<SearchableVec<crate::state::app_state::ChoiceOption>>,
+) -> Vec<String> {
+    let values = match event {
+        ComboboxEvent::Change(values) | ComboboxEvent::Confirm(values) => values,
+    };
+    values.iter().map(|v| v.to_string()).collect()
+}
 
 impl AppState {
     /// 从当前上下文构建应用状态；设置页的主题色输入框需要 Window 才能创建。
@@ -108,6 +119,45 @@ impl AppState {
         state.grid_cols_select = Some(cols_select);
         state._sort_select_sub = Some(sort_select_sub);
         state._grid_cols_select_sub = Some(cols_select_sub);
+        // 多选筛选器（§13.3）：镜头 / 物种。候选项在扫描完成后由
+        // sync_filter_option_selects 重建；选中集由 criteria 驱动，这里订阅写回。
+        let lens_filter_select = cx.new(|cx| {
+            ComboboxState::new(SearchableVec::new(Vec::new()), Vec::new(), window, cx)
+                .multiple(true)
+                .searchable(true)
+        });
+        let lens_sub = cx.subscribe(
+            &lens_filter_select,
+            |this,
+             _entity,
+             event: &ComboboxEvent<SearchableVec<crate::state::app_state::ChoiceOption>>,
+             cx| {
+                this.criteria.lens_filter = combobox_values(event);
+                this.recompute_pipeline();
+                cx.notify();
+            },
+        );
+        let species_filter_select = cx.new(|cx| {
+            ComboboxState::new(SearchableVec::new(Vec::new()), Vec::new(), window, cx)
+                .multiple(true)
+                .searchable(true)
+        });
+        let species_sub = cx.subscribe(
+            &species_filter_select,
+            |this,
+             _entity,
+             event: &ComboboxEvent<SearchableVec<crate::state::app_state::ChoiceOption>>,
+             cx| {
+                this.criteria.taxon_names = combobox_values(event);
+                this.recompute_pipeline();
+                cx.notify();
+            },
+        );
+        state.lens_filter_select = Some(lens_filter_select);
+        state.species_filter_select = Some(species_filter_select);
+        state._lens_filter_sub = Some(lens_sub);
+        state._species_filter_sub = Some(species_sub);
+
         // 导入弹窗输入框：目标根目录 / 重命名模板
         state.import_dest_input =
             Some(cx.new(|cx| {

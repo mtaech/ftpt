@@ -38,6 +38,50 @@ pub struct FilterCriteria {
     pub keyword_filter: Vec<String>,
 }
 
+/// 从当前目录照片收集「镜头」筛选候选项（去重 + 排序；空白忽略）。
+///
+/// 候选只用于下拉展示；筛选语义仍由 matches_criteria 的 lens_filter 精确匹配决定
+/// （候选里没有的旧筛选值不会被悄悄清掉，见 §13.3）。
+pub fn lens_options(items: &[CaptureMeta]) -> Vec<String> {
+    let mut out: Vec<String> = items
+        .iter()
+        .filter_map(|m| m.lens.as_deref())
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// 从当前目录照片收集「物种」筛选候选项：顶层展示名 + 每个主体的展示名。
+///
+/// 为什么必须带主体名：筛选语义是「任一主体命中即保留」（见 matches_criteria），
+/// 只列顶层名会让多主体照片的次要物种根本选不到。占位名「未识别」不作为候选。
+pub fn taxon_options(items: &[CaptureMeta]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for meta in items {
+        if let Some(name) = meta
+            .taxon_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+        {
+            out.push(name.to_string());
+        }
+        for subject in &meta.subjects {
+            let name = subject.display_name.trim();
+            if !name.is_empty() && name != "<未识别>" {
+                out.push(name.to_string());
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 impl From<FilterCriteria> for photo_domain::FilterCriteria {
     fn from(c: FilterCriteria) -> Self {
         photo_domain::FilterCriteria {

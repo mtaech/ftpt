@@ -46,6 +46,52 @@ fn make_meta(base_name: &str, primary_path: &str, primary_format: &str) -> Captu
 }
 
 #[test]
+fn test_lens_options_dedup_sorted_and_skips_blank() {
+    let mut a = make_meta("a", "/p/a.jpg", "JPEG");
+    a.lens = Some("RF24-70mm F2.8".to_string());
+    let mut b = make_meta("b", "/p/b.jpg", "JPEG");
+    b.lens = Some(" RF24-70mm F2.8 ".to_string()); // 前后空白归一后与 a 相同
+    let mut c = make_meta("c", "/p/c.jpg", "JPEG");
+    c.lens = Some("".to_string()); // 空串不进候选
+    let d = make_meta("d", "/p/d.jpg", "JPEG"); // None 不进候选
+    let mut e = make_meta("e", "/p/e.jpg", "JPEG");
+    e.lens = Some("EF100-400mm".to_string());
+
+    assert_eq!(
+        lens_options(&[a, b, c, d, e]),
+        vec!["EF100-400mm".to_string(), "RF24-70mm F2.8".to_string()]
+    );
+}
+
+#[test]
+fn test_taxon_options_include_subjects_and_skip_unrecognized() {
+    let mut a = make_meta("a", "/p/a.jpg", "JPEG");
+    a.taxon_name = Some("大山雀".to_string());
+    a.subjects = vec![
+        photo_domain::SubjectSummary {
+            display_name: "大山雀".to_string(),
+            confidence: Some(70.0),
+        },
+        photo_domain::SubjectSummary {
+            display_name: "远东山雀".to_string(),
+            confidence: Some(55.0),
+        },
+    ];
+    let mut b = make_meta("b", "/p/b.jpg", "JPEG");
+    // 主体识别失败时占位名不进候选（选了也永远筛不到东西）
+    b.subjects = vec![photo_domain::SubjectSummary {
+        display_name: "<未识别>".to_string(),
+        confidence: None,
+    }];
+
+    // 去重 + 按码位排序：大 (e5…) < 远 (e8…)
+    assert_eq!(
+        taxon_options(&[a, b]),
+        vec!["大山雀".to_string(), "远东山雀".to_string()]
+    );
+}
+
+#[test]
 fn test_filter_captures_date_taken_null_excluded_when_range_set() {
     let mut criteria = FilterCriteria::default();
     criteria.date_from = Some(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap());
