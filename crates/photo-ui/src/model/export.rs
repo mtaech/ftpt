@@ -73,6 +73,37 @@ impl ExportDraft {
     }
 }
 
+/// 用当前草稿新建一个预设（手册 §9.10「保存当前参数为预设」）：
+/// 参数钳制与 ExportPreset::clamped 同口径，存进配置后与 chip 套用路径完全一致。
+pub fn preset_from_draft(
+    name: impl Into<String>,
+    draft: &ExportDraft,
+) -> photo_config::ExportPreset {
+    // 先按导出执行前同一套钳制归一草稿：否则「质量滑杆拖到 0」会存下一个 0 值预设，
+    // 而它与界面上的草稿永远对不上（删除按钮找不到它）
+    let d = draft.clone().clamped();
+    photo_config::ExportPreset {
+        name: name.into(),
+        long_edge: d.long_edge,
+        quality: d.quality,
+        template: d.template,
+    }
+    .clamped()
+}
+
+/// 当前草稿恰好等于哪个已存预设（判定口径与预设 chip 的选中态一致）。
+/// None = 当前参数不是任何预设 → 「删除当前预设」应禁用，避免删错。
+pub fn preset_index_for_draft(
+    presets: &[photo_config::ExportPreset],
+    draft: &ExportDraft,
+) -> Option<usize> {
+    let d = draft.clone().clamped();
+    presets.iter().position(|p| {
+        let p = p.clone().clamped();
+        p.long_edge == d.long_edge && p.quality == d.quality && p.template == d.template
+    })
+}
+
 /// 长边档位（None = 原尺寸，不放大）。与手册 §9.10「长边」规格同义，避免手填越界值。
 pub const LONG_EDGE_OPTIONS: &[(Option<u32>, &str)] = &[
     (None, "原尺寸"),
@@ -167,6 +198,36 @@ mod tests {
         assert_eq!(d.long_edge, Some(2000));
         assert_eq!(d.quality, 85);
         assert_eq!(d.template, "{species}_{seq}");
+    }
+
+    #[test]
+    fn test_preset_from_draft_clamps_and_roundtrips_index() {
+        let d = ExportDraft {
+            dest_dir: "/out".to_string(),
+            long_edge: Some(0),
+            quality: 0,
+            template: "  {species} ".to_string(),
+        };
+        let p = preset_from_draft("网络分享", &d);
+        assert_eq!(p.name, "网络分享");
+        assert_eq!(p.long_edge, None, "长边 0 归一为原尺寸");
+        assert_eq!(p.quality, 1, "质量钳到 1");
+        assert_eq!(p.template, "  {species} ");
+
+        // 存进列表后，草稿参数一致 → 能定位到它（删除按钮据此启用）
+        let presets = vec![photo_config::ExportPreset::default(), p];
+        assert_eq!(preset_index_for_draft(&presets, &d), Some(1));
+    }
+
+    #[test]
+    fn test_preset_index_none_when_draft_differs() {
+        let presets = vec![photo_config::ExportPreset::default()];
+        let d = ExportDraft {
+            quality: 42,
+            ..Default::default()
+        };
+        assert_eq!(preset_index_for_draft(&presets, &d), None);
+        assert_eq!(preset_index_for_draft(&[], &ExportDraft::default()), None);
     }
 
     #[test]

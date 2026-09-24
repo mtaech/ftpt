@@ -211,6 +211,41 @@ pub fn render_info_tab(
                             div().child("")
                         }),
                 )
+                // 失败原因（手册 §9.7 的「失败阶段中文」）：2026-09-24 之前只是规格里的
+                // 一句话——failure_stage 全仓没有消费方，识别失败只显示「未识别」
+                .when(
+                    meta.failure_stage
+                        .is_some_and(|s| s != photo_domain::RecognitionFailureStage::None),
+                    |this| {
+                        this.child(
+                            div().text_xs().text_color(cx.theme().danger).child(format!(
+                                "失败原因：{}",
+                                meta.failure_stage
+                                    .map(|s| s.user_message())
+                                    .unwrap_or_default()
+                            )),
+                        )
+                    },
+                )
+                // 最接近候选（同 §9.7）：失败/待复核时给出「本来可能是谁」的上下文
+                .when(!meta.candidates.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!(
+                                "最接近：{}",
+                                meta.candidates
+                                    .iter()
+                                    .map(|c| match c.confidence {
+                                        Some(conf) => format!("{} {conf:.1}%", c.display_name),
+                                        None => c.display_name.clone(),
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(" · ")
+                            )),
+                    )
+                })
                 // 多主体：主主体在标题行，这里列出其余主体
                 .when(meta.subjects.len() > 1, |this| {
                     this.child(
@@ -234,8 +269,10 @@ pub fn render_info_tab(
                                     .text_color(cx.theme().muted_foreground)
                                     .child(format!("{}. {}", i + 2, s.display_name))
                                     .child(
+                                        // 与主主体同一口径：叫「相似度」而不是裸百分数
+                                        // （余弦相似度 × 100，不是概率，见 open-questions §1）
                                         s.confidence
-                                            .map(|c| format!("{c:.1}%"))
+                                            .map(|c| format!("相似度 {c:.1}%"))
                                             .unwrap_or_else(|| "–".to_string()),
                                     )
                                     .into_any_element()

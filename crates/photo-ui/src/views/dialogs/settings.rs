@@ -10,7 +10,7 @@ use gpui_kit::component::setting::{
     RenderOptions, SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings,
 };
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::Input,
@@ -736,6 +736,36 @@ fn build_recognition_page(app: &Entity<AppState>) -> SettingPage {
                 .title("推理模型与资产状态")
                 .description("内置 ONNX Runtime 本地模型权重与离线物种分类库")
                 .items(vec![
+                    SettingItem::new(
+                        "常驻识别器内存",
+                        SettingField::render({
+                            let app = app.clone();
+                            move |_options, _window, cx| {
+                                // 识别器是懒装配 + 常驻（避免每张重装 1-2 秒）；这里给显式释放入口
+                                let resident = app.read(cx).recognizer.lock().is_some();
+                                let app = app.clone();
+                                Button::new("release-recognizer")
+                                    .small()
+                                    .secondary()
+                                    .disabled(!resident)
+                                    .label(if resident {
+                                        "释放识别器（约 600MB）"
+                                    } else {
+                                        "识别器未装配"
+                                    })
+                                    .on_click(move |_, _, cx| {
+                                        crate::state::engine_ops::release_recognizer(
+                                            app.clone(),
+                                            cx,
+                                        );
+                                    })
+                            }
+                        }),
+                    )
+                    .layout(Axis::Vertical)
+                    .description("org_det + BioCLIP + 名录 embedding 常驻约 600MB；释放后下次识别/框选自动重新装配（约 1-2 秒），适合一批拍完不再识别时回收内存")
+                    .keywords(["识别", "内存", "释放", "模型", "BioCLIP", "memory", "release"]),
+
                     SettingItem::new(
                         "主体检测定位网络",
                         SettingField::render(|_options, _window, _cx| {

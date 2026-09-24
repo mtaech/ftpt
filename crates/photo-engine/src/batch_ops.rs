@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use photo_domain::{BatchOpType, Capture};
 
 use crate::ops;
+use crate::undo::UndoOp;
 
 /// 按 stem 扩展操作集（画面粒度，ADR 0006）：
 /// 把每个索引对应 capture 的同名兄弟文件（格式 ∈ `sync_formats`）并入操作集。
@@ -76,13 +77,28 @@ pub fn select_by_paths(captures: &[Capture], paths: &HashSet<String>) -> Vec<usi
         .collect()
 }
 
+/// 批量操作结果：逐 capture 摘要 + 逐文件撤销记录。
+///
+/// `results` 与历史形状一致（Ok = 成功摘要，Err = 失败摘要），用结构化字段而不是
+/// 「消息里是否含『失败』」来判定分类——文件名本身可能含该子串。
+#[derive(Debug, Default)]
+pub struct BatchOutcome {
+    /// 每个 capture 一条，顺序与 `indices` 一致
+    pub results: Vec<Result<String, String>>,
+    /// 逐文件撤销记录（仅成功文件；删除为回收站条目，可直接交给 `OpJournal`）
+    pub undo_ops: Vec<UndoOp>,
+    /// 成功的 capture 数
+    pub ok_count: usize,
+    /// 失败的 capture 数
+    pub fail_count: usize,
+    /// 已删除但无法记录撤销的文件数（平台不支持回收站回查等）
+    pub not_undoable: usize,
+}
+
 /// 执行批量操作，返回每个文件的结果（Ok = 成功消息，Err = 失败消息）。
 ///
-/// 结构化返回避免调用方按「消息里是否含『失败』」这种字符串判定分类——文件名
-/// 本身可能含该子串，导致成功项被误判为失败并漏记撤销日志。
-///
 /// `target_dir` — 复制/移动的目标目录（删除操作时可为 None）
-/// `on_progress` — 处理完每个文件后回调 (completed, total)
+/// `on_progress` — 处理完每个 capture 后回调 (completed, total)
 pub fn execute(
     source_captures: &[Capture],
     indices: &[usize],
@@ -90,17 +106,33 @@ pub fn execute(
     target_dir: Option<&Path>,
     on_progress: impl Fn(u32, u32),
 ) -> Vec<Result<String, String>> {
-    let mut results = Vec::new();
+    execute_journaled(source_captures, indices, op_type, target_dir, on_progress).results
+}
+
+/// 执行批量操作并产出撤销日志（UI 的 Ctrl+Z 靠它）。
+///
+/// 逐文件执行而不是按 capture 整体返回：一次拍摄可能有 JPG+NEF+XMP 多个源文件，
+/// 只成功的那些才记撤销，且每个文件各自的失败原因都报出来。
+pub fn execute_journaled(
+    source_captures: &[Capture],
+    indices: &[usize],
+    op_type: BatchOpType,
+    target_dir: Option<&Path>,
+    on_progress: impl Fn(u32, u32),
+) -> BatchOutcome {
+    let mut outcome = BatchOutcome::default();
     let total = indices.len() as u32;
 
     let target_dir = if op_type.needs_target_dir() {
         match target_dir {
             Some(d) if !d.as_os_str().is_empty() => Some(d),
             _ => {
-                return indices
+                outcome.results = indices
                     .iter()
                     .map(|_| Err("错误：目标目录未指定".to_string()))
                     .collect();
+                outcome.fail_count = indices.len();
+                return outcome;
             }
         }
     } else {
@@ -109,27 +141,62 @@ pub fn execute(
 
     for (i, &idx) in indices.iter().enumerate() {
         let Some(capture) = source_captures.get(idx) else { continue };
-        let name = &capture.base_name;
+        let name = capture.base_name.clone();
         let verb = op_type.action_label();
 
-        let result = match op_type {
-            BatchOpType::Copy => ops::copy_capture(capture, target_dir.unwrap(), false)
-                .map(|_| format!("{verb}: {}", name)),
-            BatchOpType::Delete => ops::delete_capture(capture)
-                .map(|_| format!("{verb}: {}", name)),
-            BatchOpType::Move => ops::move_capture(capture, target_dir.unwrap())
-                .map(|_| format!("{verb}: {}", name)),
-        };
+        let mut errors: Vec<String> = Vec::new();
+        for file in &capture.source_files {
+            let src = file.path.clone();
+            let dest = target_dir
+                .and_then(|d| src.file_name().map(|n| d.join(n)));
 
-        match result {
-            Ok(msg) => results.push(Ok(msg)),
-            Err(e) => results.push(Err(format!("{verb}失败: {} — {e}", name))),
+            match op_type {
+                BatchOpType::Copy => match ops::copy_file_to(&src, dest.as_deref().unwrap(), false) {
+                    Ok(()) => outcome.undo_ops.push(UndoOp::Copy {
+                        from: src,
+                        to: dest.unwrap(),
+                    }),
+                    Err(e) => errors.push(format!("{}: {e}", file_label(&src))),
+                },
+                BatchOpType::Move => match ops::move_file_to(&src, dest.as_deref().unwrap()) {
+                    Ok(()) => outcome.undo_ops.push(UndoOp::Move {
+                        from: src,
+                        to: dest.unwrap(),
+                    }),
+                    Err(e) => errors.push(format!("{}: {e}", file_label(&src))),
+                },
+                BatchOpType::Delete => match ops::delete_file_to_trash(&src) {
+                    Ok(Some(item)) => outcome.undo_ops.push(UndoOp::Trash {
+                        original: src,
+                        item,
+                    }),
+                    Ok(None) => outcome.not_undoable += 1,
+                    Err(e) => errors.push(format!("{}: {e}", file_label(&src))),
+                },
+            }
+        }
+
+        if errors.is_empty() {
+            outcome.ok_count += 1;
+            outcome.results.push(Ok(format!("{verb}: {name}")));
+        } else {
+            outcome.fail_count += 1;
+            outcome
+                .results
+                .push(Err(format!("{verb}失败: {name} — {}", errors.join("; "))));
         }
 
         on_progress(i as u32 + 1, total);
     }
 
-    results
+    outcome
+}
+
+/// 错误行里的文件名（路径整体太长，报告用文件名足够定位）
+fn file_label(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 /// capture 的任一源文件格式是否命中 `formats`（大小写不敏感，如 "NEF"/"nef"）
@@ -291,6 +358,78 @@ mod tests {
         let results = execute(&source, &[0], BatchOpType::Delete, None, |_, _| {});
         assert!(results.iter().any(|r| r.as_ref().is_ok_and(|s| s.contains("删除"))));
         assert!(results.iter().all(|r| r.is_ok()));
+    }
+
+    #[test]
+    fn test_execute_journaled_move_records_undo_and_restores() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        create_files(&src, &[("img_a", "JPG"), ("img_b", "JPG")]);
+        let caps = scan(&src);
+        let indices: Vec<usize> = (0..caps.len()).collect();
+
+        let outcome =
+            execute_journaled(&caps, &indices, BatchOpType::Move, Some(dst.path()), |_, _| {});
+        assert_eq!(outcome.ok_count, 2);
+        assert_eq!(outcome.fail_count, 0);
+        assert_eq!(outcome.undo_ops.len(), 2, "两个文件 = 两条撤销记录");
+        assert!(!src.path().join("img_a.JPG").exists());
+        assert!(dst.path().join("img_a.JPG").exists());
+
+        let undone = crate::undo::undo_ops(&outcome.undo_ops);
+        assert!(undone.iter().all(|o| o.result.is_ok()), "{undone:?}");
+        assert!(src.path().join("img_a.JPG").exists() && src.path().join("img_b.JPG").exists());
+        assert!(!dst.path().join("img_a.JPG").exists());
+    }
+
+    #[test]
+    fn test_execute_journaled_copy_records_undo_of_copies() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        create_files(&src, &[("copy_me", "JPG")]);
+        let caps = scan(&src);
+
+        let outcome =
+            execute_journaled(&caps, &[0], BatchOpType::Copy, Some(dst.path()), |_, _| {});
+        assert_eq!(outcome.ok_count, 1);
+        assert_eq!(outcome.undo_ops.len(), 1);
+        assert!(matches!(outcome.undo_ops[0], UndoOp::Copy { .. }));
+
+        let undone = crate::undo::undo_ops(&outcome.undo_ops);
+        assert!(undone[0].result.is_ok(), "{:?}", undone[0].result);
+        assert!(src.path().join("copy_me.JPG").exists(), "源文件保留");
+        assert!(!dst.path().join("copy_me.JPG").exists(), "副本被撤销删除");
+    }
+
+    #[test]
+    fn test_execute_journaled_delete_trashes_and_can_undo() {
+        let dir = TempDir::new().unwrap();
+        create_files(&dir, &[("gone", "RW2")]);
+        let caps = scan(&dir);
+
+        let outcome = execute_journaled(&caps, &[0], BatchOpType::Delete, None, |_, _| {});
+        assert!(outcome.results[0].is_ok(), "{:?}", outcome.results[0]);
+        assert!(!dir.path().join("gone.RW2").exists(), "文件应已进回收站");
+        if outcome.not_undoable == 0 {
+            assert!(matches!(outcome.undo_ops[0], UndoOp::Trash { .. }));
+            let undone = crate::undo::undo_ops(&outcome.undo_ops);
+            assert!(undone[0].result.is_ok(), "{:?}", undone[0].result);
+            assert!(dir.path().join("gone.RW2").exists(), "撤销后文件回到原处");
+        }
+    }
+
+    #[test]
+    fn test_execute_journaled_reports_missing_target_dir() {
+        let dir = TempDir::new().unwrap();
+        create_files(&dir, &[("a", "JPG")]);
+        let caps = scan(&dir);
+
+        let outcome = execute_journaled(&caps, &[0], BatchOpType::Move, None, |_, _| {});
+        assert_eq!(outcome.fail_count, 1);
+        assert!(outcome.undo_ops.is_empty(), "失败时不该有撤销记录");
+        assert!(outcome.results[0]
+            .as_ref()
+            .is_err_and(|e| e.contains("目标目录未指定")));
     }
 
     #[test]

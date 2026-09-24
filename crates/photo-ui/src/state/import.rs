@@ -275,6 +275,9 @@ pub fn execute(entity: Entity<AppState>, cx: &mut App) {
         state.import.running = true;
         state.import.result = None;
         state.import.error = None;
+        // 目标目录记忆（#14 导入侧）：与导出侧同一套做法，落盘失败不影响导入
+        state.app_config.import_dir = Some(dest.clone());
+        state.save_config();
         state.import.progress = Some((0, state.import.plan_count() as u32, String::new()));
         cx.notify();
         Some((state.import.generation, plan, dest, state.import.mode))

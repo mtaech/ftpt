@@ -40,6 +40,8 @@ fn make_meta(base_name: &str, primary_path: &str, primary_format: &str) -> Captu
         recognition_status: None,
         taxon_bbox: None,
         subjects: vec![],
+        failure_stage: None,
+        candidates: Vec::new(),
     }
 }
 

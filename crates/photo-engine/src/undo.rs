@@ -8,11 +8,41 @@
 //! 全同步；错误处理复用 [`crate::ops::OpError`]（thiserror）。
 //! 日志仅存内存（重启失效可接受），由 `photo-ui` 的 `AppState` 持有。
 
+use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::ops::OpError;
+
+/// 回收站条目的最小快照（撤销删除用）。
+///
+/// 只保留恢复所需字段，**不直接存 `trash::TrashItem`**：后者依赖 trash crate 的
+/// 平台模块（`os_limited` 仅 Linux freedesktop / Windows 存在），存进跨平台的
+/// `UndoOp` 会让 macOS 构建编不过。恢复时再回填成 `TrashItem`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrashedItem {
+    /// 平台相关标识：Linux 为 .trashinfo 绝对路径，Windows 为 shell 显示名
+    pub id: OsString,
+    /// 原文件名
+    pub name: String,
+    /// 原父目录（Linux 上为 canonicalize 之后的路径）
+    pub original_parent: PathBuf,
+    /// 删除时刻（Unix 秒）
+    pub time_deleted: i64,
+}
+
+/// 本平台是否支持通过系统回收站 API 定位/恢复条目（Linux freedesktop / Windows）
+#[cfg(any(
+    target_os = "windows",
+    all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")))
+))]
+const CAN_RESTORE_FROM_TRASH: bool = true;
+#[cfg(not(any(
+    target_os = "windows",
+    all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")))
+)))]
+const CAN_RESTORE_FROM_TRASH: bool = false;
 
 /// 单条逆向操作（文件粒度；from/to 均为完整路径）
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,13 +53,21 @@ pub enum UndoOp {
     Rename { from: PathBuf, to: PathBuf },
     /// 复制：from → to（逆操作 = 删除副本 to）
     Copy { from: PathBuf, to: PathBuf },
+    /// 删除：移到回收站（逆操作 = 从回收站恢复到 original）
+    Trash {
+        /// 原路径
+        original: PathBuf,
+        /// 回收站条目（恢复用）
+        item: TrashedItem,
+    },
 }
 
 impl UndoOp {
-    /// 撤销时操作的目标路径（副本/移动后的位置）
+    /// 撤销时操作的目标路径（副本/移动后的位置；删除 = 要恢复回的原路径）
     pub fn target(&self) -> &Path {
         match self {
             UndoOp::Move { to, .. } | UndoOp::Rename { to, .. } | UndoOp::Copy { to, .. } => to,
+            UndoOp::Trash { original, .. } => original,
         }
     }
 
@@ -39,6 +77,7 @@ impl UndoOp {
             UndoOp::Move { from, .. } | UndoOp::Rename { from, .. } | UndoOp::Copy { from, .. } => {
                 from
             }
+            UndoOp::Trash { original, .. } => original,
         }
     }
 }
@@ -145,6 +184,50 @@ fn undo_one(op: &UndoOp) -> Result<(), UndoError> {
             std::fs::remove_file(to).map_err(OpError::from)?;
             Ok(())
         }
+        UndoOp::Trash { original, item } => {
+            // 原位置被占用时报错跳过，避免恢复过程覆盖新文件（与 Move/Rename 同口径）
+            if original.exists() {
+                return Err(UndoError::Skipped(format!(
+                    "原位置已有文件，为避免覆盖跳过: {}",
+                    original.display()
+                )));
+            }
+            restore_from_trash(item)
+        }
+    }
+}
+
+/// 从系统回收站恢复一个条目（Linux freedesktop / Windows）。
+/// 平台不支持、条目已不在回收站 → 报可读原因，不算崩溃。
+fn restore_from_trash(item: &TrashedItem) -> Result<(), UndoError> {
+    if !CAN_RESTORE_FROM_TRASH {
+        return Err(UndoError::Skipped(
+            "当前平台不支持从回收站恢复，请在系统回收站里手动还原".into(),
+        ));
+    }
+    #[cfg(any(
+        target_os = "windows",
+        all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")))
+    ))]
+    {
+        let trash_item = trash::TrashItem {
+            id: item.id.clone(),
+            name: item.name.clone(),
+            original_parent: item.original_parent.clone(),
+            time_deleted: item.time_deleted,
+        };
+        trash::os_limited::restore_all([trash_item])
+            .map_err(|e| UndoError::Failed(OpError::Trash(e)))
+    }
+    #[cfg(not(any(
+        target_os = "windows",
+        all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")))
+    )))]
+    {
+        let _ = item;
+        Err(UndoError::Skipped(
+            "当前平台不支持从回收站恢复".into(),
+        ))
     }
 }
 
@@ -420,5 +503,65 @@ mod tests {
         // 只有 b 被改回；a 仍处于移动后状态
         assert!(b_from.exists() && !b_to.exists());
         assert!(!a_from.exists() && a_to.exists());
+    }
+
+    #[test]
+    fn test_undo_trash_restores_deleted_file() {
+        // 走真实系统回收站：平台不支持/回收站不可用时自行跳过（macOS 构建不该因此变红）
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("trash_undo_probe.jpg");
+        std::fs::write(&path, b"trash-undo-payload").unwrap();
+
+        let item = match crate::ops::delete_file_to_trash(&path) {
+            Ok(Some(item)) => item,
+            Ok(None) => return,
+            Err(e) => {
+                eprintln!("回收站不可用，跳过该用例: {e}");
+                return;
+            }
+        };
+        assert!(!path.exists(), "文件应已进回收站");
+
+        let mut journal = OpJournal::new();
+        journal.record(vec![UndoOp::Trash {
+            original: path.clone(),
+            item,
+        }]);
+        let outcomes = journal.undo_last();
+        assert!(outcomes[0].result.is_ok(), "{:?}", outcomes[0].result);
+        assert_eq!(std::fs::read(&path).unwrap(), b"trash-undo-payload");
+    }
+
+    #[test]
+    fn test_undo_trash_skips_when_original_occupied() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("trash_occupied_probe.jpg");
+        std::fs::write(&path, b"first").unwrap();
+
+        let item = match crate::ops::delete_file_to_trash(&path) {
+            Ok(Some(item)) => item,
+            _ => return,
+        };
+        let cleanup_item = item.clone();
+
+        // 撤销前原位置又出现同名文件 → 跳过，不覆盖
+        std::fs::write(&path, b"new occupant").unwrap();
+        let mut journal = OpJournal::new();
+        journal.record(vec![UndoOp::Trash {
+            original: path.clone(),
+            item,
+        }]);
+        let outcomes = journal.undo_last();
+        assert!(is_skipped(&outcomes[0].result), "{:?}", outcomes[0].result);
+        assert_eq!(std::fs::read(&path).unwrap(), b"new occupant");
+
+        // 清理：移走占位文件后把条目恢复回去，不在用户回收站里留垃圾
+        std::fs::remove_file(&path).unwrap();
+        let cleanup = undo_ops(&[UndoOp::Trash {
+            original: path.clone(),
+            item: cleanup_item,
+        }]);
+        assert!(cleanup[0].result.is_ok(), "{:?}", cleanup[0].result);
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
     }
 }

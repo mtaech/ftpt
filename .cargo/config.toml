@@ -1,3 +1,12 @@
+# 构建资源限制（2026-09-24）：cargo 默认吃满全部核心，构建时前台会卡。
+# jobs：并发上限，给前台留出核心（16 核机器取 8）。
+# rustc-wrapper：把 rustc 及其派生的链接器降到 nice 19 / ionice best-effort 最低档，
+#   前台一旦需要 CPU/磁盘就优先得到；对构建只是变慢，不会失败。
+# 只想要完全不限速时：cargo build -j 16（或临时注释掉这两行）。
+[build]
+jobs = 8
+rustc-wrapper = "scripts/nice-rustc.sh"
+
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-L", "local-lib"]
 

@@ -13,7 +13,7 @@ use gpui_kit::component::{
 use gpui_kit::{Context, IntoElement, SharedString, div, prelude::*, px};
 
 use crate::model::filter::has_active_filters;
-use crate::state::engine_ops::{defer_entity_action, start_scan};
+use crate::state::engine_ops::{defer_entity_action, pick_batch_target_dir, start_scan};
 use crate::state::{ActiveDialog, AppState};
 
 /// 目录列表里的一行（子目录 / 收藏 / 最近打开共用）。
@@ -295,6 +295,9 @@ pub fn render_batch_ops_tab(
     cx: &mut Context<AppState>,
 ) -> impl IntoElement + use<> {
     let has_filter = has_active_filters(&state.criteria);
+    // 无筛选时默认锁住批量操作（防误操作全目录）；用户在下面「显式确认」后解锁（§13 逃生门）
+    let unlocked = has_filter || state.batch_ignore_filter;
+    let total_count = state.items.len();
     let target_count = state.display_order.len();
 
     v_flex()
@@ -335,6 +338,47 @@ pub fn render_batch_ops_tab(
                             .child(
                                 "批量操作仅作用于当前筛选结果。无筛选时按钮禁用以防误操作全目录。",
                             ),
+                    )
+                    .child(
+                        Button::new("btn-batch-unlock")
+                            .danger()
+                            .small()
+                            .w_full()
+                            .label(format!("我确认，对全目录 {total_count} 项执行"))
+                            .on_click(cx.listener(|state, _, _, cx| {
+                                state.batch_ignore_filter = true;
+                                cx.notify();
+                            })),
+                    ),
+            )
+        })
+        // 已显式确认：把「没有筛选保护」这件事一直摆在脸上，并留一键收回
+        .when(!has_filter && state.batch_ignore_filter, |this| {
+            this.child(
+                v_flex()
+                    .p_3()
+                    .rounded(cx.theme().radius)
+                    .bg(cx.theme().danger.opacity(0.12))
+                    .border_1()
+                    .border_color(cx.theme().danger.opacity(0.5))
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_medium()
+                            .text_color(cx.theme().danger)
+                            .child(format!("已解除筛选保护：将对全目录 {total_count} 项执行")),
+                    )
+                    .child(
+                        Button::new("btn-batch-relock")
+                            .ghost()
+                            .small()
+                            .w_full()
+                            .label("恢复筛选保护")
+                            .on_click(cx.listener(|state, _, _, cx| {
+                                state.batch_ignore_filter = false;
+                                cx.notify();
+                            })),
                     ),
             )
         })
@@ -346,6 +390,15 @@ pub fn render_batch_ops_tab(
                     .child(format!("将对当前筛选出的 {target_count} 项执行操作")),
             )
         })
+        // 最近一次批量操作结果（常驻：状态栏那条会被随后的「扫描完成…」顶掉）
+        .when_some(state.batch_result.clone(), |this, msg| {
+            this.child(
+                crate::theme::section(cx)
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(msg),
+            )
+        })
         // 批量操作按钮卡片
         .child(
             crate::theme::section(cx)
@@ -354,33 +407,38 @@ pub fn render_batch_ops_tab(
                     Button::new("btn-batch-copy")
                         .secondary()
                         .w_full()
-                        .disabled(!has_filter)
+                        .disabled(!unlocked)
                         .icon(IconName::Copy)
                         .label(format!("复制到目录 ({target_count} 项)..."))
-                        .on_click(cx.listener(|state, _, _, cx| {
-                            state.active_dialog =
-                                Some(ActiveDialog::BatchConfirm(photo_domain::BatchOpType::Copy));
-                            cx.notify();
+                        .on_click(cx.listener(|_state, _, window, cx| {
+                            // 先选目录再确认：确认框里显示的必须是真正要写进去的目录
+                            pick_batch_target_dir(
+                                photo_domain::BatchOpType::Copy,
+                                window,
+                                cx,
+                            );
                         })),
                 )
                 .child(
                     Button::new("btn-batch-move")
                         .secondary()
                         .w_full()
-                        .disabled(!has_filter)
+                        .disabled(!unlocked)
                         .icon(IconName::FolderOpen)
                         .label(format!("移动到目录 ({target_count} 项)..."))
-                        .on_click(cx.listener(|state, _, _, cx| {
-                            state.active_dialog =
-                                Some(ActiveDialog::BatchConfirm(photo_domain::BatchOpType::Move));
-                            cx.notify();
+                        .on_click(cx.listener(|_state, _, window, cx| {
+                            pick_batch_target_dir(
+                                photo_domain::BatchOpType::Move,
+                                window,
+                                cx,
+                            );
                         })),
                 )
                 .child(
                     Button::new("btn-batch-delete")
                         .danger()
                         .w_full()
-                        .disabled(!has_filter)
+                        .disabled(!unlocked)
                         .icon(IconName::Delete)
                         .label(format!("移至回收站 ({target_count} 项)..."))
                         .on_click(cx.listener(|state, _, _, cx| {
@@ -388,6 +446,18 @@ pub fn render_batch_ops_tab(
                                 photo_domain::BatchOpType::Delete,
                             ));
                             cx.notify();
+                        })),
+                )
+                // 批量重命名：同样作用于当前筛选/可见顺序
+                .child(
+                    Button::new("btn-batch-rename")
+                        .secondary()
+                        .w_full()
+                        .disabled(!unlocked)
+                        .icon(IconName::FileText)
+                        .label(format!("批量重命名 ({target_count} 项)..."))
+                        .on_click(cx.listener(|state, _, window, cx| {
+                            state.open_rename_dialog(window, cx);
                         })),
                 )
                 // 导出不依赖「必须存在激活筛选」：未选 = 当前筛选结果全部

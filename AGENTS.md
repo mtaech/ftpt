@@ -92,7 +92,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 |运行核心测试|`cargo test -p photo-engine -p photo-recognize -p photo-domain -p photo-config`|
 |前端单测|`cargo test -p photo-ui`（`src/model/` 纯逻辑 + `theme/` 色彩用例）|
 |开发运行（GPUI 桌面窗口）|`cargo run -p photo-ui`|
-|无头冒烟|`XDG_CONFIG_HOME=/tmp/ptlease-config xvfb-run -a cargo run -p photo-ui --example lease_smoke`（另有 `preview_full_smoke`、`clipboard_smoke`、`adjust_smoke`、`grid_scroll_smoke`、`filter_bar_smoke`、`export_smoke`、`duplicates_smoke`、`recognize_smoke`、`region_smoke`、`stats_smoke`、`master_bench`）|
+|无头冒烟|`XDG_CONFIG_HOME=/tmp/ptlease-config xvfb-run -a cargo run -p photo-ui --example lease_smoke`（另有 `preview_full_smoke`、`clipboard_smoke`、`adjust_smoke`、`grid_scroll_smoke`、`filter_bar_smoke`、`export_smoke`、`duplicates_smoke`、`batch_ops_smoke`、`recognize_smoke`、`region_smoke`、`stats_smoke`、`master_bench`）|
 |EXIF 提取验证|`cargo run -p photo-engine --example focus_check -- <图片>`（打印 ExifMetadata + 对焦点；exiftool 不可用或残留进程时先 `taskkill //F //IM perl.exe`）|
 
 ---
@@ -131,6 +131,12 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 
 ### 已知陷阱
 
+- **cargo 默认吃满全部核心，会打断前台工作**（2026-09-24）：`.cargo/config.toml` 里加了
+  `[build] jobs = 8`（16 核留一半给前台）与 `rustc-wrapper = "scripts/nice-rustc.sh"`——
+  包装脚本把 rustc **及其派生的链接器**降到 `nice -n 19` / `ionice -c 2 -n 7`（best-effort 最低档），
+  前台一旦要 CPU/磁盘就优先拿到；缺 nice/ionice 时脚本降级为直接 exec，不会让构建失败。
+  验证手法：`cargo check -v` 的输出里应出现 `scripts/nice-rustc.sh <rustc> …`；
+  想全速构建时 `cargo build -j 16`。**别把 `jobs` 调回默认**——用户明确要求「编译时别卡我」。
 - **dev 构建必须给密集计算的 crate 开 `opt-level = 3`**：根 `Cargo.toml` 的 `[profile.dev.package.*]` 需覆盖 `image`/`rawlib`/`rusqlite`/`photo-engine`/`jpeg-decoder`/`zune-jpeg`/`zune-core`，**以及 `matrixmultiply`/`photo-recognize`**。两处实测：① 生成 39MP JPEG 的 2560 预览母版 **debug 7.45s vs release 0.55s**（漏开就是「点开一张图卡 7 秒」）；② 单张识别 **debug 2123ms vs release 294ms**——元凶是 `matrixmultiply`（BioCLIP 余弦检索的 sgemm 内核，名录子集 93,452 类 × 768 维），漏开就是「识别一张等 2 秒」，加上两个 crate 后降到 504ms。**排查手法**：`perf` 在本环境不可用，用 `gdb -batch -p <pid> -ex 'thread apply all bt'` 连续 attach 采样、按 crate 聚合帧数即可定位（别只靠一两次 A/B 就下「瓶颈在别的运行时」的结论）
 - ~~`quick-xml` 在根 `Cargo.toml` 的 `[workspace.dependencies]` 中声明但各 crate src 无引用~~（2026-09-22 核实：根 `Cargo.toml` 里**没有**这条声明；`Cargo.lock` 的 `quick-xml 0.41` 只是 `wayland-scanner`/`xcb` 的传递依赖）
 - **exiftool `-stay_open` 长驻进程不能加 `-q`**：`-q` 同时抑制 `{ready}` 标记，导致 execute 读不到结果边界挂起
@@ -158,19 +164,19 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 
 ## 测试与 QA
 
-- Rust：`#[test]` 分布在 5 个 crate 的源文件内联 `#[cfg(test)] mod tests`（domain 35 / config 18 / engine 191 / recognize 27 / photo-ui 81），另有 1 个 `#[ignore]` 真机冒烟
+- Rust：`#[test]` 分布在 5 个 crate 的源文件内联 `#[cfg(test)] mod tests`（domain 38 / config 19 / engine 199 / recognize 27 / photo-ui 85），另有 1 个 `#[ignore]` 真机冒烟
 - 真机识别冒烟：`cargo test -p photo-recognize -- --ignored`（需 worktree/发布根有 `models/` 与 `data/bird_catalog.db`）；单文件手动识别工具：`cargo run -p photo-recognize --example recognize_file -- <图片路径> [models_dir] [catalog_db]`
-- 无头冒烟：`lease_smoke` 15 项 / `preview_full_smoke` 5 项 / `clipboard_smoke`（派发 CopyImage 动作 → 解码 → arboard 写剪贴板 → 读回校验尺寸）/ `adjust_smoke` 16 项（自建 1200×800 JPEG：预览装载参数 / 三条滑杆实体 / 面板可渲染 / 滑杆 Change 事件量化 0.37→0.35 / +1 EV 后预览更亮 149.0→202.9 / 350ms 去抖落库 / 原文件字节不变 / 重置回原图并复位）/ `grid_scroll_smoke` 4 项（自建 48 张 JPEG：网格滚动句柄拿到真实视口 / 内容高于视口 / 写句柄偏移跨帧保留；另支持 `PHOTO_SMOKE_HOLD_MS` 保持窗口供 Xvfb 外部截图目检、`PHOTO_SMOKE_HIDE_PANELS=1` 收起左右侧栏、`PHOTO_SMOKE_COLS=N` 指定列数、`PHOTO_SMOKE_WINDOW=WxH` 指定窗口尺寸、`PHOTO_SMOKE_HOLD_STILL=1` 保持画面静止（注入鼠标做交互验证时要逐像素对比，默认会轻推偏移让滚动条 thumb 停在可见态），并打印 `[diag] 窗口宽/列数/实测容器/列表视口宽`）/ `filter_bar_smoke` 8 项（筛选栏两个下拉：已创建 / 初始选中项与状态一致 / emit `SelectEvent::Confirm` 走真实订阅改排序与列数 / 列数写回配置 / 设置页改列数后下拉同步；不需素材）/ `export_smoke` 27 项（**不需模型**：顶栏 / Ctrl+E 的 action 真的打开弹窗 / 输入框文本→草稿 / 已选口径只导出 1 张 vs 取消选择导出筛选结果全部 5 张 / `{seq}` 补零渲染 / 同 stem 不同扩展自动 `_1` 去重 / 长边 600 真的生效 / 质量 95 体积大于 85 / 原文件字节不变 / 目标目录写回配置 / 目标目录不可创建时给真实错误 / **eBird CSV（#9）**：造识别记录 → 门控放行 → 落盘 + BOM 表头 + 物种聚合行；配置目录由冒烟自己钉 `PHOTO_CONFIG_DIR` 隔离）/ `recognize_smoke` 5 项（需 models/：扫描素材 / 识别途中能观察到中间进度 / 跑完 done==total 且每张有状态 / 取消 5s 内生效）/ `region_smoke` **16 项**（需 models/：扫描素材 / 框选模式开关 / **识别器懒装配与常驻**（冷装配→热复用两段计时）/ 首次框选建结论 / 二次框选**追加**为主体 / `folder_db` 持久化同步 / 全局索引落行 / 批量识别复用同一实例 / **回归**：旧 Unrecognized 记录框选后内存摘要显示物种 + 落库顶层同步为 subjects[0] + 存量坏数据（顶层 NULL + subjects 有结论）重扫后仍显示 + 清临时行）/ `stats_smoke` 15 项（**不需模型**：扫描+缩略图管线 / 全局索引写行 / 选中物种取记录 / 缩略图按各自目录解析 / 统计视图渲染 / 点击跳转选中 / **滚动条（#4/#3）**：物种榜 max_offset 850 / 照片网格 1531 / 偏移跨帧保留 / 胶片条横向 862 / 导入弹窗视口 502 / 清临时行）/ `duplicates_smoke` **25 项**（**不需模型**、自建位模式素材：入口开窗 / 作用域 8 张 / 2 组各 2 张 / 无关照片不误报 / keeper = 路径首张 / 落库阈值 + keeper + 时间 / 标 Rejected 不动文件且同步 xmp / 重开弹窗读回落库结果 / 同 stem 多格式被排除 / **空文件健壮性**（0 字节文件进扫描结果但不卡管线、收尾汇总一次、检测仍能收尾）/ 渲染多帧不 panic；支持 `PHOTO_SMOKE_HOLD_MS` 保持窗口截图目检）/ `master_bench` 计时；11 个 GPUI 冒烟都先调 `app::prepare_headless_smoke()` 把后端钉在 Xvfb 的 X11 上（否则 Wayland 会话下窗口落到真实桌面、渲染帧不可控），`xvfb-run` 下无需真实显示器（见开发命令）
+- 无头冒烟：`lease_smoke` 15 项 / `preview_full_smoke` 5 项 / `clipboard_smoke`（派发 CopyImage 动作 → 解码 → arboard 写剪贴板 → 读回校验尺寸）/ `adjust_smoke` 16 项（自建 1200×800 JPEG：预览装载参数 / 三条滑杆实体 / 面板可渲染 / 滑杆 Change 事件量化 0.37→0.35 / +1 EV 后预览更亮 149.0→202.9 / 350ms 去抖落库 / 原文件字节不变 / 重置回原图并复位）/ `grid_scroll_smoke` 4 项（自建 48 张 JPEG：网格滚动句柄拿到真实视口 / 内容高于视口 / 写句柄偏移跨帧保留；另支持 `PHOTO_SMOKE_HOLD_MS` 保持窗口供 Xvfb 外部截图目检、`PHOTO_SMOKE_HIDE_PANELS=1` 收起左右侧栏、`PHOTO_SMOKE_COLS=N` 指定列数、`PHOTO_SMOKE_WINDOW=WxH` 指定窗口尺寸、`PHOTO_SMOKE_HOLD_STILL=1` 保持画面静止（注入鼠标做交互验证时要逐像素对比，默认会轻推偏移让滚动条 thumb 停在可见态），并打印 `[diag] 窗口宽/列数/实测容器/列表视口宽`）/ `filter_bar_smoke` 8 项（筛选栏两个下拉：已创建 / 初始选中项与状态一致 / emit `SelectEvent::Confirm` 走真实订阅改排序与列数 / 列数写回配置 / 设置页改列数后下拉同步；不需素材）/ `export_smoke` 27 项（**不需模型**：顶栏 / Ctrl+E 的 action 真的打开弹窗 / 输入框文本→草稿 / 已选口径只导出 1 张 vs 取消选择导出筛选结果全部 5 张 / `{seq}` 补零渲染 / 同 stem 不同扩展自动 `_1` 去重 / 长边 600 真的生效 / 质量 95 体积大于 85 / 原文件字节不变 / 目标目录写回配置 / 目标目录不可创建时给真实错误 / **eBird CSV（#9）**：造识别记录 → 门控放行 → 落盘 + BOM 表头 + 物种聚合行；配置目录由冒烟自己钉 `PHOTO_CONFIG_DIR` 隔离）/ `recognize_smoke` 5 项（需 models/：扫描素材 / 识别途中能观察到中间进度 / 跑完 done==total 且每张有状态 / 取消 5s 内生效）/ `region_smoke` **16 项**（需 models/：扫描素材 / 框选模式开关 / **识别器懒装配与常驻**（冷装配→热复用两段计时）/ 首次框选建结论 / 二次框选**追加**为主体 / `folder_db` 持久化同步 / 全局索引落行 / 批量识别复用同一实例 / **回归**：旧 Unrecognized 记录框选后内存摘要显示物种 + 落库顶层同步为 subjects[0] + 存量坏数据（顶层 NULL + subjects 有结论）重扫后仍显示 + 清临时行）/ `stats_smoke` 15 项（**不需模型**：扫描+缩略图管线 / 全局索引写行 / 选中物种取记录 / 缩略图按各自目录解析 / 统计视图渲染 / 点击跳转选中 / **滚动条（#4/#3）**：物种榜 max_offset 850 / 照片网格 1531 / 偏移跨帧保留 / 胶片条横向 862 / 导入弹窗视口 502 / 清临时行）/ `duplicates_smoke` **25 项**（**不需模型**、自建位模式素材：入口开窗 / 作用域 8 张 / 2 组各 2 张 / 无关照片不误报 / keeper = 路径首张 / 落库阈值 + keeper + 时间 / 标 Rejected 不动文件且同步 xmp / 重开弹窗读回落库结果 / 同 stem 多格式被排除 / **空文件健壮性**（0 字节文件进扫描结果但不卡管线、收尾汇总一次、检测仍能收尾）/ 渲染多帧不 panic；支持 `PHOTO_SMOKE_HOLD_MS` 保持窗口截图目检）/ `batch_ops_smoke` **25 项**（**不需模型**、自建 4 张 JPEG：无筛选时批量操作默认锁住 / 「显式确认」解锁 / 筛选一变自动收回 / Delete 键只弹确认不动文件 / 确认后进回收站且记撤销日志 / **Ctrl+Z 真从回收站恢复** / 批量移动落地 4 个文件并撤销回原位 / 批量复制落地 4 个副本并撤销删副本 / 批量重命名生效并撤销改回 / 空模板被拒有提示 / 确认框与重命名弹窗渲染多帧不 panic；支持 `PHOTO_SMOKE_HOLD_MS`）/ `master_bench` 计时；12 个 GPUI 冒烟都先调 `app::prepare_headless_smoke()` 把后端钉在 Xvfb 的 X11 上（否则 Wayland 会话下窗口落到真实桌面、渲染帧不可控），`xvfb-run` 下无需真实显示器（见开发命令）
 
 ### 测试分布
 
 |模块|测试数|覆盖内容|
 |---|---|---|
-|`photo-domain::domain.rs`|35|扩展名解析、RAW 白名单、enrich_with_xmp/recognition、ExifMetadata 摘要、XmpMetadata 枚举转换、BBox/RecognitionStatus/RecognitionFilter 序列化与状态映射、SortBy 序列化、GPS DMS 转换|
-|`photo-config::lib.rs`|18|默认值、TOML 保存/加载往返、配置路径、AppConfig 字段钳制（含 include_subdirectories、export_presets）|
-|`photo-engine`|191 + 1 ignore|scanner 单层/递归、ops 移动/复制/重命名/删除（含 sidecar）、识别行同步、thumbnail 缓存键 + **空文件早判**、exif 摘要、convert、folder_db 建表/迁移/upsert/rename 同步/多表清理、adjustments、global_db 索引、histogram 直方图/剪切、**phash dHash/汉明距离/聚类/取消语义与 duplicates 表读写**、import 分组/去重/复制移动、template 占位符渲染、undo 三类逆操作、keywords 表|
+|`photo-domain::domain.rs`|38|扩展名解析、RAW 白名单、enrich_with_xmp/recognition、ExifMetadata 摘要、XmpMetadata 枚举转换、BBox/RecognitionStatus/RecognitionFilter 序列化与状态映射、SortBy 序列化、GPS DMS 转换|
+|`photo-config::lib.rs`|19|默认值、TOML 保存/加载往返、配置路径、AppConfig 字段钳制（含 include_subdirectories、export_presets、import_dir/export_dir 记忆）|
+|`photo-engine`|199 + 1 ignore|scanner 单层/递归、ops 移动/复制/重命名/删除（含 sidecar）、识别行同步、thumbnail 缓存键 + **空文件早判**、exif 摘要、convert、folder_db 建表/迁移/upsert/rename 同步/多表清理、adjustments、global_db 索引、histogram 直方图/剪切、**phash dHash/汉明距离/聚类/取消语义与 duplicates 表读写**、import 分组/去重/复制移动、template 占位符渲染、undo 三类逆操作、keywords 表|
 |`photo-recognize`|27 + 1 ignore|阶段→状态映射、输入源解析（JPEG/RAW）、org_det 输出解码（布局/近满幅让位/越界夹紧）、BioCLIP 后端（npy 解析/species_of/中文名三级回落/top-k 检索）、按学名查名录、进度回调|
-|`photo-ui`|81|筛选/排序/堆叠/连拍/预览数学/调整参数（量化、chip 文案、相对路径、字段操作）/导出草稿（钳制、预设套用、目标集口径、输出名去重）/eBird 门控纯逻辑/**近重复检测纯逻辑**（作用域剔除同 stem 多格式、keeper 分组、相对/完整路径互转，`src/model/`）、Material You 色彩（`theme/`）、剪贴板解码、全局索引日期回写（`rewrite_folder_index_dates`）|
+|`photo-ui`|85|筛选/排序/堆叠/连拍/预览数学/调整参数（量化、chip 文案、相对路径、字段操作）/导出草稿（钳制、预设套用、**预设新建/删除**、目标集口径、输出名去重）/eBird 门控纯逻辑/**近重复检测纯逻辑**（作用域剔除同 stem 多格式、keeper 分组、相对/完整路径互转，`src/model/`）、Material You 色彩（`theme/`）、剪贴板解码、全局索引日期回写（`rewrite_folder_index_dates`）|
 
 ---
 
@@ -198,6 +204,39 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 ---
 
 ## 近期修复记录
+
+- **2026-09-24 feat(photo-ui/photo-engine)：批量操作整条链路接线 + 删除可撤销 + 一批 P3 打磨（todo #13/#14/#17/#1）**：
+  起因是用户要求「把 `docs/todo.md` 里没做完的挨个做完」，做 #13.1/#13.2 时**发现条目本身写轻了**：
+  GPUI 版左栏「复制到目录 / 移动到目录」弹完确认框**什么都不做**、批量重命名**连入口都没有**，
+  而 `op_journal` 全仓从未 `record`——Ctrl+Z 永远回答「没有可撤销的批量操作」（手册承诺的撤销从未生效）。
+  引擎侧 `batch_ops::execute` / `ops::rename_captures_templated` 早已就绪并带单测，又是「链路断在 UI」。
+  **做法**：① **引擎**——`ops::delete_file_to_trash` 删除后回查回收站条目（`locate_trashed`：删除前后
+  `os_limited::list()` 差集 + canonical 原路径匹配）→ 新 `undo::TrashedItem` / `UndoOp::Trash`，
+  `restore_from_trash` 走 freedesktop/Windows 回收站 API 真恢复（macOS 报可读原因，不留半吊子）；
+  `batch_ops::execute_journaled` 逐文件执行并产出撤销记录（旧 `execute` 保留为薄包装）；
+  `ops::rename_captures_templated_journaled` 同理（同名不改名不记日志）。② **UI**——`engine_ops`
+  新增 `start_batch_op` / `start_batch_rename`（重扫取作用域 → 后台执行 → 记 journal → 重扫）、
+  `release_recognizer`、`pick_batch_target_dir`；Delete 键改为先弹 `ActiveDialog::DeleteConfirm`；
+  新增 `Rename` 弹窗（模板 + 实时预览，走 `model/export` 同款纯逻辑）；Ctrl+Z 报成功/跳过原因、
+  回收站恢复单独播报；左栏批量面板加 **常驻结果行**（状态栏那条会被随后的「扫描完成…」顶掉，
+  用户看不到「Ctrl+Z 可撤销」）。③ **#13.1 逃生门**——无筛选时按钮仍默认禁用，多一个「我确认，
+  对全目录 N 项执行」；**解锁状态任何筛选变化自动收回**（`recompute_pipeline`）。④ **#13.5**——
+  `CaptureMeta` 新增 `failure_stage`/`candidates`（domain，Top-3），信息栏显示失败原因中文与
+  「最接近：A 61.5% · B 55.0%」，多主体行改「相似度 68.3%」。⑤ **#14.7** 导入目标目录记忆
+  （`AppConfig.import_dir`）。⑥ **#1 遗留** 导出预设新建/保存/删除（`model/export.rs` 的
+  `preset_from_draft`/`preset_index_for_draft` + 弹窗按钮 + 单元测试）。⑦ **#17** 设置页
+  「释放识别器」按钮。⑧ **构建资源**——`.cargo/config.toml` 加 `[build] jobs = 8` 与
+  `rustc-wrapper = scripts/nice-rustc.sh`（rustc 及其派生的链接器降到 nice 19 / ionice 最低档）。
+  **验证**：`cargo check --workspace --all-targets` 0 warning；`cargo test` 全绿
+  （domain 35→**38**、config 18→**19**、engine 191→**199**、photo-ui 81→**85**）；
+  新增无头冒烟 **`batch_ops_smoke` 25 项 ALL PASS**（含「确认后进回收站 → Ctrl+Z 真恢复」、
+  移动/复制/重命名各自撤销）；`lease_smoke` 15 项、`export_smoke` 27 项回归全过。
+  **顺带核实**：#14.6「面板宽度双轨」在 GPUI 版**不成立**（宽度只在 `AppConfig`，无第二条本地存储轨）；
+  #13.3/#13.4 的「左栏镜头/物种多选下拉」「右键菜单」在 GPUI 版**根本没有这两个控件**（Tauri 版条目），
+  要做等于新建功能，已在 todo 里标注。
+  **冒烟里踩的坑（留给以后）**：① 撤销/批量操作后会 defer 一次重扫，「等 `!is_scanning`」可能在重扫
+  **开始之前**就通过（`display_order` 还是旧的/空的）→ 断言必须等「扫描结束 **且** 可见集恢复到 N 张」；
+  ② 批量操作的结果消息会被收尾重扫的「扫描完成，共 N 张」覆盖，所以断言/展示都改用常驻字段。
 
 - **2026-09-24 feat(photo-ui)：框选识别加 Shift 快捷键 —— 按住 Shift + 左键直接拖框，视口左上角常驻文字提示**：
   用户要求「给画框自定义识别加一个 shift 快捷键，按住 shift，然后左键拖动画框，在界面上用文字提示」。

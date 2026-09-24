@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -6,6 +8,7 @@ use photo_domain::Capture;
 
 use crate::folder_db::{FolderDb, FolderDbError};
 use crate::template::NameTemplateContext;
+use crate::undo::{TrashedItem, UndoOp};
 
 #[derive(Error, Debug)]
 pub enum OpError {
@@ -28,11 +31,78 @@ fn all_capture_paths(capture: &Capture) -> Vec<PathBuf> {
 
 /// 删除文件：移到回收站
 pub fn delete_file(path: &Path) -> Result<(), OpError> {
+    delete_file_to_trash(path).map(|_| ())
+}
+
+/// 删除单个文件到回收站，并返回可用于撤销恢复的回收站条目。
+///
+/// 逆操作依赖回收站条目（Linux 的 .trashinfo 路径 / Windows 的 shell 标识），
+/// 这里用「删除前后 list() 差集 + 原路径匹配」定位：删除动作本身不会因为定位失败
+/// 而回滚，定位不到时返回 `Ok(None)`——文件已进回收站，只是这一条不可撤销，
+/// 调用方据此不记撤销日志。
+pub fn delete_file_to_trash(path: &Path) -> Result<Option<TrashedItem>, OpError> {
     if !path.exists() {
         return Err(OpError::NotFound(path.to_path_buf()));
     }
+    let before = trash_ids();
     trash::delete(path)?;
-    Ok(())
+    Ok(locate_trashed(path, &before))
+}
+
+/// 回收站条目里能做恢复的平台（Linux freedesktop / Windows）
+#[cfg(any(
+    target_os = "windows",
+    all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")))
+))]
+fn trash_ids() -> HashSet<OsString> {
+    trash::os_limited::list()
+        .map(|items| items.into_iter().map(|i| i.id).collect())
+        .unwrap_or_default()
+}
+
+/// 平台不支持回收站恢复（macOS）：没有 id 可记
+#[cfg(not(any(
+    target_os = "windows",
+    all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")))
+)))]
+fn trash_ids() -> HashSet<OsString> {
+    HashSet::new()
+}
+
+/// 删除后回查：找出这次新出现、且原路径匹配的回收站条目
+#[cfg(any(
+    target_os = "windows",
+    all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")))
+))]
+fn locate_trashed(path: &Path, before: &HashSet<OsString>) -> Option<TrashedItem> {
+    let want = canonical_original(path);
+    trash::os_limited::list()
+        .ok()?
+        .into_iter()
+        .find(|i| !before.contains(&i.id) && i.original_path() == want)
+        .map(|i| TrashedItem {
+            id: i.id,
+            name: i.name,
+            original_parent: i.original_parent,
+            time_deleted: i.time_deleted,
+        })
+}
+
+#[cfg(not(any(
+    target_os = "windows",
+    all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")))
+)))]
+fn locate_trashed(_path: &Path, _before: &HashSet<OsString>) -> Option<TrashedItem> {
+    None
+}
+
+/// freedesktop 的 `TrashItem.original_parent` 是 canonicalize 过的父目录；
+/// 要跟它逐字相等才能匹配，这里对齐同一种形态
+fn canonical_original(path: &Path) -> PathBuf {
+    match (path.parent().and_then(|p| p.canonicalize().ok()), path.file_name()) {
+        (Some(parent), Some(name)) => parent.join(name),
+        _ => path.to_path_buf(),
+    }
 }
 
 /// 删除一次拍摄的所有文件（移到回收站）
@@ -236,12 +306,40 @@ pub fn rename_captures_templated<F>(
     captures: &[&Capture],
     template: &str,
     start_seq: u32,
-    mut meta_fn: F,
+    meta_fn: F,
 ) -> Vec<(PathBuf, Result<(), OpError>)>
 where
     F: FnMut(&Capture) -> NameTemplateContext,
 {
-    let mut results = Vec::new();
+    rename_captures_templated_journaled(captures, template, start_seq, meta_fn).results
+}
+
+/// 模板批量重命名的结果 + 撤销记录（UI 的 Ctrl+Z 靠它）
+#[derive(Debug, Default)]
+pub struct RenameOutcome {
+    /// (结果路径, 结果)：成功为新路径，失败为期望的目标路径（与旧函数同形）
+    pub results: Vec<(PathBuf, Result<(), OpError>)>,
+    /// 逐文件撤销记录（仅成功的改名；未改名的无操作不记录）
+    pub undo_ops: Vec<UndoOp>,
+    pub ok_count: usize,
+    pub fail_count: usize,
+}
+
+/// 模板模式批量重命名（带撤销记录）。
+///
+/// 模板占位符 {name}/{species}/{date}/{camera}/{seq} 与 rename_captures_templated
+/// 同一套渲染；每条拍摄的全部源文件（JPG/NEF/XMP 兄弟）同步改名。
+/// 只成功的改名进撤销日志，失败逐文件报告、不中断后续。
+pub fn rename_captures_templated_journaled<F>(
+    captures: &[&Capture],
+    template: &str,
+    start_seq: u32,
+    mut meta_fn: F,
+) -> RenameOutcome
+where
+    F: FnMut(&Capture) -> NameTemplateContext,
+{
+    let mut outcome = RenameOutcome::default();
 
     for (i, capture) in captures.iter().enumerate() {
         let mut ctx = meta_fn(capture);
@@ -251,21 +349,37 @@ where
         for source_file in &capture.source_files {
             let old_path = &source_file.path;
             if !old_path.exists() {
-                results.push((old_path.clone(), Err(OpError::NotFound(old_path.clone()))));
+                outcome.fail_count += 1;
+                outcome
+                    .results
+                    .push((old_path.clone(), Err(OpError::NotFound(old_path.clone()))));
                 continue;
             }
             if let Some(ext) = old_path.extension() {
                 let new_name = format!("{}.{}", base, ext.to_string_lossy());
                 let target = old_path.with_file_name(&new_name);
                 match rename_to(old_path, &new_name) {
-                    Ok(new_path) => results.push((new_path, Ok(()))),
-                    Err(e) => results.push((target, Err(e))),
+                    Ok(new_path) => {
+                        // 文件名没变（模板渲染结果与原名相同）= 无操作，不进撤销日志
+                        if new_path != *old_path {
+                            outcome.undo_ops.push(UndoOp::Rename {
+                                from: old_path.clone(),
+                                to: new_path.clone(),
+                            });
+                        }
+                        outcome.ok_count += 1;
+                        outcome.results.push((new_path, Ok(())));
+                    }
+                    Err(e) => {
+                        outcome.fail_count += 1;
+                        outcome.results.push((target, Err(e)));
+                    }
                 }
             }
         }
     }
 
-    results
+    outcome
 }
 /// rel_paths 是相对于文件夹根路径的路径列表（正斜杠）。
 pub fn sync_delete_recognitions(db: &FolderDb, rel_paths: &[String]) -> Result<(), FolderDbError> {
@@ -581,6 +695,47 @@ mod tests {
         assert!(dir.path().join("旅行_001.NEF").exists());
         // 旧文件名不存在
         assert!(!dir.path().join("DSC_0001.jpg").exists());
+    }
+
+    #[test]
+    fn test_rename_captures_templated_journaled_records_undo() {
+        let dir = TempDir::new().unwrap();
+        let capture = make_test_capture(&dir, "IMG_9001", &["jpg", "NEF"]);
+
+        let outcome =
+            rename_captures_templated_journaled(&[&capture], "{name}_renamed", 1, |cap| {
+                NameTemplateContext {
+                    name: cap.base_name.clone(),
+                    ..Default::default()
+                }
+            });
+        assert_eq!(outcome.ok_count, 2, "两个源文件都改名成功");
+        assert_eq!(outcome.fail_count, 0);
+        assert_eq!(outcome.undo_ops.len(), 2, "每个改名的文件一条撤销记录");
+        assert!(dir.path().join("IMG_9001_renamed.jpg").exists());
+        assert!(!dir.path().join("IMG_9001.jpg").exists());
+
+        let undone = crate::undo::undo_ops(&outcome.undo_ops);
+        assert!(undone.iter().all(|o| o.result.is_ok()), "{undone:?}");
+        assert!(dir.path().join("IMG_9001.jpg").exists(), "撤销后改回原名");
+        assert!(!dir.path().join("IMG_9001_renamed.jpg").exists());
+    }
+
+    #[test]
+    fn test_rename_journaled_same_name_records_nothing() {
+        // 模板渲染结果与原名相同 = 无操作，不该产生撤销记录（否则 Ctrl+Z 会「撤销」成空动作）
+        let dir = TempDir::new().unwrap();
+        let capture = make_test_capture(&dir, "same_name", &["jpg"]);
+
+        let outcome = rename_captures_templated_journaled(&[&capture], "{name}", 1, |cap| {
+            NameTemplateContext {
+                name: cap.base_name.clone(),
+                ..Default::default()
+            }
+        });
+        assert_eq!(outcome.ok_count, 1);
+        assert!(outcome.undo_ops.is_empty(), "同名改名不进撤销日志");
+        assert!(dir.path().join("same_name.jpg").exists());
     }
 
     #[test]

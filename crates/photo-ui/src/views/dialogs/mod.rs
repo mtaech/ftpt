@@ -2,14 +2,18 @@
 
 pub mod batch_confirm;
 pub mod burst_confirm;
+pub mod delete_confirm;
 pub mod duplicates_dialog;
 pub mod export_dialog;
 pub mod import_dialog;
+pub mod rename_dialog;
 pub mod settings;
 
 pub use batch_confirm::render_batch_confirm_dialog;
 pub use burst_confirm::render_burst_confirm_dialog;
+pub use delete_confirm::render_delete_confirm_dialog;
 pub use duplicates_dialog::render_duplicates_dialog;
 pub use export_dialog::render_export_dialog;
 pub use import_dialog::render_import_dialog;
+pub use rename_dialog::render_rename_dialog;
 pub use settings::{SettingsTab, render_settings_dialog};

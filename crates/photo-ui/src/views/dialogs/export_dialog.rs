@@ -20,7 +20,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::{AnyElement, Context, IntoElement, SharedString, Window, div, prelude::*, px};
 
-use crate::model::export::{LONG_EDGE_OPTIONS, QUALITY_OPTIONS, export_targets};
+use crate::model::export::{
+    LONG_EDGE_OPTIONS, QUALITY_OPTIONS, export_targets, preset_from_draft, preset_index_for_draft,
+};
 use crate::state::AppState;
 use crate::state::engine_ops::{defer_entity_action, pick_export_dest, start_export};
 
@@ -156,12 +158,14 @@ fn render_controls(state: &AppState, cx: &mut Context<AppState>) -> AnyElement {
     let mut body = v_flex().w_full().gap_3();
 
     // ① 预设（来自配置；点一下套用长边 + 质量 + 模板，不动目标目录）
+    //    新建 / 保存 / 删除都在这里（手册 §9.10），改完立刻落配置文件
     let presets = state.app_config.export_presets.clone();
-    if !presets.is_empty() {
-        body = body.child(
-            card(cx)
-                .child(card_title("预设", cx))
-                .child(h_flex().w_full().flex_wrap().gap_1().children(
+    let current_preset_ix = preset_index_for_draft(&presets, draft);
+    body = body.child(
+        card(cx)
+            .child(card_title("预设", cx))
+            .when(!presets.is_empty(), |this| {
+                this.child(h_flex().w_full().flex_wrap().gap_1().children(
                     presets.iter().enumerate().map(|(i, preset)| {
                         let preset = preset.clone();
                         let selected = draft.long_edge == preset.long_edge
@@ -177,9 +181,60 @@ fn render_controls(state: &AppState, cx: &mut Context<AppState>) -> AnyElement {
                             cx,
                         )
                     }),
-                )),
-        );
-    }
+                ))
+            })
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("export-preset-save")
+                            .small()
+                            .secondary()
+                            .label("保存当前参数为预设")
+                            .on_click(cx.listener(|state, _, _, cx| {
+                                let name = format!(
+                                    "预设 {}",
+                                    state.app_config.export_presets.len() + 1
+                                );
+                                let preset = preset_from_draft(name.clone(), &state.export);
+                                state.app_config.export_presets.push(preset);
+                                state.save_config();
+                                state.set_status_message(format!("已保存导出预设「{name}」"));
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("export-preset-delete")
+                            .small()
+                            .ghost()
+                            .disabled(current_preset_ix.is_none())
+                            .label("删除当前预设")
+                            .on_click(cx.listener(|state, _, _, cx| {
+                                let ix = preset_index_for_draft(
+                                    &state.app_config.export_presets,
+                                    &state.export,
+                                );
+                                if let Some(ix) = ix {
+                                    let removed = state.app_config.export_presets.remove(ix);
+                                    state.save_config();
+                                    state.set_status_message(format!(
+                                        "已删除导出预设「{}」",
+                                        removed.name
+                                    ));
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("预设保存到配置文件，重启后仍在"),
+                    ),
+            ),
+    );
 
     // ② 目标目录：输入框 + 系统目录对话框
     body = body.child(

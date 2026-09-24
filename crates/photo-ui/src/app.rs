@@ -19,8 +19,7 @@ use photo_domain::{ColorLabel, Flag, Rating};
 
 use crate::actions::*;
 use crate::state::engine_ops::{
-    defer_entity_action, delete_selected_to_trash, set_color_label, set_flag, set_rating,
-    start_recognition, start_scan,
+    defer_entity_action, set_color_label, set_flag, set_rating, start_recognition, start_scan,
 };
 use crate::state::{ActiveDialog, AppState, ViewMode};
 use crate::views::dialogs::*;
@@ -434,13 +433,13 @@ impl Render for AppState {
                 this.active_dialog = Some(ActiveDialog::BurstConfirm);
                 cx.notify();
             }))
-            .on_action(cx.listener(|_this, _: &Delete, _window, cx| {
-                // listener 运行期间 AppState 已被租借，直接 update 会 panic；
-                // 统一用 defer_entity_action 排到本轮 effect 之后。
-                let entity = cx.entity().clone();
-                defer_entity_action(cx, entity, |entity, cx| {
-                    delete_selected_to_trash(entity, cx);
-                });
+            .on_action(cx.listener(|this, _: &Delete, _window, cx| {
+                // 与批量删除同一套口径：先确认再进回收站（§13：以前 Delete 键无确认直接删）
+                if this.mark_indices().is_empty() {
+                    return;
+                }
+                this.active_dialog = Some(ActiveDialog::DeleteConfirm);
+                cx.notify();
             }))
             // ── 识别 ──
             .on_action(cx.listener(|_this, _: &RecognizeSelected, _window, cx| {
@@ -528,11 +527,34 @@ impl Render for AppState {
                 let outcomes = this.op_journal.undo_last();
                 if !outcomes.is_empty() {
                     let success = outcomes.iter().filter(|o| o.result.is_ok()).count();
-                    this.set_status_message(format!("撤销完成：{success}/{} 成功", outcomes.len()));
+                    let failed = outcomes.len() - success;
+                    let from_trash = outcomes
+                        .iter()
+                        .any(|o| matches!(o.op, photo_engine::undo::UndoOp::Trash { .. }));
+                    let msg = if failed == 0 {
+                        if from_trash {
+                            format!("已从回收站恢复 {success} 项")
+                        } else {
+                            format!("撤销完成：{success} 项")
+                        }
+                    } else {
+                        // 逐条原因只报第一条：状态栏只有一行，全部原因在日志里
+                        let reason = outcomes
+                            .iter()
+                            .find_map(|o| match &o.result {
+                                Err(e) => Some(e.to_string()),
+                                Ok(()) => None,
+                            })
+                            .unwrap_or_default();
+                        tracing::warn!("撤销部分失败: {reason}");
+                        format!("撤销：成功 {success} 项、失败/跳过 {failed} 项（{reason}）")
+                    };
+                    this.set_status_message(msg);
                     if let Some(dir) = this.current_dir.clone() {
+                        let recursive = this.app_config.include_subdirectories;
                         let entity = cx.entity().clone();
                         defer_entity_action(cx, entity, move |entity, cx| {
-                            start_scan(entity, dir, false, cx);
+                            start_scan(entity, dir, recursive, cx);
                         });
                     }
                 } else {
@@ -612,6 +634,12 @@ impl Render for AppState {
                     }
                     ActiveDialog::BatchConfirm(op) => {
                         render_batch_confirm_dialog(self, op, window, cx).into_any_element()
+                    }
+                    ActiveDialog::DeleteConfirm => {
+                        render_delete_confirm_dialog(self, window, cx).into_any_element()
+                    }
+                    ActiveDialog::Rename => {
+                        render_rename_dialog(self, window, cx).into_any_element()
                     }
                 })
             })

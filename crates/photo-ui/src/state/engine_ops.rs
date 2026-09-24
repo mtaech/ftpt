@@ -793,29 +793,418 @@ pub fn set_flag_for_paths(state: &mut AppState, paths: &[String], flag: Option<F
     state.recompute_pipeline();
 }
 
-/// 删除指定路径列表到回收站
+// ── 批量操作（复制 / 移动 / 重命名 / 删除）──
+//
+// 引擎侧 batch_ops::execute_journaled 与 ops::rename_captures_templated_journaled
+// 早已就绪并带单测，这里补的是 UI 桥：取作用域 → 后台执行 → 记录撤销日志 → 重扫。
+// （2026-09-24 之前这批按钮是死的：弹确认框后什么都不做，Ctrl+Z 也永远没有记录。）
+
+/// 批量操作的作用域快照（可见顺序里的主文件路径 + 当前目录 + 递归开关）。
+///
+/// 不把 Vec<Capture> 挂在 AppState 上：批量操作是低频动作，用路径白名单在后台
+/// **重扫一次目录**（只有 walkdir + stat，不含 EXIF）换取「按磁盘当前状态执行」，
+/// 避免拿着一份可能已过期的 capture 列表去改文件。
+fn batch_scope(state: &AppState) -> Option<(PathBuf, bool, std::collections::HashSet<String>)> {
+    let dir = state.current_dir.clone()?;
+    let paths: std::collections::HashSet<String> = state
+        .display_order
+        .iter()
+        .filter_map(|&i| state.items.get(i))
+        .map(|m| m.primary_path.clone())
+        .collect();
+    if paths.is_empty() {
+        return None;
+    }
+    Some((dir, state.app_config.include_subdirectories, paths))
+}
+
+/// 批量复制 / 移动到目标目录 / 删除到回收站（左栏批量面板 + 确认弹窗）。
+///
+/// 逐文件撤销记录写进 op_journal（Ctrl+Z 的依据）；状态栏报真实成功/失败计数，
+/// 失败原因落日志；最后重扫让列表反映磁盘现状。
+pub fn start_batch_op(
+    state_entity: Entity<AppState>,
+    op_type: photo_domain::BatchOpType,
+    target_dir: Option<PathBuf>,
+    cx: &mut App,
+) {
+    let (verb, undo_hint) = match op_type {
+        photo_domain::BatchOpType::Copy => ("复制", "Ctrl+Z 可撤销"),
+        photo_domain::BatchOpType::Move => ("移动", "Ctrl+Z 可撤销"),
+        photo_domain::BatchOpType::Delete => ("删除到回收站", "Ctrl+Z 可从回收站恢复"),
+    };
+
+    let Some((dir, recursive, paths)) = state_entity.update(cx, |state, cx| {
+        if state.is_scanning {
+            let msg = "正在扫描，暂不执行批量操作".to_string();
+            state.batch_result = Some(msg.clone());
+            state.set_status_message(msg);
+            cx.notify();
+            return None;
+        }
+        let scope = batch_scope(state);
+        if scope.is_none() {
+            let msg = "批量操作失败：当前没有可操作的照片".to_string();
+            state.batch_result = Some(msg.clone());
+            state.set_status_message(msg);
+            cx.notify();
+        }
+        scope
+    }) else {
+        return;
+    };
+
+    let entity = state_entity.clone();
+    let rescan_dir = dir.clone();
+    cx.spawn(async move |async_cx: &mut gpui_kit::AsyncApp| {
+        let result = async_cx
+            .background_executor()
+            .spawn(async move {
+                let filter = FilterCriteria::default();
+                let captures = if recursive {
+                    scanner::scan_directory_recursive(&dir, &filter, None)
+                } else {
+                    scanner::scan_directory(&dir, &filter, None)
+                };
+                let captures = match captures {
+                    Ok(c) => c,
+                    Err(e) => return Err(e),
+                };
+                let indices = photo_engine::batch_ops::select_by_paths(&captures, &paths);
+                if indices.is_empty() {
+                    return Ok(None);
+                }
+                Ok(Some(photo_engine::batch_ops::execute_journaled(
+                    &captures,
+                    &indices,
+                    op_type,
+                    target_dir.as_deref(),
+                    |_, _| {},
+                )))
+            })
+            .await;
+
+        let _ = async_cx.update(|cx| {
+            let done = entity.update(cx, |state, cx| {
+                match result {
+                    Ok(Some(outcome)) => {
+                        if !outcome.undo_ops.is_empty() {
+                            state.op_journal.record(outcome.undo_ops);
+                        }
+                        let failures: Vec<String> = outcome
+                            .results
+                            .iter()
+                            .filter_map(|r| r.as_ref().err().cloned())
+                            .collect();
+                        for f in failures.iter().take(3) {
+                            tracing::warn!("批量{verb}失败: {f}");
+                        }
+                        if outcome.fail_count == 0 {
+                            let mut msg =
+                                format!("批量{verb}完成：{} 项（{undo_hint}）", outcome.ok_count);
+                            if outcome.not_undoable > 0 {
+                                msg.push_str(&format!(
+                                    "；其中 {} 项无法从回收站恢复，请到系统回收站手动处理",
+                                    outcome.not_undoable
+                                ));
+                            }
+                            state.batch_result = Some(msg.clone());
+                            state.set_status_message(msg);
+                        } else {
+                            let msg = format!(
+                                "批量{verb}：成功 {} 项、失败 {} 项（{}）",
+                                outcome.ok_count,
+                                outcome.fail_count,
+                                failures.first().cloned().unwrap_or_default()
+                            );
+                            state.batch_result = Some(msg.clone());
+                            state.set_status_message(msg);
+                        }
+                    }
+                    Ok(None) => state.set_status_message(format!(
+                        "批量{verb}失败：当前可见的照片已不在磁盘上，请重扫后再试"
+                    )),
+                    Err(e) => state.set_status_message(format!("批量{verb}失败：{e}")),
+                }
+                cx.notify();
+                true
+            });
+            if done {
+                start_scan(entity.clone(), rescan_dir, recursive, cx);
+            }
+        });
+    })
+    .detach();
+}
+
+/// 批量重命名（模板模式；命名模板渲染 + 逐文件撤销记录）。
+pub fn start_batch_rename(state_entity: Entity<AppState>, template: String, cx: &mut App) {
+    let template = template.trim().to_string();
+    let Some((dir, recursive, jobs)) = state_entity.update(cx, |state, cx| {
+        if state.is_scanning {
+            let msg = "正在扫描，暂不执行批量重命名".to_string();
+            state.batch_result = Some(msg.clone());
+            state.set_status_message(msg);
+            cx.notify();
+            return None;
+        }
+        if template.is_empty() {
+            let msg = "重命名失败：模板为空（请填 {name}_{seq} 这类模板）".to_string();
+            state.batch_result = Some(msg.clone());
+            state.set_status_message(msg);
+            cx.notify();
+            return None;
+        }
+        let dir = state.current_dir.clone()?;
+        let jobs: HashMap<String, photo_engine::template::NameTemplateContext> = state
+            .display_order
+            .iter()
+            .filter_map(|&i| state.items.get(i))
+            .map(|m| {
+                (
+                    m.primary_path.clone(),
+                    photo_engine::template::NameTemplateContext {
+                        name: m.base_name.clone(),
+                        species: m.taxon_name.clone(),
+                        date: m.date_taken.clone(),
+                        camera: m.camera_model.clone(),
+                        seq: 0,
+                    },
+                )
+            })
+            .collect();
+        if jobs.is_empty() {
+            let msg = "重命名失败：当前没有可操作的照片".to_string();
+            state.batch_result = Some(msg.clone());
+            state.set_status_message(msg);
+            cx.notify();
+            return None;
+        }
+        Some((dir, state.app_config.include_subdirectories, jobs))
+    }) else {
+        return;
+    };
+
+    let entity = state_entity.clone();
+    let rescan_dir = dir.clone();
+    cx.spawn(async move |async_cx: &mut gpui_kit::AsyncApp| {
+        let result = async_cx
+            .background_executor()
+            .spawn(async move {
+                let filter = FilterCriteria::default();
+                let captures = if recursive {
+                    scanner::scan_directory_recursive(&dir, &filter, None)
+                } else {
+                    scanner::scan_directory(&dir, &filter, None)
+                };
+                let captures = match captures {
+                    Ok(c) => c,
+                    Err(e) => return Err(e),
+                };
+                let path_set: std::collections::HashSet<String> = jobs.keys().cloned().collect();
+                let indices = photo_engine::batch_ops::select_by_paths(&captures, &path_set);
+                if indices.is_empty() {
+                    return Ok(None);
+                }
+                let caps: Vec<&photo_domain::Capture> =
+                    indices.iter().filter_map(|&i| captures.get(i)).collect();
+                let outcome = photo_engine::ops::rename_captures_templated_journaled(
+                    &caps,
+                    &template,
+                    1,
+                    |cap: &photo_domain::Capture| {
+                        let key = cap
+                            .source_files
+                            .get(cap.primary_index)
+                            .map(|f| f.path.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        jobs.get(&key).cloned().unwrap_or_else(|| {
+                            photo_engine::template::NameTemplateContext {
+                                name: cap.base_name.clone(),
+                                ..Default::default()
+                            }
+                        })
+                    },
+                );
+                Ok(Some(outcome))
+            })
+            .await;
+
+        let _ = async_cx.update(|cx| {
+            let done = entity.update(cx, |state, cx| {
+                match result {
+                    Ok(Some(outcome)) => {
+                        if !outcome.undo_ops.is_empty() {
+                            state.op_journal.record(outcome.undo_ops);
+                        }
+                        let msg = if outcome.fail_count == 0 {
+                            format!(
+                                "批量重命名完成：{} 个文件（Ctrl+Z 可撤销）",
+                                outcome.ok_count
+                            )
+                        } else {
+                            let first = outcome
+                                .results
+                                .iter()
+                                .find_map(|(_, r)| r.as_ref().err().map(|e| e.to_string()))
+                                .unwrap_or_default();
+                            tracing::warn!("批量重命名失败 {first}");
+                            format!(
+                                "批量重命名：成功 {} 个文件、失败 {} 个（{first}）",
+                                outcome.ok_count, outcome.fail_count
+                            )
+                        };
+                        state.batch_result = Some(msg.clone());
+                        state.set_status_message(msg);
+                    }
+                    Ok(None) => state.set_status_message(
+                        "重命名失败：当前可见的照片已不在磁盘上，请重扫后再试",
+                    ),
+                    Err(e) => state.set_status_message(format!("重命名失败：{e}")),
+                }
+                cx.notify();
+                true
+            });
+            if done {
+                start_scan(entity.clone(), rescan_dir, recursive, cx);
+            }
+        });
+    })
+    .detach();
+}
+
+/// 释放常驻识别器（org_det + BioCLIP + 名录 embedding，约 600MB；docs/todo.md #17）。
+///
+/// 识别器是懒装配 + 常驻的（避免每张重装 1–2 秒），代价是一批拍完之后内存一直被占着。
+/// 这里给用户一个显式释放入口：下次识别/框选会自动重新装配，只是那一张慢 1–2 秒。
+pub fn release_recognizer(state_entity: Entity<AppState>, cx: &mut App) {
+    let taken = state_entity.update(cx, |state, cx| {
+        let taken = state.recognizer.lock().take();
+        state.set_status_message(if taken.is_some() {
+            "已释放识别器（约 600MB），下次识别会自动重新装配"
+        } else {
+            "识别器当前未装配，无需释放"
+        });
+        cx.notify();
+        taken
+    });
+    // 在实体 update 之外真正释放：别让 600MB 的析构发生在持有 AppState 租借的闭包里
+    drop(taken);
+}
+
+/// 选批量移动/复制的目标目录（系统目录对话框；取消则维持原状）。
+/// 选定后才弹确认框——确认框里显示的必须是真正要写进去的目录。
+pub fn pick_batch_target_dir(
+    op_type: photo_domain::BatchOpType,
+    window: &mut Window,
+    cx: &mut Context<AppState>,
+) {
+    cx.spawn_in(window, async move |weak, async_cx| {
+        let Some(folder) = rfd::AsyncFileDialog::new()
+            .set_title("选择批量操作的目标目录")
+            .pick_folder()
+            .await
+        else {
+            return;
+        };
+        let path = folder.path().to_path_buf();
+        let _ = async_cx.update(|_window, cx| {
+            let Some(entity) = weak.upgrade() else {
+                return;
+            };
+            entity.update(cx, |state, cx| {
+                state.batch_target_dir = Some(path.clone());
+                state.active_dialog = Some(super::app_state::ActiveDialog::BatchConfirm(op_type));
+                cx.notify();
+            });
+        });
+    })
+    .detach();
+}
+
+/// 删除指定路径列表到回收站（重复检测弹窗的「其余移入回收站」、Delete 键确认后）。
+
 pub fn delete_paths(state_entity: Entity<AppState>, paths: Vec<PathBuf>, cx: &mut App) {
     if paths.is_empty() {
         return;
     }
-    let current_dir = state_entity.read(cx).current_dir.clone();
+    let (current_dir, recursive) = {
+        let state = state_entity.read(cx);
+        (
+            state.current_dir.clone(),
+            state.app_config.include_subdirectories,
+        )
+    };
 
+    let rescan_dir = current_dir.clone();
     cx.spawn(async move |async_cx| {
-        let count = paths.len();
-        for p in &paths {
-            let _ = trash::delete(p);
-        }
+        // 走引擎的 delete_file_to_trash：删除动作不变，顺带拿回回收站条目（撤销恢复用）
+        let (ok, undo_ops, failures, not_undoable) = async_cx
+            .background_executor()
+            .spawn(async move {
+                let mut ok = 0usize;
+                let mut undo_ops = Vec::new();
+                let mut failures = Vec::new();
+                let mut not_undoable = 0usize;
+                for p in &paths {
+                    match photo_engine::ops::delete_file_to_trash(p) {
+                        Ok(Some(item)) => {
+                            ok += 1;
+                            undo_ops.push(photo_engine::undo::UndoOp::Trash {
+                                original: p.clone(),
+                                item,
+                            });
+                        }
+                        Ok(None) => {
+                            // 平台不支持回查（如 macOS）：文件已删，只是不可撤销
+                            ok += 1;
+                            not_undoable += 1;
+                        }
+                        Err(e) => failures.push(format!(
+                            "{}: {e}",
+                            p.file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| p.display().to_string())
+                        )),
+                    }
+                }
+                (ok, undo_ops, failures, not_undoable)
+            })
+            .await;
+
         let _ = async_cx.update(|cx| {
             let _ = state_entity.update(cx, |state, cx| {
-                state.set_status_message(format!("已删除 {count} 项到回收站"));
+                if !undo_ops.is_empty() {
+                    state.op_journal.record(undo_ops);
+                }
+                for f in failures.iter().take(3) {
+                    tracing::warn!("删除到回收站失败: {f}");
+                }
+                let msg = if failures.is_empty() {
+                    let mut m = format!("已删除 {ok} 项到回收站（Ctrl+Z 可恢复）");
+                    if not_undoable > 0 {
+                        m.push_str(&format!(
+                            "；其中 {not_undoable} 项无法从回收站恢复，请到系统回收站手动处理"
+                        ));
+                    }
+                    m
+                } else {
+                    format!(
+                        "删除到回收站：成功 {ok} 项、失败 {} 项（{}）",
+                        failures.len(),
+                        failures.first().cloned().unwrap_or_default()
+                    )
+                };
+                state.batch_result = Some(msg.clone());
+                state.set_status_message(msg);
                 cx.notify();
             });
         });
         // 重扫必须在上面的 update 之外启动：start_scan 自己会 update 同一个实体，
         // 嵌在上面的闭包里就是同一实体的双重租借（GPUI 直接 panic）。
-        if let Some(dir) = current_dir {
+        if let Some(dir) = rescan_dir {
             let _ = async_cx.update(|cx| {
-                start_scan(state_entity.clone(), dir, false, cx);
+                start_scan(state_entity.clone(), dir, recursive, cx);
             });
         }
     })

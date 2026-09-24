@@ -30,7 +30,7 @@ use crate::model::adjust::{
 use crate::model::best_frame::pick_best_frame;
 use crate::model::export::ExportDraft;
 use crate::model::burst::{BurstGroupMap, compute_burst_groups};
-use crate::model::filter::{FilterCriteria, default_filter_criteria};
+use crate::model::filter::{FilterCriteria, default_filter_criteria, has_active_filters};
 use crate::model::sort::apply_filter_and_sort;
 use crate::model::stacks::{
     STACK_TIME_GAP_MS, StackGroup, group_by_time, group_singles, group_stacks,
@@ -55,6 +55,10 @@ pub enum ActiveDialog {
     Duplicates,
     BurstConfirm,
     BatchConfirm(photo_domain::BatchOpType),
+    /// 直接删除选中项到回收站的确认（Delete 键；与左栏批量删除同一套口径）
+    DeleteConfirm,
+    /// 批量重命名（命名模板 + 实时预览）
+    Rename,
 }
 
 /// 设置弹窗子 Tab（§9.10）
@@ -200,6 +204,16 @@ pub struct AppState {
     pub app_config: AppConfig,
     pub image_manager: ImageManager,
     pub op_journal: OpJournal,
+    /// 批量移动/复制的目标目录（点左栏按钮时先选目录，再弹确认框）
+    pub batch_target_dir: Option<PathBuf>,
+    /// 批量重命名弹窗的模板输入框（首次打开弹窗时懒创建）
+    pub rename_template_input: Option<Entity<InputState>>,
+    /// 无激活筛选时用户是否已「显式确认」对全目录执行批量操作（§13 安全逃生门）。
+    /// 任何筛选变化都会复位（recompute_pipeline），避免解锁状态被带到下一次筛选。
+    pub batch_ignore_filter: bool,
+    /// 最近一次批量操作结果（含「Ctrl+Z 可撤销」提示）。状态栏消息会被随后的重扫
+    /// 「扫描完成，共 N 张照片」覆盖，所以在这里留一份常驻，左栏批量面板显示。
+    pub batch_result: Option<String>,
 
     // ── 派生管线 ──
     pub criteria: FilterCriteria,
@@ -689,6 +703,10 @@ impl AppState {
             app_config,
             image_manager: ImageManager::new(None),
             op_journal: OpJournal::new(),
+            batch_target_dir: None,
+            rename_template_input: None,
+            batch_ignore_filter: false,
+            batch_result: None,
 
             criteria: default_filter_criteria(),
             sort_by: SortBy::FileName,
@@ -815,6 +833,15 @@ impl AppState {
     pub fn open_import_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.current_dir.clone();
         self.import.reset(current.as_deref());
+        // 目标目录记忆（#14 导入侧）：上次导入用过就用上次的，否则回退当前浏览目录
+        if let Some(saved) = self
+            .app_config
+            .import_dir
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+        {
+            self.import.dest_root = saved;
+        }
         let dest = self.import.dest_root.clone();
         if let Some(input) = self.import_dest_input.clone() {
             input.update(cx, |input_state, cx| {
@@ -858,6 +885,31 @@ impl AppState {
         self.ensure_export_quality_slider(window, cx);
         self.sync_export_inputs(window, cx);
         self.active_dialog = Some(ActiveDialog::Export);
+        cx.notify();
+    }
+
+    // ── 批量重命名弹窗（§9.10）──
+
+    /// 打开批量重命名弹窗：没有照片时只提示，不开空弹窗。
+    /// 模板输入框懒创建（需要 Window），默认给一个能直接跑通的模板。
+    pub fn open_rename_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.items.is_empty() {
+            self.set_status_message("重命名失败：当前目录没有照片");
+            cx.notify();
+            return;
+        }
+        if self.rename_template_input.is_none() {
+            self.rename_template_input = Some(cx.new(|cx| {
+                InputState::new(window, cx).placeholder("{name}_{date}_{seq}（留空 = 不做任何改动）")
+            }));
+        }
+        // 每次打开都重置成默认模板：上一次的输入不带到新一次（与导入/导出口径一致）
+        if let Some(input) = self.rename_template_input.clone() {
+            input.update(cx, |input_state, cx| {
+                input_state.set_value("", window, cx);
+            });
+        }
+        self.active_dialog = Some(ActiveDialog::Rename);
         cx.notify();
     }
 
@@ -1204,6 +1256,12 @@ impl AppState {
 
     /// 重算派生管线（§3.2 顺序不可换）
     pub fn recompute_pipeline(&mut self) {
+        // 筛选一变就撤销「对全目录执行」的显式确认：解锁状态不能跨筛选条件存活，
+        // 否则用户上次解锁过、这次清空筛选后会**在没有二次确认的情况下**拿到全目录批量操作权限
+        if has_active_filters(&self.criteria) {
+            self.batch_ignore_filter = false;
+        }
+
         // 1. 筛选与排序 -> display_order
         self.display_order = apply_filter_and_sort(
             &self.items,

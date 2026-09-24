@@ -181,6 +181,11 @@ pub struct CaptureMeta {
     pub taxon_bbox: Option<BBox>,
     /// 多主体识别摘要（与 Recognition.subjects 对应；主主体在前，旧数据退化为单主体）
     pub subjects: Vec<SubjectSummary>,
+    /// 识别失败阶段（None = 没有失败 / 没有记录）。信息栏据此把失败原因说成人话
+    pub failure_stage: Option<RecognitionFailureStage>,
+    /// 最接近的候选（最多 3 个，与 Top-1 一起构成「相似度 + 间隔」判据的上下文）。
+    /// 识别失败或需复核时信息栏展示；复用 SubjectSummary（名字 + 相似度）避免再造一个同形结构。
+    pub candidates: Vec<SubjectSummary>,
 }
 
 /// 从 Capture 构造 CaptureMeta。注意 index 固定为 0（历史调用约定，
@@ -255,6 +260,8 @@ impl CaptureMeta {
             recognition_status: None,
             taxon_bbox: None,
             subjects: Vec::new(),
+            failure_stage: None,
+            candidates: Vec::new(),
         }
     }
 
@@ -302,6 +309,23 @@ impl CaptureMeta {
         self.taxon_gap = gap_to_runner_up(recognition.confidence, &recognition.candidates);
         self.recognition_status = Some(recognition.status);
         self.taxon_bbox = recognition.bbox;
+        // 失败原因与最接近候选：信息栏要显示「失败阶段中文 + 候选」，不接线的话这两项
+        // 在手册 §9.7 里写了很久但从没出现在界面上（docs/todo.md #13.5）
+        self.failure_stage = Some(recognition.failure_stage);
+        self.candidates = recognition
+            .candidates
+            .iter()
+            .take(3)
+            .map(|c| SubjectSummary {
+                // 候选可能没落到物种上（taxon = None）→ 用原始类别号当占位名
+                display_name: c
+                    .taxon
+                    .as_ref()
+                    .map(|t| t.display_name())
+                    .unwrap_or_else(|| format!("类别 #{}", c.class_index)),
+                confidence: Some(c.confidence),
+            })
+            .collect();
         // 多主体：有 subjects 用 subjects；旧数据（空）以顶层字段退化为单主体
         self.subjects = if recognition.subjects.is_empty() {
             recognition.taxon.as_ref().map(|t| {
@@ -1139,6 +1163,8 @@ mod tests {
             recognition_status: None,
             taxon_bbox: None,
             subjects: vec![],
+            failure_stage: None,
+            candidates: Vec::new(),
         };
         cm.enrich_with_xmp(&xmp);
         assert_eq!(cm.rating, Rating::Three);
@@ -1746,6 +1772,45 @@ mod tests {
         assert_eq!(cm.taxon_name, None);
         assert_eq!(cm.recognition_status, Some(RecognitionStatus::Unrecognized));
         assert_eq!(cm.taxon_bbox, None);
+        // 失败阶段落进摘要：信息栏靠它把「未识别」说成「检测异常」（§9.7，todo #13.5）
+        assert_eq!(cm.failure_stage, Some(RecognitionFailureStage::Detection));
+        assert_eq!(cm.failure_stage.unwrap().user_message(), "检测异常");
+        assert!(cm.candidates.is_empty());
+    }
+
+    #[test]
+    fn test_enrich_with_recognition_carries_top3_candidates() {
+        let mk = |class_index: u32, confidence: f32| TaxonCandidate {
+            class_index,
+            confidence,
+            taxon: None,
+        };
+        let rec = Recognition {
+            status: RecognitionStatus::NeedsReview,
+            taxon: None,
+            class_index: None,
+            confidence: None,
+            bbox: None,
+            // 4 个候选 → 摘要只带最近 3 个（信息栏一行装得下）
+            candidates: vec![mk(1, 61.5), mk(2, 55.0), mk(3, 44.0), mk(4, 30.0)],
+            failure_stage: RecognitionFailureStage::Mapping,
+            recognized_at: "2026-07-28T12:00:00Z".into(),
+            subjects: vec![],
+        };
+        let mut cm = CaptureMeta::from_capture(
+            &Capture {
+                base_name: "DSC_0003".into(),
+                source_files: vec![],
+                primary_index: 0,
+            },
+            0,
+        );
+        cm.enrich_with_recognition(&rec);
+        assert_eq!(cm.candidates.len(), 3, "候选截到 3 个");
+        // 没落到物种上的候选（taxon = None）用原始类别号当占位名，不显示空白
+        assert_eq!(cm.candidates[0].display_name, "类别 #1");
+        assert_eq!(cm.candidates[0].confidence, Some(61.5));
+        assert_eq!(cm.failure_stage.unwrap().user_message(), "名录映射失败");
     }
 
     #[test]

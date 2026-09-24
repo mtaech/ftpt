@@ -1,12 +1,11 @@
 //! 批量操作二次确认弹窗（对应 §8.4、§9.10 与 §10.4）。
 //!
-//! 筛选驱动：仅对当前筛选结果生效。
-//! 显示操作类型、影响照片数、确认与取消。
-
-use std::path::PathBuf;
+//! 筛选驱动：作用于当前可见顺序（display_order）；无筛选时按钮在左栏被锁住，
+//! 只有用户「显式确认」后才解锁（§13 安全逃生门，见 left_panel）。
+//! 确认后走 engine_ops::start_batch_op：后台执行 + 逐文件撤销记录 + 重扫。
 
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
 };
@@ -14,7 +13,7 @@ use gpui_kit::{Context, IntoElement, Window, div, prelude::*, px};
 use photo_domain::BatchOpType;
 
 use crate::state::AppState;
-use crate::state::engine_ops::{defer_entity_action, delete_paths};
+use crate::state::engine_ops::{defer_entity_action, start_batch_op};
 
 pub fn render_batch_confirm_dialog(
     state: &AppState,
@@ -30,18 +29,26 @@ pub fn render_batch_confirm_dialog(
         BatchOpType::Copy => "批量复制确认",
     };
 
+    // 目标目录文本：确认框里显示的必须是真正要写进去的目录（选目录在左栏点按钮时完成）
+    let dest_label = state
+        .batch_target_dir
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "（未选择目标目录）".to_string());
+    let dest_ready = !op_type.needs_target_dir() || state.batch_target_dir.is_some();
+
     let desc = match op_type {
         BatchOpType::Delete => format!(
-            "即将把当前筛选出的 {} 张照片（及其关联的 XMP/RAW 附属文件）移至系统回收站。\n此操作不可撤销，请确认。",
+            "即将把当前筛选出的 {} 张照片（及其关联的 XMP/RAW 附属文件）移至系统回收站。\n可在执行后通过 Ctrl+Z 从回收站恢复。",
             affected_count
         ),
         BatchOpType::Move => format!(
-            "即将把当前筛选出的 {} 张照片移动至目标目录。\n可在执行后通过 Ctrl+Z 撤销。",
-            affected_count
+            "即将把当前筛选出的 {} 张照片移动至：\n{}\n可在执行后通过 Ctrl+Z 撤销。",
+            affected_count, dest_label
         ),
         BatchOpType::Copy => format!(
-            "即将把当前筛选出的 {} 张照片复制至目标目录。",
-            affected_count
+            "即将把当前筛选出的 {} 张照片复制至：\n{}",
+            affected_count, dest_label
         ),
     };
 
@@ -89,6 +96,14 @@ pub fn render_batch_confirm_dialog(
                         .text_color(cx.theme().muted_foreground)
                         .child(desc),
                 )
+                .when(!dest_ready, |this| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().danger)
+                            .child("没有目标目录，无法执行；请重新点击左栏按钮并选择一个目录。"),
+                    )
+                })
                 .child(
                     h_flex()
                         .w_full()
@@ -102,12 +117,14 @@ pub fn render_batch_confirm_dialog(
                                 .label("取消")
                                 .on_click(cx.listener(|state, _, _, cx| {
                                     state.active_dialog = None;
+                                    state.batch_target_dir = None;
                                     cx.notify();
                                 })),
                         )
                         .child(
                             Button::new("confirm-batch-op")
                                 .small()
+                                .disabled(!dest_ready)
                                 .when(op_type == BatchOpType::Delete, |btn| btn.danger())
                                 .label(if op_type == BatchOpType::Delete {
                                     "确认删除"
@@ -115,26 +132,19 @@ pub fn render_batch_confirm_dialog(
                                     "确认执行"
                                 })
                                 .on_click(cx.listener(move |state, _, _window, cx| {
-                                    let paths_to_op: Vec<PathBuf> = state
-                                        .display_order
-                                        .iter()
-                                        .filter_map(|&i| {
-                                            state
-                                                .items
-                                                .get(i)
-                                                .map(|m| PathBuf::from(&m.primary_path))
-                                        })
-                                        .collect();
+                                    if !dest_ready {
+                                        return;
+                                    }
+                                    let target = state.batch_target_dir.clone();
                                     state.active_dialog = None;
+                                    state.batch_target_dir = None;
                                     cx.notify();
 
-                                    if op_type == BatchOpType::Delete && !paths_to_op.is_empty() {
-                                        // delete_paths 会同步 read/update AppState，必须等实体归还
-                                        let entity = cx.entity().clone();
-                                        defer_entity_action(cx, entity, move |entity, cx| {
-                                            delete_paths(entity, paths_to_op, cx);
-                                        });
-                                    }
+                                    // start_batch_op 会同步 update AppState，必须等实体归还
+                                    let entity = cx.entity().clone();
+                                    defer_entity_action(cx, entity, move |entity, cx| {
+                                        start_batch_op(entity, op_type, target, cx);
+                                    });
                                 })),
                         ),
                 ),

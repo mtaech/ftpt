@@ -138,6 +138,8 @@ mod tests {
             recognition_status: None,
             taxon_bbox: None,
             subjects: vec![],
+            failure_stage: None,
+            candidates: Vec::new(),
         }
     }
 

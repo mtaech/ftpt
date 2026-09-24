@@ -83,6 +83,10 @@ pub struct AppConfig {
     /// 旧配置无此字段时为 None（serde 静默忽略）；导入目标目录仍不记忆（#14 另一半）。
     #[serde(default)]
     pub export_dir: Option<String>,
+    /// 上次使用的导入目标根目录（导入弹窗预填；None = 未设置，回退当前浏览目录）。
+    /// 旧配置无此字段时为 None（serde 静默忽略）。
+    #[serde(default)]
+    pub import_dir: Option<String>,
     /// 扫描是否包含子目录（递归扫描全部子层）。默认 false = 单层扫描（保持现状）。
     /// 布尔字段无需钳制；改动后需重新扫描生效（scan 编排处按此值选单层/递归）。
     #[serde(default)]
@@ -170,6 +174,7 @@ impl Default for AppConfig {
             include_subdirectories: false,
             export_presets: vec![ExportPreset::default()],
             export_dir: None,
+            import_dir: None,
             stack_mode: StackMode::default(),
             grid_columns: default_grid_columns(),
             ui_scale: default_ui_scale(),
@@ -335,6 +340,23 @@ mod tests {
         assert_eq!(c.ui_scale, 70);
         assert_eq!(c.export_presets[0].quality, 1);
         assert_eq!(c.export_presets[0].long_edge, None);
+    }
+
+    #[test]
+    fn test_import_dir_roundtrip_and_missing_key() {
+        // 旧配置没有这个键 → None（serde 静默忽略，与 export_dir 同款，#14 导入侧）
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "uiScale = 100\n").unwrap();
+        let cfg = load_config(&path).unwrap();
+        assert_eq!(cfg.import_dir, None);
+
+        // 写入后能原样读回（导入弹窗预填用）
+        let mut cfg = AppConfig::default();
+        cfg.import_dir = Some("/tmp/pt-import-dest".to_string());
+        save_config(&path, &cfg).unwrap();
+        let back = load_config(&path).unwrap();
+        assert_eq!(back.import_dir.as_deref(), Some("/tmp/pt-import-dest"));
     }
 
     #[test]
