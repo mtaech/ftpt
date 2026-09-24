@@ -1,7 +1,11 @@
 # 发布打包（GPUI 版）：cargo release → 收集 exe + DLL + 模型 + 名录库 → zip
 #
-# 用法：pwsh scripts/package.ps1 [-Configuration release] [-Version 0.1.0]
+# 用法：pwsh scripts/package.ps1 [-Configuration release] [-Version 0.1.0] [-VerifyOnly]
 #   -Version 缺省时取根 Cargo.toml 的 [workspace.package].version（单一事实源）
+#   -VerifyOnly：只做「资产/版本校验 + 打印将要打进去的清单」，不构建、不拷贝、不打包。
+#     存在的理由：打包只能在 Windows 上完成（exe 名、DirectML.dll、bsdtar），
+#     但**校验逻辑**是跨平台的——在 Linux/macOS 上跑 -VerifyOnly 就能验证资产齐不齐、
+#     VERSION 字段对不对（历史上正是这里漏过 data/taxon/，打出来的包缺名录子集包）。
 #
 # 产物：dist/ftpt-<Version>-windows-x64.zip，解压即用（便携模式：
 # 配置 PT.db/PT.toml 与各照片文件夹的 .pt/ 首运时自建，不进包）。
@@ -22,14 +26,20 @@
 
 param(
     [string]$Configuration = "release",
-    [string]$Version = ""
+    [string]$Version = "",
+    [switch]$VerifyOnly
 )
 
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot          # 仓库根
 $manifest = Join-Path $root "Cargo.toml"
-$exeName = "ftpt.exe"
+# 二进制名跟着平台走：Windows 是 ftpt.exe，其它平台是 ftpt。
+# （-VerifyOnly 在 Linux 上跑时也能正确检查产物；打包本身仍只在 Windows 上有意义）
+# 用 RuntimeInformation 而不是 $IsWindows：后者只在 pwsh 7+ 存在
+$isWindowsHost = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+    [System.Runtime.InteropServices.OSPlatform]::Windows)
+$exeName = if ($isWindowsHost) { "ftpt.exe" } else { "ftpt" }
 $stageDir = Join-Path $root "dist/ftpt"
 
 # target 目录以 cargo 为准（本机可在 ~/.cargo/config.toml 里改到仓库外）
@@ -52,10 +62,14 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     throw "缺少命令：cargo（请安装 Rust 工具链）"
 }
 
-# 1. Rust release 构建
-Write-Host "==> cargo build --$Configuration -p photo-ui"
-cargo build --$Configuration -p photo-ui --manifest-path $manifest
-if ($LASTEXITCODE -ne 0) { throw "cargo build 失败" }
+# 1. Rust release 构建（-VerifyOnly 跳过：校验不需要产物，除非产物已存在）
+if ($VerifyOnly) {
+    Write-Host "==> -VerifyOnly：跳过 cargo build / 拷贝 / 打包，只做资产与版本校验"
+} else {
+    Write-Host "==> cargo build --$Configuration -p photo-ui"
+    cargo build --$Configuration -p photo-ui --manifest-path $manifest
+    if ($LASTEXITCODE -ne 0) { throw "cargo build 失败" }
+}
 
 # 2. 资产检查（缺失即失败，不打残缺包）
 $exe = Join-Path $targetDir $exeName
@@ -65,9 +79,16 @@ $taxonDir = Join-Path $root "data/taxon"
 $taxonFiles = @("txt_emb_bioclip-2.npy", "txt_emb_bioclip-2.json", "zh_names.json", "VERSION")
 $notice = Join-Path $root "NOTICE"
 $agpl = Join-Path $root "LICENSE-AGPL-3.0.txt"
-foreach ($required in @($exe, $modelsDir, $catalogDb, $taxonDir, $notice, $agpl)) {
+foreach ($required in @($modelsDir, $catalogDb, $taxonDir, $notice, $agpl)) {
     if (-not (Test-Path $required)) {
         throw "缺少发布资产：$required（模型放 models/，名录库 data/bird_catalog.db，名录子集包 data/taxon/，署名 NOTICE）"
+    }
+}
+if (-not (Test-Path $exe)) {
+    if ($VerifyOnly) {
+        Write-Host "==> 提示：产物尚不存在（$exe）；-VerifyOnly 下允许（未构建）"
+    } else {
+        throw "缺少构建产物：$exe"
     }
 }
 $taxonMissing = $taxonFiles | Where-Object { -not (Test-Path (Join-Path $taxonDir $_)) }
@@ -80,6 +101,25 @@ foreach ($key in @("schema", "dim", "labels")) {
     if ($null -eq $taxonVersion.$key) { throw "data/taxon/VERSION 缺少字段：$key" }
 }
 Write-Host "==> 名录子集包：schema $($taxonVersion.schema) / dim $($taxonVersion.dim) / labels $($taxonVersion.labels)"
+
+# -VerifyOnly 到这里就够了：不构建、不拷贝、不打包，只把「将要打进去的内容」打出来。
+# 这样在 Linux/macOS 上也能验证资产齐不齐、VERSION 字段对不对（打 Windows 包本身仍需 Windows）。
+if ($VerifyOnly) {
+    Write-Host ""
+    Write-Host "==> 校验通过，将要打进去的内容："
+    Write-Host "    $exeName（cargo build -p photo-ui 产物）"
+    Get-ChildItem $modelsDir -Filter "*.onnx" | ForEach-Object { Write-Host "    models/$($_.Name)" }
+    Write-Host "    data/bird_catalog.db"
+    Get-ChildItem $taxonDir | ForEach-Object { Write-Host "    data/taxon/$($_.Name)" }
+    Write-Host "    NOTICE / LICENSE / LICENSE-AGPL-3.0.txt"
+    if (Test-Path (Join-Path $root "local-lib/exiftool")) {
+        Write-Host "    exiftool/（ExifTool 运行时，随平台各自目录）"
+    }
+    Write-Host "    target/$Configuration/*.dll（Windows 上是 DirectML.dll；onnxruntime 已静态链接）"
+    Write-Host ""
+    Write-Host "==> -VerifyOnly 结束（未构建、未拷贝、未打包）"
+    exit 0
+}
 
 # 3. 收集到暂存目录
 if (Test-Path $stageDir) { Remove-Item -Recurse -Force $stageDir }
