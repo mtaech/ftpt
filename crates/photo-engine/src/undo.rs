@@ -13,6 +13,9 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+use photo_domain::AdjustParams;
+
+use crate::folder_db::FolderDb;
 use crate::ops::OpError;
 
 /// 回收站条目的最小快照（撤销删除用）。
@@ -44,8 +47,10 @@ const CAN_RESTORE_FROM_TRASH: bool = true;
 )))]
 const CAN_RESTORE_FROM_TRASH: bool = false;
 
-/// 单条逆向操作（文件粒度；from/to 均为完整路径）
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// 单条逆向操作（文件粒度；from/to 均为完整路径）。
+///
+/// 注意：Adjust 带浮点参数，所以整体只派生 PartialEq（不再有 Eq）。
+#[derive(Debug, Clone, PartialEq)]
 pub enum UndoOp {
     /// 移动：from → to（逆操作 = 把 to 移回 from）
     Move { from: PathBuf, to: PathBuf },
@@ -60,24 +65,39 @@ pub enum UndoOp {
         /// 回收站条目（恢复用）
         item: TrashedItem,
     },
+    /// 调整参数（逆操作 = 把 before 写回 folder_db 的这一行）。
+    /// 一条记录一张图：与文件类 op 一样「一条 op 一个结果」，撤销报告才能逐张说清成败。
+    Adjust {
+        /// folder_db 的相对路径键（分隔符统一为 /）
+        rel_path: String,
+        /// 记录时的旧参数（撤销要写回的值）
+        before: AdjustParams,
+        /// 本次写入的新参数（报告口径用；撤销本身不用）
+        after: AdjustParams,
+    },
 }
 
 impl UndoOp {
-    /// 撤销时操作的目标路径（副本/移动后的位置；删除 = 要恢复回的原路径）
-    pub fn target(&self) -> &Path {
+    /// 撤销时操作的目标路径（副本/移动后的位置；删除 = 要恢复回的原路径）。
+    /// Adjust 在 folder_db 里、不是文件路径 → None。
+    pub fn target(&self) -> Option<&Path> {
         match self {
-            UndoOp::Move { to, .. } | UndoOp::Rename { to, .. } | UndoOp::Copy { to, .. } => to,
-            UndoOp::Trash { original, .. } => original,
+            UndoOp::Move { to, .. } | UndoOp::Rename { to, .. } | UndoOp::Copy { to, .. } => {
+                Some(to)
+            }
+            UndoOp::Trash { original, .. } => Some(original),
+            UndoOp::Adjust { .. } => None,
         }
     }
 
-    /// 撤销时应恢复的源路径
-    pub fn origin(&self) -> &Path {
+    /// 撤销时应恢复的源路径（Adjust → None，见上）
+    pub fn origin(&self) -> Option<&Path> {
         match self {
             UndoOp::Move { from, .. } | UndoOp::Rename { from, .. } | UndoOp::Copy { from, .. } => {
-                from
+                Some(from)
             }
-            UndoOp::Trash { original, .. } => original,
+            UndoOp::Trash { original, .. } => Some(original),
+            UndoOp::Adjust { .. } => None,
         }
     }
 }
@@ -136,19 +156,31 @@ impl OpJournal {
         let ops = self.take();
         undo_ops(&ops)
     }
+
+    /// 撤销最近一批（带文件夹数据库）：调整参数类 op 要写回 folder_db，文件类 op 用不到
+    pub fn undo_last_with_db(&mut self, db: Option<&FolderDb>) -> Vec<UndoOutcome> {
+        let ops = self.take();
+        undo_ops_with_db(&ops, db)
+    }
 }
 
-/// 执行一批逆操作，逐条返回结果（跳过/失败不中止后续条目）
+/// 执行一批逆操作，逐条返回结果（跳过/失败不中止后续条目）。
+/// 不带数据库：Adjust 会被判为「跳过」（调用方应改用 undo_ops_with_db）。
 pub fn undo_ops(ops: &[UndoOp]) -> Vec<UndoOutcome> {
+    undo_ops_with_db(ops, None)
+}
+
+/// 带文件夹数据库的撤销：Adjust 把 before 写回对应行。
+pub fn undo_ops_with_db(ops: &[UndoOp], db: Option<&FolderDb>) -> Vec<UndoOutcome> {
     ops.iter()
         .map(|op| UndoOutcome {
             op: op.clone(),
-            result: undo_one(op),
+            result: undo_one(op, db),
         })
         .collect()
 }
 
-fn undo_one(op: &UndoOp) -> Result<(), UndoError> {
+fn undo_one(op: &UndoOp, db: Option<&FolderDb>) -> Result<(), UndoError> {
     match op {
         UndoOp::Move { from, to } | UndoOp::Rename { from, to } => {
             // 逆操作前提：目标存在、原位置未被占用（防覆盖已有文件造成数据丢失）
@@ -193,6 +225,17 @@ fn undo_one(op: &UndoOp) -> Result<(), UndoError> {
                 )));
             }
             restore_from_trash(item)
+        }
+        UndoOp::Adjust {
+            rel_path, before, ..
+        } => {
+            let Some(db) = db else {
+                return Err(UndoError::Skipped(
+                    "调整参数撤销需要文件夹数据库（应由 UI 层带库调用）".into(),
+                ));
+            };
+            db.put_adjustments(rel_path, before)
+                .map_err(|e| UndoError::Skipped(format!("写回调整参数失败 {rel_path}: {e}")))
         }
     }
 }
@@ -258,6 +301,54 @@ fn move_file(src: &Path, dest: &Path) -> Result<(), OpError> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// 调整参数撤销：把 before 写回 folder_db 的对应行（带库调用才有效）
+    #[test]
+    fn test_undo_adjust_writes_before_params_back() {
+        let tmp = TempDir::new().unwrap();
+        let db = crate::folder_db::FolderDb::open_in_dir(tmp.path()).unwrap();
+        let before = AdjustParams {
+
+            exposure: 0.5,
+            contrast: 10,
+            saturation: 0,
+            ..AdjustParams::default()
+        };
+        let after = AdjustParams {
+
+            exposure: 1.5,
+            contrast: -5,
+            saturation: 20,
+            ..AdjustParams::default()
+        };
+        db.put_adjustments("a.jpg", &after).unwrap();
+
+        let ops = vec![UndoOp::Adjust {
+            rel_path: "a.jpg".into(),
+            before,
+            after,
+        }];
+        let outcomes = undo_ops_with_db(&ops, Some(&db));
+        assert_eq!(outcomes.len(), 1);
+        assert!(outcomes[0].result.is_ok(), "{:?}", outcomes[0].result);
+        assert_eq!(db.get_adjustments("a.jpg").unwrap().unwrap(), before);
+    }
+
+    /// 不带库时不 panic、不假装成功：明确报「跳过」并给可读原因
+    #[test]
+    fn test_undo_adjust_without_db_is_skipped() {
+        let ops = vec![UndoOp::Adjust {
+            rel_path: "a.jpg".into(),
+            before: AdjustParams::default(),
+            after: AdjustParams {
+                exposure: 1.0,
+                ..Default::default()
+            },
+        }];
+        let outcomes = undo_ops(&ops);
+        assert_eq!(outcomes.len(), 1);
+        assert!(matches!(outcomes[0].result, Err(UndoError::Skipped(_))));
+    }
 
     /// 在 dir 下写一个内容确定的文件
     fn write_file(dir: &TempDir, name: &str) -> PathBuf {

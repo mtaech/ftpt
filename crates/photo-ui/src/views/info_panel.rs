@@ -12,7 +12,7 @@
 //!   - 曝光 / 对比度 / 饱和度 滑杆
 
 use gpui_kit::component::{
-    ActiveTheme as _, IconName, Selectable as _, Sizable as _, StyledExt as _,
+    ActiveTheme as _, Disableable as _, IconName, Selectable as _, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     rating::Rating as ComponentRating,
@@ -20,11 +20,12 @@ use gpui_kit::component::{
     tag::Tag,
     v_flex,
 };
-use gpui_kit::{Context, Entity, IntoElement, Window, div, prelude::*, px};
+use gpui_kit::{Context, Entity, IntoElement, MouseButton, Window, div, prelude::*, px};
 use photo_domain::{ColorLabel, Flag, Rating, RecognitionStatus};
 
 use crate::actions::{RecognizeSelected, ToggleBbox};
-use crate::model::adjust::{AdjustField, format_exposure, format_tone};
+use crate::model::adjust::AdjustField;
+use crate::views::histogram::render_histogram_card;
 use crate::state::AppState;
 use crate::state::engine_ops::{set_color_label, set_flag, set_rating};
 use crate::theme::{
@@ -32,7 +33,7 @@ use crate::theme::{
 };
 
 pub fn render_info_tab(
-    _state: &AppState,
+    state: &AppState,
     meta: Option<&photo_domain::CaptureMeta>,
     cx: &mut Context<AppState>,
 ) -> impl IntoElement + use<> {
@@ -49,6 +50,22 @@ pub fn render_info_tab(
             .into_any_element();
     };
 
+    // 直方图只在「预览里当前显示的正是这张」时用：否则会把上一张的统计画到这张头上
+    let stats_for_this_photo = state
+        .preview_image
+        .as_ref()
+        .is_some_and(|(p, _)| p == &meta.primary_path);
+    let histogram = if stats_for_this_photo {
+        state.preview_histogram.as_ref()
+    } else {
+        None
+    };
+    let base_histogram = if stats_for_this_photo {
+        state.preview_base_histogram.as_ref()
+    } else {
+        None
+    };
+
     v_flex()
         .w_full()
         .gap_2()
@@ -56,6 +73,7 @@ pub fn render_info_tab(
         .child(
             crate::theme::section_first(cx)
                 .gap_1p5()
+                .child(render_histogram_card(histogram, base_histogram, cx))
                 .child(
                     div()
                         .id("info-file-name")
@@ -90,7 +108,15 @@ pub fn render_info_tab(
                         } else {
                             "-".to_string()
                         })),
-                ),
+                )
+                .when(meta.is_empty_source(), |this| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().danger)
+                            .child("源文件为空（0 字节）：可能是复制或传输中断。\n预览 / 缩略图 / 识别都不会有结果——请重新拷贝该文件，或用筛选栏「只看空文件」把它们找出来处理"),
+                    )
+                }),
         )
         // ── 2. 拍摄信息：2x2 曝光四格卡片 ──
         .child(
@@ -574,18 +600,28 @@ pub fn render_adjustments_tab(
     state.ensure_adjust_sliders(window, cx);
 
     let params = state.adjust;
-    let (exposure_slider, contrast_slider, saturation_slider) = {
-        let sliders = state
-            .adjust_sliders
-            .as_ref()
-            .expect("ensure_adjust_sliders 刚执行过");
-        (
-            sliders.exposure.clone(),
-            sliders.contrast.clone(),
-            sliders.saturation.clone(),
-        )
-    };
+    // 滑杆实体与 AdjustField::ALL 同序（数量随枚举走，加参数不用改这里）
+    let slider_entities = state
+        .adjust_sliders
+        .as_ref()
+        .expect("ensure_adjust_sliders 刚执行过")
+        .all_entities();
     let is_adjusted = !params.is_neutral();
+    // 批量 / 复用的可用性由纯逻辑给（口径与批量文件操作一致：选中集 ∩ 筛选结果）
+    let batch_count = crate::model::adjust::adjust_targets(
+        &state.selected_indices,
+        &state.display_order,
+    )
+    .len();
+    let has_previous = crate::model::adjust::previous_in_order(
+        state.primary_selected_index(),
+        &state.display_order,
+    )
+    .is_some();
+    let clipboard_ready = state.adjust_clipboard.is_some();
+    // 预设（§9.7 补充）：chip 点一下套用；保存 / 删除都落配置文件
+    let presets = state.app_config.adjust_presets.clone();
+    let current_preset_ix = state.current_adjust_preset();
 
     v_flex()
         .w_full()
@@ -632,35 +668,144 @@ pub fn render_adjustments_tab(
                     )
                 }),
         )
-        .child(render_adjust_row(
-            "曝光 (EV)",
-            format_exposure(params.exposure),
-            params.exposure == 0.0,
-            AdjustField::Exposure,
-            exposure_slider,
+        .child(render_histogram_card(
+            state.preview_histogram.as_ref(),
+            state.preview_base_histogram.as_ref(),
             cx,
         ))
-        .child(render_adjust_row(
-            "对比度",
-            format_tone(params.contrast),
-            params.contrast == 0,
-            AdjustField::Contrast,
-            contrast_slider,
-            cx,
-        ))
-        .child(render_adjust_row(
-            "饱和度",
-            format_tone(params.saturation),
-            params.saturation == 0,
-            AdjustField::Saturation,
-            saturation_slider,
-            cx,
-        ))
+        // 批量与复用（§9.7 补充）：复制 / 粘贴 / 沿用上一张 / 套用到选中
+        .child(
+            h_flex()
+                .w_full()
+                .flex_wrap()
+                .gap_1()
+                .child(
+                    Button::new("adjust-copy")
+                        .ghost()
+                        .xsmall()
+                        .label("复制参数")
+                        .tooltip("复制当前调整参数（Ctrl+Shift+C）")
+                        .on_click(cx.listener(|state, _, _, cx| {
+                            state.copy_adjustments();
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("adjust-paste")
+                        .ghost()
+                        .xsmall()
+                        .label("粘贴")
+                        .tooltip("粘贴到选中集（无选中 = 当前这张）（Ctrl+Shift+V）")
+                        .disabled(!clipboard_ready)
+                        .on_click(cx.listener(|state, _, window, cx| {
+                            state.paste_adjustments(window, cx);
+                        })),
+                )
+                .child(
+                    Button::new("adjust-reuse-prev")
+                        .ghost()
+                        .xsmall()
+                        .label("沿用上一张")
+                        .tooltip("把可见顺序里前一张的调整参数套到这组照片上")
+                        .disabled(!has_previous)
+                        .on_click(cx.listener(|state, _, window, cx| {
+                            state.reuse_previous_adjustments(window, cx);
+                        })),
+                )
+                .when(batch_count > 1, |this| {
+                    this.child(
+                        Button::new("adjust-apply-selection")
+                            .ghost()
+                            .xsmall()
+                            .label(format!("套用到选中 {batch_count} 张"))
+                            .tooltip("把当前参数写进选中集（Ctrl+Z 可撤销）")
+                            .on_click(cx.listener(|state, _, window, cx| {
+                                state.apply_adjustments_to_selection(window, cx);
+                            })),
+                    )
+                }),
+        )
+        // 预设行：chip 点一下套用当前参数；保存 / 删除都落配置文件（与导出预设同约定）
+        .child(
+            v_flex()
+                .w_full()
+                .gap_1()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_medium()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("预设"),
+                        )
+                        .child(
+                            Button::new("adjust-preset-save")
+                                .ghost()
+                                .xsmall()
+                                .label("保存当前参数")
+                                .tooltip("把当前曝光/对比度/饱和度存成预设（配置文件，重启后仍在）")
+                                .on_click(cx.listener(|state, _, _, cx| {
+                                    state.save_adjust_preset(cx);
+                                })),
+                        ),
+                )
+                .when(!presets.is_empty(), |this| {
+                    this.child(h_flex().w_full().flex_wrap().gap_1().children(
+                        presets.iter().enumerate().map(|(i, preset)| {
+                            let preset = preset.clone();
+                            Button::new(format!("adjust-preset-{i}"))
+                                .xsmall()
+                                .rounded_full()
+                                .label(crate::model::adjust::preset_chip_label(&preset))
+                                .selected(current_preset_ix == Some(i))
+                                .on_click(cx.listener(move |state, _, window, cx| {
+                                    state.apply_adjust_preset(i, window, cx);
+                                }))
+                        }),
+                    ))
+                })
+                .when(!presets.is_empty(), |this| {
+                    this.child(
+                        Button::new("adjust-preset-delete")
+                            .ghost()
+                            .xsmall()
+                            .label("删除当前预设")
+                            .tooltip("当前参数正好等于哪个预设，就删哪一个")
+                            .disabled(current_preset_ix.is_none())
+                            .on_click(cx.listener(|state, _, _, cx| {
+                                if let Some(ix) = state.current_adjust_preset() {
+                                    state.delete_adjust_preset(ix, cx);
+                                }
+                            })),
+                    )
+                }),
+        )
+        .children({
+            // 七行滑杆：标签 / 数值 / 中性态 / 量程全部来自 AdjustField（加参数只改枚举）
+            let mut rows = Vec::with_capacity(AdjustField::ALL.len());
+            for field in AdjustField::ALL {
+                if let Some(slider) = slider_entities.get(field.index()).cloned() {
+                    rows.push(render_adjust_row(
+                        field.label(),
+                        field.format_value(&params),
+                        field.is_neutral(&params),
+                        field,
+                        slider,
+                        cx,
+                    ));
+                }
+            }
+            rows
+        })
         .child(
             div()
                 .text_size(px(10.))
                 .text_color(cx.theme().muted_foreground)
-                .child("参数随图片保存，原图永不被修改"),
+                .child("参数随图片保存，原图永不被修改 · 按住 \\ 看原图"),
         )
         .into_any_element()
 }
@@ -673,7 +818,7 @@ fn render_adjust_row(
     field: AdjustField,
     slider: Entity<SliderState>,
     cx: &mut Context<AppState>,
-) -> impl IntoElement {
+) -> impl IntoElement + use<> {
     v_flex()
         .w_full()
         .gap_2()
@@ -685,8 +830,27 @@ fn render_adjust_row(
                 .gap_2()
                 .child(
                     div()
+                        .id(label)
                         .text_xs()
                         .text_color(cx.theme().foreground)
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(
+                                "双击归零；[ / ] 微调曝光（Shift 加速）",
+                            )
+                            .build(window, cx)
+                        })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(
+                                move |state, event: &gpui_kit::MouseDownEvent, window, cx| {
+                                    // 双击标签归零：与「重置」按钮同一条路径
+                                    if event.click_count == 2 {
+                                        state.reset_adjust_field(field, window, cx);
+                                        cx.notify();
+                                    }
+                                },
+                            ),
+                        )
                         .child(label),
                 )
                 .child(

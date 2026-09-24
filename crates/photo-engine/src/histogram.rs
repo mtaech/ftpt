@@ -127,11 +127,12 @@ pub fn compute_histogram_from_file(path: &Path) -> Result<HistogramData, Histogr
     Ok(compute_histogram(&img))
 }
 
-/// 生成剪切叠加图（RGBA PNG 字节）：红 = 高光溢出（luma >= 250）、
-/// 蓝 = 死黑（luma <= 5），其余透明。与直方图同一阈值/luma 公式，
-/// 前端把该图以主图同尺寸叠放即可看到过曝/欠曝区域。
-pub fn clipping_mask_png(path: &Path, long_edge: u32) -> Result<Vec<u8>, HistogramError> {
-    let img = load_preview_rgb(path, long_edge)?;
+/// 从 RGB8 像素图生成剪切叠加（纯函数，不碰磁盘）：红 = 高光溢出（luma >= 250）、
+/// 蓝 = 死黑（luma <= 5），其余透明。与直方图同一阈值/luma 公式。
+///
+/// **调整链路用这个**：调过参数的预览要把掩码算在**烘焙后的像素**上，
+/// 否则「+1 EV 之后红区没变」，剪切警告就失去了判据意义。
+pub fn clipping_mask_rgba(img: &image::RgbImage) -> image::RgbaImage {
     let (w, h) = img.dimensions();
     let mut rgba = image::RgbaImage::new(w, h);
     for (x, y, px) in img.enumerate_pixels() {
@@ -147,6 +148,14 @@ pub fn clipping_mask_png(path: &Path, long_edge: u32) -> Result<Vec<u8>, Histogr
         };
         rgba.put_pixel(x, y, color);
     }
+    rgba
+}
+
+/// 生成剪切叠加图（RGBA PNG 字节）：从文件按预览尺寸解码后走 [`clipping_mask_rgba`]。
+/// 前端把该图以主图同尺寸叠放即可看到过曝/欠曝区域。
+pub fn clipping_mask_png(path: &Path, long_edge: u32) -> Result<Vec<u8>, HistogramError> {
+    let img = load_preview_rgb(path, long_edge)?;
+    let rgba = clipping_mask_rgba(&img);
     let mut out = Vec::new();
     image::DynamicImage::ImageRgba8(rgba).write_to(
         &mut std::io::Cursor::new(&mut out),
@@ -249,6 +258,29 @@ mod tests {
         assert_eq!(h.b[0], 2500);
         assert_eq!(h.luma[76], 2500);
         assert_eq!(h.clip_high_count, 0, "纯红 luma≈76 不触剪切");
+    }
+
+    /// 纯函数版掩码：阈值、颜色、尺寸三件事与统计口径一致（不经文件往返）。
+    #[test]
+    fn test_clipping_mask_rgba_thresholds_and_dims() {
+        let mut img = image::RgbImage::new(3, 2);
+        for y in 0..2 {
+            img.put_pixel(0, y, image::Rgb([0, 0, 0]));
+            img.put_pixel(1, y, image::Rgb([128, 128, 128]));
+            img.put_pixel(2, y, image::Rgb([250, 250, 250]));
+        }
+        let mask = clipping_mask_rgba(&img);
+        assert_eq!(mask.dimensions(), (3, 2));
+        // luma=250 恰在阈值上（>= 250 算高光），128 透明，0 死黑
+        assert_eq!(mask.get_pixel(0, 1).0, [0, 0, 255, 255]);
+        assert_eq!(mask.get_pixel(1, 1).0, [0, 0, 0, 0]);
+        assert_eq!(mask.get_pixel(2, 1).0, [255, 0, 0, 255]);
+        // 与统计口径一致：掩码里的红/蓝像素数 == 直方图的剪切计数
+        let h = compute_histogram(&img);
+        let red = mask.pixels().filter(|p| p.0 == [255, 0, 0, 255]).count() as u32;
+        let blue = mask.pixels().filter(|p| p.0 == [0, 0, 255, 255]).count() as u32;
+        assert_eq!(red, h.clip_high_count);
+        assert_eq!(blue, h.clip_low_count);
     }
 
     #[test]

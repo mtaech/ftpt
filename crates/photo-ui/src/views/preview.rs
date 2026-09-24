@@ -74,6 +74,8 @@ pub fn render_photo_preview(
     state.ensure_adjustments_loaded(&meta.primary_path, window, cx);
     let adjust_active = state.adjust_path.as_deref() == Some(meta.primary_path.as_str())
         && !state.adjust.is_neutral();
+    // before/after：按住反斜杠时改用未调整母版（没有调整时预览本来就是原图，无需切换）
+    let holding_original = state.before_after_held && adjust_active;
 
     // 视口尺寸：优先使用 post-layout prepaint 实测尺寸；首帧回退根据窗口与边栏动态估算
     let (container_w, container_h) = if let Some((w, h)) = state.preview_viewport_size {
@@ -167,6 +169,7 @@ pub fn render_photo_preview(
                 state.image_manager.clone(),
                 meta.primary_path.clone(),
                 src,
+                state.show_clipping,
                 cx,
             );
         }
@@ -186,6 +189,17 @@ pub fn render_photo_preview(
         .as_ref()
         .filter(|(p, _)| p == &meta.primary_path)
         .map(|(_, img)| img.clone());
+
+    // before/after 的图源：未调整母版（可能还在后台加载；未就绪时保持调整图，不闪白）
+    let base_image = if holding_original {
+        state
+            .preview_base_image
+            .as_ref()
+            .filter(|(p, _)| p == &meta.primary_path)
+            .map(|(_, img)| img.clone())
+    } else {
+        None
+    };
 
     // 显示尺寸超过母版可用像素（母版长边 = MASTER_SIZE）时需要真原图：1:1 与高倍放大都属此列。
     // 常规图直接渲染原文件（one_to_one），RAW 渲染层解不了，改后台加载全分辨率母版
@@ -216,6 +230,29 @@ pub fn render_photo_preview(
         );
     }
 
+    // 有调整时，显示尺寸一旦超过调整链路（1600）的像素，就请求全分辨率调整帧；
+    // 未就绪前先沿用放大后的母版（不闪、不空白），就绪后替换。
+    let want_full_adjusted = adjust_active
+        && !holding_original
+        && exceeds_master_res((disp_w, disp_h), crate::image::ADJUST_SOURCE_SIZE);
+    let toned_full_ready = state
+        .preview_full_toned_params
+        .as_ref()
+        .is_some_and(|(p, _)| p == &meta.primary_path);
+    let full_toned = if want_full_adjusted && toned_full_ready {
+        state
+            .preview_full
+            .as_ref()
+            .filter(|(p, _)| p == &meta.primary_path)
+            .map(|(_, img)| img.clone())
+    } else {
+        None
+    };
+    if want_full_adjusted && full_toned.is_none() {
+        // 停手闸门 + 同 (path, 参数) 去重都在 request_adjust_full 里
+        state.request_adjust_full(cx);
+    }
+
     let zoom_pct = if state.preview_zoom == 0.0 {
         100
     } else if natural_w > 0.0 {
@@ -229,6 +266,17 @@ pub fn render_photo_preview(
     let image_entity = cx.entity().clone();
     let is_dragging = state.preview_drag_start.is_some();
     let can_pan = disp_w > container_w || disp_h > container_h;
+    // 剪切警告叠加（§7.4）：掩码按图片路径归属，只画属于当前这张图的那份
+    // 掩码算在调整后的像素上：按住看原图时它不对应当前画面，必须一起收起来
+    let clip_mask = if state.show_clipping && !holding_original {
+        state
+            .preview_clip_mask
+            .as_ref()
+            .filter(|(p, _)| p == &meta.primary_path)
+            .map(|(_, img)| img.clone())
+    } else {
+        None
+    };
     // 框选：叠加层用值 + 触发识别要的文件路径（BBox 是 Copy）
     let region_overlay = state.region_bbox;
     let region_path = meta.primary_path.clone();
@@ -318,6 +366,12 @@ pub fn render_photo_preview(
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(|state, event: &gpui_kit::MouseDownEvent, _window, cx| {
+                        // 框选拖拽中右键 = 取消这次框（比弹菜单更符合直觉）
+                        if state.region_drag_start.take().is_some() {
+                            state.region_bbox = None;
+                            cx.notify();
+                            return;
+                        }
                         let path = state
                             .primary_selected_meta()
                             .map(|m| m.primary_path.clone())
@@ -453,6 +507,12 @@ pub fn render_photo_preview(
                         } else if let Some(full_img) = full {
                             // RAW 的 1:1 / 高倍放大：全分辨率图源（已超过母版像素）
                             img(full_img).w_full().h_full().into_any_element()
+                        } else if let Some(toned_full) = full_toned {
+                            // 1:1 / 高倍放大：全分辨率调整帧（滑杆停手后异步重算）
+                            img(toned_full).w_full().h_full().into_any_element()
+                        } else if let Some(base_img) = base_image {
+                            // before/after：按住反斜杠看未调整母版
+                            img(base_img).w_full().h_full().into_any_element()
                         } else if let Some(master_img) = master {
                             img(master_img).w_full().h_full().into_any_element()
                         } else if let Some(ref tp) = thumb_path {
@@ -465,6 +525,17 @@ pub fn render_photo_preview(
                                 .bg(cx.theme().muted)
                                 .into_any_element()
                         })
+                        // ── 叠加层：剪切警告（红 = 高光溢出、蓝 = 死黑；图与主图同尺寸） ──
+                        .children(clip_mask.map(|mask| {
+                            div()
+                                .absolute()
+                                .top(px(0.))
+                                .left(px(0.))
+                                .w_full()
+                                .h_full()
+                                .opacity(0.7)
+                                .child(img(mask).w_full().h_full())
+                        }))
                         // ── 叠加层：主体检测框 ──
                         .when(state.show_bbox && meta.taxon_bbox.is_some(), |this| {
                             let bbox = meta.taxon_bbox.as_ref().unwrap();
@@ -566,7 +637,11 @@ pub fn render_photo_preview(
                         } else {
                             cx.theme().muted_foreground
                         })
-                        .child(region_hint_text(state.region_select, state.region_shift_held)),
+                        .child(region_hint_text(
+                    state.region_select,
+                    state.region_shift_held,
+                    state.region_drag_start.is_some(),
+                )),
                 ),
         )
         // ── 2. 底部浮动胶囊工具条 (Material You Floating Pill Toolbar) ──

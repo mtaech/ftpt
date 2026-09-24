@@ -84,7 +84,8 @@ fn main() {
             if let Some(dir_str) = last_dir {
                 let path = PathBuf::from(&dir_str);
                 if path.is_dir() {
-                    start_scan(app_state.clone(), path, false, cx);
+                    let recursive = app_state.read(cx).app_config.include_subdirectories;
+                    start_scan(app_state.clone(), path, recursive, cx);
                 }
             }
 

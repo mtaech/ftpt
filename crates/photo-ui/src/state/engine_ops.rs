@@ -50,6 +50,15 @@ pub fn start_scan(state_entity: Entity<AppState>, dir: PathBuf, recursive: bool,
         state.adjust_path = None;
         state.adjust = AdjustParams::default();
         state.adjust_preview_toned = false;
+        state.preview_histogram = None;
+        state.preview_base_histogram = None;
+        state.preview_clip_mask = None;
+        state.preview_base_image = None;
+        state.before_after_held = false;
+        state.adjust_preview_16bit = false;
+        state.preview_full_toned_params = None;
+        state.preview_full_toned_request = None;
+        state.adjust_full_settled = true;
         state.scan_generation = state.scan_generation.wrapping_add(1);
         state.scan_cancel.store(true, Ordering::Relaxed);
         let new_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -86,6 +95,13 @@ pub fn start_scan(state_entity: Entity<AppState>, dir: PathBuf, recursive: bool,
                     Ok((metas, db)) => {
                         state.items = metas;
                         state.folder_db = db;
+                        // 焦点图若已不在列表里（源文件被外部删除）：预览/调整槽位一起清掉，
+                        // 别让面板继续挂着那张已经不存在的图
+                        state.prune_preview_if_absent();
+                        // 统计页右栏若正开着某物种，重建它的照片列表（失踪的行随之消失）
+                        if let Some(species) = state.stats_selected_species.clone() {
+                            select_stats_species(state, &species);
+                        }
                         state
                             .image_manager
                             .set_cache_dir(Some(dir.join(".pt").join("thumbs")));
@@ -102,10 +118,21 @@ pub fn start_scan(state_entity: Entity<AppState>, dir: PathBuf, recursive: bool,
                         state.subdirs = list_subdirectories(&dir);
 
                         state.recompute_pipeline();
-                        state.set_status_message(format!(
-                            "扫描完成，共 {} 张照片",
-                            state.items.len()
-                        ));
+                        // 0 字节残骸（复制/传输中断）只说一次：否则用户只看到灰格子 +
+                        // 日志里一条条「缩略图生成失败」，不知道发生了什么
+                        let empty = state
+                            .items
+                            .iter()
+                            .filter(|m| m.is_empty_source())
+                            .count();
+                        state.set_status_message(if empty > 0 {
+                            format!(
+                                "扫描完成，共 {} 张照片（其中 {empty} 张源文件为 0 字节，可能是复制中断；筛选栏「只看空文件」可定位）",
+                                state.items.len()
+                            )
+                        } else {
+                            format!("扫描完成，共 {} 张照片", state.items.len())
+                        });
 
                         // 选中：统计页跳转优先（按 pending 路径定位），否则默认第一张
                         let pending = state.pending_select_path.take();
@@ -284,7 +311,7 @@ pub fn start_thumb_pipeline(state_entity: Entity<AppState>, generation: u64, cx:
                             "缩略图管线：{failed}/{total} 张读取失败（空文件或损坏），已跳过：{samples}"
                         );
                         state.set_status_message(format!(
-                            "{failed} 张无法生成缩略图（空文件或损坏），已跳过"
+                            "{failed} 张无法生成缩略图（空文件或损坏），已跳过（0 字节的可用筛选栏「只看空文件」定位）"
                         ));
                     }
                     cx.notify();
@@ -307,24 +334,35 @@ pub fn load_preview_image(
     manager: ImageManager,
     path: String,
     source: SourceFile,
+    want_clip_mask: bool,
     cx: &mut App,
 ) {
     cx.spawn(async move |async_cx| {
         let result = async_cx
             .background_executor()
-            .spawn(async move { manager.load_master_image(&source, None) })
+            .spawn(async move {
+                manager.build_preview_frame(&source, &AdjustParams::default(), want_clip_mask)
+            })
             .await;
 
         let _ = async_cx.update(|cx| {
             let _ = state_entity.update(cx, |state, cx| {
                 match result {
-                    Ok(img) => {
-                        // 只有「当前请求的仍是这张」才替换显示；否则留在内存缓存里（回头再点即秒开）
-                        // 且这张已有烘焙好的调整预览时不能用未调整母版覆盖（两者可能并发完成）
+                    Ok(frame) => {
+                        // 只有「当前请求的仍是这张」才写回；否则留在内存缓存里（回头再点即秒开）
+                        // 且这张已有烘焙好的调整预览时不能用未调整母版/中性直方图覆盖
+                        // （调整帧与母版帧可能并发完成）
                         let toned_active = state.adjust_preview_toned
                             && state.adjust_path.as_deref() == Some(path.as_str());
-                        if state.preview_request.as_deref() == Some(path.as_str()) && !toned_active {
-                            state.preview_image = Some((path.clone(), img));
+                        if state.preview_request.as_deref() == Some(path.as_str()) {
+                            // 基线直方图任何时候都能写：它按定义就是原图口径
+                            state.preview_base_histogram = Some(frame.base_histogram);
+                            if !toned_active {
+                                state.preview_image = Some((path.clone(), frame.image));
+                                state.preview_histogram = Some(frame.histogram);
+                                state.preview_clip_mask =
+                                    frame.clip_mask.map(|m| (path.clone(), m));
+                            }
                         }
                     }
                     Err(e) => tracing::warn!("预览母版加载失败 {path}: {e}"),
@@ -361,6 +399,8 @@ pub fn load_preview_full(
                         // 只有「当前请求的仍是这张」才替换显示；否则留在内存缓存里（回头再点即秒开）
                         if state.preview_full_request.as_deref() == Some(path.as_str()) {
                             state.preview_full = Some((path.clone(), img));
+                            // 槽位里现在是**未调整**图源：清掉「调整帧」标记，渲染层据此区分
+                            state.preview_full_toned_params = None;
                         }
                     }
                     Err(e) => tracing::warn!("1:1 全分辨率加载失败 {path}: {e}"),
@@ -413,19 +453,94 @@ pub fn persist_adjustments(state: &AppState, path: &str, params: &AdjustParams) 
 /// 拖动滑杆会连续发起多次渲染，只有 `seq` 仍是最新的那次允许写回（旧帧丢弃，
 /// 画面不回跳）；切图后 `adjust_path` 变了，过期结果同样被丢弃。
 /// 与 `load_preview_image` 同口径——manager 由调用方传入（渲染期实体已被可变借用）。
+/// 批量写调整参数：逐张 upsert folder_db + 即时更新内存徽标，并产出撤销记录。
+///
+/// 不开后台线程：N 行 SQLite upsert 是毫秒级，走后台反而要处理「写库完成但 UI 已切图」的竞态。
+/// 返回的 op 交给调用方 op_journal.record（单槽：记最近一次批量）。
+pub fn apply_adjustments_batch(
+    state: &mut AppState,
+    targets: &[usize],
+    params: AdjustParams,
+) -> Vec<photo_engine::undo::UndoOp> {
+    let (Some(db), Some(dir)) = (state.folder_db.as_ref(), state.current_dir.as_ref()) else {
+        return Vec::new();
+    };
+    let mut ops = Vec::new();
+    for &idx in targets {
+        let Some(meta) = state.items.get_mut(idx) else {
+            continue;
+        };
+        let Some(rel) = rel_path_of(dir, Path::new(&meta.primary_path)) else {
+            continue;
+        };
+        let before = db
+            .get_adjustments(&rel)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        if let Err(e) = db.put_adjustments(&rel, &params) {
+            tracing::warn!("批量写入调整参数失败 {rel}: {e}");
+            continue;
+        }
+        meta.has_adjustments = !params.is_neutral();
+        if before != params {
+            ops.push(photo_engine::undo::UndoOp::Adjust {
+                rel_path: rel,
+                before,
+                after: params,
+            });
+        }
+    }
+    ops
+}
+
 pub fn render_adjust_preview(
     state_entity: Entity<AppState>,
     manager: ImageManager,
     path: String,
     source: SourceFile,
     params: AdjustParams,
+    want_clip_mask: bool,
     seq: u64,
     cx: &mut App,
 ) {
+    // RAW + 有调整 + 16-bit 母版还没就绪 → 先起一个升级任务（首帧不等它，见下）。
+    // 判据与 build_preview_frame 内部完全同源（同一份缓存命中测试）。
+    if !params.is_neutral()
+        && matches!(source.format, photo_domain::ImageFormat::Raw(_))
+        && !manager.has_raw16_master(&source)
+    {
+        let up_manager = manager.clone();
+        let up_source = source.clone();
+        let up_path = path.clone();
+        let up_state = state_entity.clone();
+        cx.spawn(async move |async_cx| {
+            let ready = async_cx
+                .background_executor()
+                .spawn(async move { up_manager.ensure_raw16_master(&up_source) })
+                .await
+                .is_ok();
+            if !ready {
+                return;
+            }
+            let _ = async_cx.update(|cx| {
+                let _ = up_state.update(cx, |state, cx| {
+                    // 用户还停在这张图、还带着调整 → 重出一次（这次命中 16-bit 母版）
+                    if state.adjust_path.as_deref() == Some(up_path.as_str())
+                        && !state.adjust.is_neutral()
+                    {
+                        state.refresh_adjust_preview(cx);
+                    }
+                });
+            });
+        })
+        .detach();
+    }
+
     cx.spawn(async move |async_cx| {
         let result = async_cx
             .background_executor()
-            .spawn(async move { manager.render_adjusted_master(&source, &params) })
+            .spawn(async move { manager.build_preview_frame(&source, &params, want_clip_mask) })
             .await;
 
         let _ = async_cx.update(|cx| {
@@ -436,11 +551,96 @@ pub fn render_adjust_preview(
                     return;
                 }
                 match result {
-                    Ok(img) => {
-                        state.preview_image = Some((path, img));
+                    Ok(frame) => {
+                        // 直方图 / 剪切掩码与显示图同帧写回：三者必须来自同一次烘焙，
+                        // 否则「图上加了 +1 EV、直方图还是旧的」这种错位比不显示更糟。
+                        state.preview_base_histogram = Some(frame.base_histogram);
+                        state.preview_histogram = Some(frame.histogram);
+                        state.preview_clip_mask = frame.clip_mask.map(|m| (path.clone(), m));
+                        state.preview_image = Some((path.clone(), frame.image));
                         state.adjust_preview_toned = !params.is_neutral();
+                        state.adjust_preview_16bit = frame.used_raw16;
                     }
                     Err(e) => tracing::warn!("调整预览渲染失败: {e}"),
+                }
+                cx.notify();
+            });
+        });
+    })
+    .detach();
+}
+
+/// 后台渲染**全分辨率调整帧**（1:1 / 高倍放大）：全尺寸解码 → tone → JPEG。
+///
+/// RAW 是 3-5s 的全尺寸 AHD 解码，所以只在「滑杆停手 + 显示尺寸超过 1600 链路」时由
+/// AppState::request_adjust_full 发起；seq 保证只有最新一次写回（切图 / 新参数都作废旧的）。
+pub fn render_adjust_full(
+    state_entity: Entity<AppState>,
+    manager: ImageManager,
+    path: String,
+    source: SourceFile,
+    params: AdjustParams,
+    seq: u64,
+    cx: &mut App,
+) {
+    cx.spawn(async move |async_cx| {
+        let started = std::time::Instant::now();
+        let result = async_cx
+            .background_executor()
+            .spawn(async move { manager.render_adjusted_full(&source, &params) })
+            .await;
+
+        let _ = async_cx.update(|cx| {
+            let _ = state_entity.update(cx, |state, cx| {
+                if state.adjust_full_render_seq != seq {
+                    return;
+                }
+                state.preview_full_toned_request = None;
+                match result {
+                    Ok(img) => {
+                        state.preview_full = Some((path.clone(), img));
+                        state.preview_full_toned_params = Some((path.clone(), params));
+                        tracing::debug!("1:1 调整全分辨率就绪 {path} ({:?})", started.elapsed());
+                    }
+                    Err(e) => tracing::warn!("1:1 调整全分辨率失败: {e}"),
+                }
+                cx.notify();
+            });
+        });
+    })
+    .detach();
+}
+
+/// 后台备一份**未调整母版**（before/after 按住看原图用）。
+///
+/// 与 load_preview_image 的关键差别是**写哪个槽位**：它只写 preview_base_image，
+/// 绝不碰 preview_image（那是调整帧的槽位）——两个槽位分开，按住 / 松开不会互相覆盖，
+/// 也不会让「松开后又闪一下旧图」。首次按住时才有一次后台解码，之后同图命中缓存。
+pub fn load_preview_base_image(
+    state_entity: Entity<AppState>,
+    manager: ImageManager,
+    path: String,
+    source: SourceFile,
+    cx: &mut App,
+) {
+    cx.spawn(async move |async_cx| {
+        let result = async_cx
+            .background_executor()
+            .spawn(async move {
+                manager.build_preview_frame(&source, &AdjustParams::default(), false)
+            })
+            .await;
+
+        let _ = async_cx.update(|cx| {
+            let _ = state_entity.update(cx, |state, cx| {
+                match result {
+                    Ok(frame) => {
+                        // 仍停在同一次调整会话上才写回（切图后丢弃）
+                        if state.adjust_path.as_deref() == Some(path.as_str()) {
+                            state.preview_base_image = Some((path, frame.image));
+                        }
+                    }
+                    Err(e) => tracing::warn!("未调整母版加载失败: {e}"),
                 }
                 cx.notify();
             });
@@ -574,6 +774,21 @@ async fn do_background_scan(
                 let _ = gdb.replace_folder(&folder_str, &rows);
                 if !stale.is_empty() {
                     let _ = gdb.delete_rows(&folder_str, &stale);
+                }
+            }
+        }
+    }
+
+    // 调整标记回填：只认**非中性**行（显式全零 = 已复位），供网格 / 胶片条「已调整」徽标
+    if let Some(db) = &folder_db {
+        if let Ok(rows) = db.all_adjustments() {
+            for meta in metas.iter_mut() {
+                let rel = Path::new(&meta.primary_path)
+                    .strip_prefix(dir)
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                if let Some(params) = rows.get(&rel) {
+                    meta.has_adjustments = !params.is_neutral();
                 }
             }
         }
@@ -1513,10 +1728,16 @@ pub fn select_stats_species(state: &mut AppState, species: &str) {
         return;
     };
     let all = gdb.photos_of_species(species).unwrap_or_default();
-    let total = all.len();
+    // 源文件已失踪的行（外部删除 / 盘没挂载）不进列表：刷新只重扫**当前文件夹**，
+    // 别的文件夹的索引行不会自动更新，所以列表必须自己按磁盘如实过滤。
+    let alive: Vec<(String, String)> = all
+        .into_iter()
+        .filter(|(folder, rel_path)| Path::new(folder).join(rel_path).exists())
+        .collect();
+    let total = alive.len();
     // 缩略图缓存目录按文件夹隔离：按文件夹复用一个只读 ImageManager
     let mut per_folder: HashMap<String, ImageManager> = HashMap::new();
-    let photos: Vec<StatsPhoto> = all
+    let photos: Vec<StatsPhoto> = alive
         .into_iter()
         .take(STATS_PHOTO_LIMIT)
         .map(|(folder, rel_path)| {
@@ -1572,7 +1793,8 @@ pub fn open_stats_photo(
             state.view_mode = ViewMode::Grid;
             cx.notify();
         });
-        start_scan(state_entity, PathBuf::from(&folder), false, cx);
+        let recursive = state_entity.read(cx).app_config.include_subdirectories;
+        start_scan(state_entity, PathBuf::from(&folder), recursive, cx);
     }
 }
 

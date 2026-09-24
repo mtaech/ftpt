@@ -154,6 +154,10 @@ fn main() {
 
                 if failures == 0 {
                     println!("全部通过");
+                    // 必须显式退出：examples 带上了 gpui 的 leak-detection（dev-dependencies 的
+                    // test-support 打开），正常析构会被判成 leaked handles；而且 GPUI 事件循环
+                    // 自己不会结束（这条以前漏了，成功路径会一直挂着不返回）。
+                    std::process::exit(0);
                 } else {
                     eprintln!("{failures} 项失败");
                     std::process::exit(1);

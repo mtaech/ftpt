@@ -124,12 +124,64 @@ fn scale_for_long_edge(w: u32, h: u32, long_edge: Option<u32>) -> f32 {
     }
 }
 
-/// 16-bit RGB 缓冲降为 8-bit（sRGB 编码值直接截高 8 位，语义一致）
-fn rgb16_to_rgb8(img: &Rgb16Image) -> image::RgbImage {
+/// 解码 RAW 的 **16-bit 预览母版**（ADR 0007）：half_size + 16bit + 自动亮度 + sRGB + 相机白平衡，
+/// 长边缩到 max_size 内（**保持 16-bit 精度**，缩放用三角形滤波）。
+///
+/// 这是调整预览的像素源：8-bit 母版在大范围拉曝光时会条带，16-bit 母版把这段动态范围留住。
+/// 非 RAW 源没有更高位宽可用，调用方应走 8-bit 链路（本函数不校验格式，解码失败会报 Raw 错误）。
+pub fn decode_raw16_master(source: &SourceFile, max_size: u32) -> Result<Rgb16Image, ConvertError> {
+    let img16 = decode_raw16_with_options(
+        &source.path,
+        &rawlib::DecodeOptions::preview16(),
+        None,
+    )
+    .map_err(|e| ConvertError::Raw(e.to_string()))?;
+    Ok(fit_long_edge16(&img16, max_size))
+}
+
+/// 16-bit 图按长边上限缩小（只缩不放）。抽出来单独测：解码要真实 RAW 文件，缩放不用。
+pub fn fit_long_edge16(img: &Rgb16Image, max_size: u32) -> Rgb16Image {
+    let (w, h) = img.dimensions();
+    if max_size == 0 || w.max(h) <= max_size {
+        return img.clone();
+    }
+    let scale = max_size as f32 / w.max(h) as f32;
+    let nw = ((w as f32 * scale).round().max(1.0)) as u32;
+    let nh = ((h as f32 * scale).round().max(1.0)) as u32;
+    image::imageops::resize(img, nw, nh, image::imageops::FilterType::Triangle)
+}
+
+/// 16-bit RGB 缓冲降为 8-bit（sRGB 编码值直接截高 8 位，语义一致）。
+///
+/// 公开给 UI 侧：16-bit 调整帧算完色调后，直方图 / 剪切掩码 / JPEG 显示都要先降到 8-bit。
+pub fn rgb16_to_rgb8(img: &Rgb16Image) -> image::RgbImage {
     image::RgbImage::from_fn(img.width(), img.height(), |x, y| {
         let p = img.get_pixel(x, y);
         image::Rgb([(p[0] >> 8) as u8, (p[1] >> 8) as u8, (p[2] >> 8) as u8])
     })
+}
+
+/// 全分辨率调整渲染（ADR 0007 的 1:1 闭环）：源图 → 全尺寸解码 → 色调调整 → JPEG 字节。
+///
+/// RAW 走全尺寸 quality 预设（AHD + 16bit，3-5s）；常规图直接解码原文件。
+/// 与 render_adjusted 的差别是**不缩尺寸**——只给 1:1 / 高倍放大用，且由调用方在
+/// 滑杆停手后异步触发（拖动中仍走 1600px 即时链路）。
+pub fn render_adjusted_full(
+    source: &SourceFile,
+    params: &AdjustParams,
+    quality: u8,
+) -> Result<Vec<u8>, ConvertError> {
+    let rgb8 = bake_rgb8(source, params, None)?;
+    let mut buf = Cursor::new(Vec::new());
+    let mut encoder =
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality.clamp(1, 100));
+    encoder.encode(
+        rgb8.as_raw(),
+        rgb8.width(),
+        rgb8.height(),
+        image::ExtendedColorType::Rgb8,
+    )?;
+    Ok(buf.into_inner())
 }
 
 /// 调整渲染（内存版，ADR 0007）：源图 → 色调调整 → JPEG 字节（质量 85，预览用）。
@@ -198,6 +250,55 @@ pub fn render_adjusted(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 全分辨率调整渲染：输出保持原尺寸（不缩放）
+    #[test]
+    fn test_render_adjusted_full_keeps_source_size() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("full.png");
+        let img = image::RgbImage::from_fn(320, 200, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+        });
+        img.save(&path).unwrap();
+        let source = SourceFile {
+            path,
+            format: ImageFormat::Png,
+            file_size: None,
+        };
+        let bytes = render_adjusted_full(
+            &source,
+            &AdjustParams {
+
+                exposure: 1.0,
+                contrast: 0,
+                saturation: 0,
+            ..AdjustParams::default()
+        },
+            92,
+        )
+        .unwrap();
+        let out = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((out.width(), out.height()), (320, 200), "全分辨率不该被缩放");
+    }
+
+    /// 16-bit 母版的长边缩放：只缩不放，且保持 16-bit（值不被截断）。
+    #[test]
+    fn test_fit_long_edge16_scales_down_only() {
+        let img = Rgb16Image::from_fn(200, 100, |x, y| {
+            image::Rgb([(x as u16) * 300 + (y as u16), 4000, 60000])
+        });
+        // 长边在限内：原样返回（不放大）
+        let same = fit_long_edge16(&img, 2560);
+        assert_eq!(same.dimensions(), (200, 100));
+        assert_eq!(same.get_pixel(199, 99)[0], img.get_pixel(199, 99)[0]);
+        // 长边超限：按长边缩，宽高比保持
+        let small = fit_long_edge16(&img, 100);
+        assert_eq!(small.dimensions(), (100, 50));
+        // 缩的是 16-bit 数据本身：最大值仍是 16-bit 量级（不是被截成 8-bit）
+        assert!(small.pixels().map(|p| p[2]).max().unwrap() > 255);
+        // 0 视为"不限制"
+        assert_eq!(fit_long_edge16(&img, 0).dimensions(), (200, 100));
+    }
     use image::GenericImageView;
     use tempfile::TempDir;
 
@@ -220,9 +321,11 @@ mod tests {
             file_size: Some(0),
         };
         let params = photo_domain::AdjustParams {
+
             exposure: 1.0,
             contrast: 20,
             saturation: -30,
+            ..AdjustParams::default()
         };
         let result = export_adjusted(&source, &params, &out).unwrap();
         assert_eq!(result, out);

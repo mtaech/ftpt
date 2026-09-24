@@ -11,6 +11,7 @@ pub mod burst;
 pub mod ebird;
 pub mod export;
 pub mod filter;
+pub mod histogram;
 pub mod preview_math;
 pub mod recognizer;
 pub mod region;
@@ -22,9 +23,11 @@ mod tests;
 
 pub use adjust::{
     EXPOSURE_MAX, EXPOSURE_MIN, EXPOSURE_STEP, TONE_MAX, TONE_MIN, TONE_STEP, AdjustField,
-    format_exposure, format_tone, has_adjustments, quantize_exposure, quantize_tone, rel_path_of,
+    adjust_targets, describe_adjust, format_exposure, format_tone, has_adjustments,
+    previous_in_order, quantize_exposure, quantize_tone, rel_path_of,
 };
 pub use best_frame::{non_best_paths, pick_best_frame};
+pub use histogram::{HIST_BINS, bin_heights, clip_percent, downsample, luma_bins};
 pub use a11y::{
     filmstrip_item_label, filmstrip_label, grid_cell_label, grid_container_label, menu_item_label,
 };

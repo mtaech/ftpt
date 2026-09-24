@@ -24,6 +24,8 @@ pub struct FilterCriteria {
     pub flag_filter: Option<Flag>,
     /// 只显示无旗标（与 flag_filter 互斥）
     pub unflagged_filter: bool,
+    /// 只看**源文件为空**（0 字节）的照片：复制/传输中断的残骸，便于筛出来重拷或删除
+    pub empty_source_only: bool,
     /// 识别状态过滤
     pub recognition_filter: RecognitionFilter,
     /// ISO 闭区间 [iso_min, iso_max]
@@ -228,6 +230,11 @@ pub fn filter_captures(items: &[CaptureMeta], criteria: &FilterCriteria) -> Vec<
             continue;
         }
 
+        // empty_source_only: 只看 0 字节的残骸
+        if criteria.empty_source_only && !meta.is_empty_source() {
+            continue;
+        }
+
         // min_rating: 评分 >= N
         if let Some(min_r) = criteria.min_rating {
             if rating_value(meta.rating) < rating_value(min_r) {
@@ -356,6 +363,7 @@ pub fn has_active_filters(criteria: &FilterCriteria) -> bool {
         || criteria.color_label.is_some()
         || criteria.flag_filter.is_some()
         || criteria.unflagged_filter
+        || criteria.empty_source_only
         || criteria.recognition_filter != RecognitionFilter::All
         || criteria.iso_min.is_some()
         || criteria.iso_max.is_some()

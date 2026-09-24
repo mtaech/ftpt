@@ -53,6 +53,7 @@ pub fn render_filmstrip(
                     .flex_shrink_0()
                     .rounded(px(10.))
                     .overflow_hidden()
+                    .relative()
                     .border_2()
                     .border_color(if is_active {
                         cx.theme().primary
@@ -93,6 +94,7 @@ pub fn render_filmstrip(
                     .aria_label(crate::model::filmstrip_item_label(
                         &meta.display_name(),
                         is_active,
+                        meta.has_adjustments,
                     ))
                     .aria_selected(is_active)
                     .test_support()
@@ -107,6 +109,22 @@ pub fn render_filmstrip(
                                 .into_any_element()
                         },
                     ))
+                    // 右上角：「已调整」小徽标（96×72 里只放一个词，避免压住缩略图主体）
+                    .when(meta.has_adjustments, |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .top_1()
+                                .right_1()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_full()
+                                .bg(cx.theme().primary)
+                                .text_size(px(9.))
+                                .text_color(cx.theme().primary_foreground)
+                                .child("调整"),
+                        )
+                    })
                     .into_any_element(),
             )
         })

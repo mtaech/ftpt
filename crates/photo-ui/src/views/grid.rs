@@ -466,6 +466,7 @@ fn render_grid_cell(
             rating,
             flag,
             taxon_name.as_deref(),
+            meta.map_or(false, |m| m.has_adjustments),
         ))
         .aria_selected(is_selected)
         .aria_row_index(cell_row)
@@ -493,20 +494,50 @@ fn render_grid_cell(
                 })
                 .when(meta.is_some(), |this| {
                     this
-                        // 左上角：格式胶囊徽标 (全圆角磨砂深底)
+                        // 左上角：格式胶囊徽标 + 「已调整」标记（同一行，避免互相压住）
                         .child(
-                            div()
+                            h_flex()
                                 .absolute()
                                 .top_2()
                                 .left_2()
-                                .px_2()
-                                .py_0p5()
-                                .rounded_full()
-                                .bg(gpui_kit::rgba(0x0000_00a0))
-                                .text_size(px(10.))
-                                .font_semibold()
-                                .text_color(gpui_kit::white())
-                                .child(badge_str.clone()),
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_full()
+                                        .bg(gpui_kit::rgba(0x0000_00a0))
+                                        .text_size(px(10.))
+                                        .font_semibold()
+                                        .text_color(gpui_kit::white())
+                                        .child(badge_str.clone()),
+                                )
+                                .when(meta.map_or(false, |m| m.has_adjustments), |this| {
+                                    this.child(
+                                        div()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_full()
+                                            .bg(cx.theme().primary)
+                                            .text_size(px(10.))
+                                            .font_semibold()
+                                            .text_color(cx.theme().primary_foreground)
+                                            .child("已调整"),
+                                    )
+                                })
+                                .when(meta.is_some_and(|m| m.is_empty_source()), |this| {
+                                    this.child(
+                                        div()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_full()
+                                            .bg(crate::theme::hex_to_hsla(crate::theme::COLOR_REJECT))
+                                            .text_size(px(10.))
+                                            .font_semibold()
+                                            .text_color(gpui_kit::white())
+                                            .child("空文件"),
+                                    )
+                                }),
                         )
                         // 居中：非图片格式（视频）
                         .when(format_str == "OTHER", |this| {

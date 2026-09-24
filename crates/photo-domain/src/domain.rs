@@ -186,6 +186,9 @@ pub struct CaptureMeta {
     /// 最接近的候选（最多 3 个，与 Top-1 一起构成「相似度 + 间隔」判据的上下文）。
     /// 识别失败或需复核时信息栏展示；复用 SubjectSummary（名字 + 相似度）避免再造一个同形结构。
     pub candidates: Vec<SubjectSummary>,
+    // --- 调整标记（从 folder_db adjustments 表回填；网格/胶片条「已调整」徽标用） ---
+    /// 是否存在**非中性**调整参数（显式写全零行 = 已复位，不算「已调整」）
+    pub has_adjustments: bool,
 }
 
 /// 从 Capture 构造 CaptureMeta。注意 index 固定为 0（历史调用约定，
@@ -208,6 +211,16 @@ impl CaptureMeta {
             Some(ext) if !ext.is_empty() => format!("{}.{}", self.base_name, ext),
             _ => self.base_name.clone(),
         }
+    }
+
+    /// 源文件是不是**空的**（0 字节）。
+    ///
+    /// 复制/传输中断会在盘上留下 0 字节残骸：文件存在（所以扫描会列出来）但解不出任何像素，
+    /// 缩略图/预览/识别全都拿不到结果，只会在日志里报「源文件为空」。UI 据此标记，
+    /// 用户可筛选出来重新拷贝或删除。为什么不做成独立字段：扫描期本来就 stat 过大小，
+    /// 再存一份布尔值属于冗余（scanner 已把 file_size 填进 SourceFile）。
+    pub fn is_empty_source(&self) -> bool {
+        self.file_size == Some(0)
     }
 
     /// 从 Capture 构造 CaptureMeta，显式指定 index（预览图/EXIF 回填/缩略图缓存的键）。
@@ -262,6 +275,7 @@ impl CaptureMeta {
             subjects: Vec::new(),
             failure_stage: None,
             candidates: Vec::new(),
+            has_adjustments: false,
         }
     }
 
@@ -658,17 +672,26 @@ impl BBox {
 }
 
 /// 调整参数（参数化非破坏，ADR 0007）：per-capture，全零 = 无调整（短路现有渲染路径）。
-/// 曝光/对比度/饱和度均为像素值变换（裁切已移除，见 ADR 0007 修订）。
+/// 全部为像素值变换（裁切已移除，见 ADR 0007 修订）：
+/// 曝光/对比度/饱和度（v1）+ 阴影/高光/色温/色调（3.13 扩展）。
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdjustParams {
-    /// 曝光（EV，±2.0，步进 0.05；+1.0 EV = 曝光量翻倍）
+    /// 曝光（EV，±3.0，步进 0.3；+1.0 EV = 曝光量翻倍）
     pub exposure: f32,
     /// 对比度（-100 ~ +100，0 中性）
     pub contrast: i32,
     /// 饱和度（-100 ~ +100，0 中性；-100 = 去饱和）
     pub saturation: i32,
+    /// 阴影（-100 ~ +100，0 中性；正 = 提亮暗部，负 = 压暗暗部）
+    pub shadows: i32,
+    /// 高光（-100 ~ +100，0 中性；正 = 提亮亮部，负 = 回收亮部）
+    pub highlights: i32,
+    /// 色温（-100 ~ +100，0 中性；正 = 暖（抬 R 压 B），负 = 冷）
+    pub temperature: i32,
+    /// 色调（-100 ~ +100，0 中性；正 = 品红（抬 R/B 压 G），负 = 绿）
+    pub tint: i32,
 }
 
 impl Default for AdjustParams {
@@ -677,6 +700,10 @@ impl Default for AdjustParams {
             exposure: 0.0,
             contrast: 0,
             saturation: 0,
+            shadows: 0,
+            highlights: 0,
+            temperature: 0,
+            tint: 0,
         }
     }
 }
@@ -684,7 +711,13 @@ impl Default for AdjustParams {
 impl AdjustParams {
     /// 是否为无调整（全零参数）——渲染路径短路到现有 8-bit 链路
     pub fn is_neutral(&self) -> bool {
-        self.exposure == 0.0 && self.contrast == 0 && self.saturation == 0
+        self.exposure == 0.0
+            && self.contrast == 0
+            && self.saturation == 0
+            && self.shadows == 0
+            && self.highlights == 0
+            && self.temperature == 0
+            && self.tint == 0
     }
 }
 
@@ -1127,6 +1160,27 @@ mod tests {
     }
 
     #[test]
+    fn test_is_empty_source_only_for_zero_bytes() {
+        let mut meta = CaptureMeta::from_capture(
+            &Capture {
+                base_name: "a".into(),
+                source_files: vec![SourceFile {
+                    path: std::path::PathBuf::from("/tmp/a.jpg"),
+                    format: ImageFormat::Jpeg,
+                    file_size: Some(0),
+                }],
+                primary_index: 0,
+            },
+            0,
+        );
+        assert!(meta.is_empty_source(), "0 字节 = 空源文件");
+        meta.file_size = Some(1024);
+        assert!(!meta.is_empty_source(), "有内容就不算空");
+        meta.file_size = None;
+        assert!(!meta.is_empty_source(), "大小未知不能冤判成空（可能只是 stat 失败）");
+    }
+
+    #[test]
     fn test_enrich_with_xmp_fills_fields() {
         let mut xmp = XmpMetadata::default();
         xmp.set_rating(Rating::Three);
@@ -1165,6 +1219,7 @@ mod tests {
             subjects: vec![],
             failure_stage: None,
             candidates: Vec::new(),
+            has_adjustments: false,
         };
         cm.enrich_with_xmp(&xmp);
         assert_eq!(cm.rating, Rating::Three);

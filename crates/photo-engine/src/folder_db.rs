@@ -125,6 +125,15 @@ fn folder_migrations() -> Migrations<'static> {
         // 近重复检测结果（**派生数据，可重算**）：每行 = 一张入组照片，组内首张 keeper=1。
         // 键为相对路径（与 recognition / adjustments 同约定）；阈值与计算时间随行存储，
         // 供 UI 展示「这组是什么时候用什么阈值算出来的」。清理缓存时可整表清空。
+        // 调整参数扩展（3.13）：阴影 / 高光 / 色温 / 色调四列，追加到链末尾。
+        // 老库已有 adjustments 表（含历史 crop 列）→ ALTER 补列；新库按同一条链执行后同样补列，
+        // 两条路径 schema 一致（crop 列是历史遗留，保持不动）。
+        M::up(
+            "ALTER TABLE adjustments ADD COLUMN shadows INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE adjustments ADD COLUMN highlights INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE adjustments ADD COLUMN temperature INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE adjustments ADD COLUMN tint INTEGER NOT NULL DEFAULT 0;",
+        ),
         M::up(
             "CREATE TABLE IF NOT EXISTS duplicates (
                 rel_path    TEXT PRIMARY KEY,
@@ -501,13 +510,18 @@ impl FolderDb {
         let conn = self.conn.lock();
         let normalized = rel_path.replace('\\', "/");
         conn.execute(
-            "INSERT OR REPLACE INTO adjustments (rel_path, exposure, contrast, saturation)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT OR REPLACE INTO adjustments
+                (rel_path, exposure, contrast, saturation, shadows, highlights, temperature, tint)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 normalized,
                 params.exposure as f64,
                 params.contrast as i64,
                 params.saturation as i64,
+                params.shadows as i64,
+                params.highlights as i64,
+                params.temperature as i64,
+                params.tint as i64,
             ],
         )?;
         Ok(())
@@ -518,7 +532,8 @@ impl FolderDb {
         let conn = self.conn.lock();
         let normalized = rel_path.replace('\\', "/");
         let mut stmt = conn.prepare_cached(
-            "SELECT exposure, contrast, saturation FROM adjustments WHERE rel_path = ?1",
+            "SELECT exposure, contrast, saturation, shadows, highlights, temperature, tint
+             FROM adjustments WHERE rel_path = ?1",
         )?;
         // i64 → i32 用 try_from：越界（数据损坏）报错而非静默截断
         match stmt.query_row(rusqlite::params![normalized], |row| {
@@ -526,14 +541,65 @@ impl FolderDb {
                 row.get::<_, f64>(0)?,
                 row.get::<_, i64>(1)?,
                 row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
             ))
         }) {
-            Ok((exposure, contrast, saturation)) => {
-                Ok(Some(adjust_params_from_parts(exposure, contrast, saturation)?))
+            Ok((exposure, contrast, saturation, shadows, highlights, temperature, tint)) => {
+                Ok(Some(adjust_params_from_parts(
+                    exposure,
+                    contrast,
+                    saturation,
+                    shadows,
+                    highlights,
+                    temperature,
+                    tint,
+                )?))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// 全量读取调整行（rel_path → 参数）。重扫回填「已调整」标识用：
+    /// 一次 SQL 拿全集，避免逐张 get（N 次加锁 + N 次查询）。
+    pub fn all_adjustments(&self) -> Result<HashMap<String, AdjustParams>, FolderDbError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT rel_path, exposure, contrast, saturation, shadows, highlights, temperature, tint
+             FROM adjustments",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+            ))
+        })?;
+        let mut out: HashMap<String, AdjustParams> = HashMap::new();
+        for row in rows {
+            let (rel, exposure, contrast, saturation, shadows, highlights, temperature, tint) = row?;
+            out.insert(
+                rel,
+                adjust_params_from_parts(
+                    exposure,
+                    contrast,
+                    saturation,
+                    shadows,
+                    highlights,
+                    temperature,
+                    tint,
+                )?,
+            );
+        }
+        Ok(out)
     }
 
     /// 批量删除调整行（文件删除后同步）。
@@ -573,7 +639,8 @@ impl FolderDb {
         {
             let conn = self.conn.lock();
             let mut stmt = conn.prepare_cached(
-                "SELECT exposure, contrast, saturation FROM adjustments WHERE rel_path = ?1",
+                "SELECT exposure, contrast, saturation, shadows, highlights, temperature, tint
+                 FROM adjustments WHERE rel_path = ?1",
             )?;
             for (src_rel, dst_rel) in entries {
                 let normalized = src_rel.replace('\\', "/");
@@ -582,10 +649,22 @@ impl FolderDb {
                         row.get::<_, f64>(0)?,
                         row.get::<_, i64>(1)?,
                         row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
                     ))
                 }) {
-                    Ok((exposure, contrast, saturation)) => {
-                        let params = adjust_params_from_parts(exposure, contrast, saturation)?;
+                    Ok((exposure, contrast, saturation, shadows, highlights, temperature, tint)) => {
+                        let params = adjust_params_from_parts(
+                            exposure,
+                            contrast,
+                            saturation,
+                            shadows,
+                            highlights,
+                            temperature,
+                            tint,
+                        )?;
                         pairs.push((dst_rel.clone(), params));
                     }
                     Err(rusqlite::Error::QueryReturnedNoRows) => {}
@@ -984,14 +1063,31 @@ fn adjust_params_from_parts(
     exposure: f64,
     contrast: i64,
     saturation: i64,
+    shadows: i64,
+    highlights: i64,
+    temperature: i64,
+    tint: i64,
 ) -> Result<AdjustParams, FolderDbError> {
+    // 非有限曝光归零（库被手改成 nan 时，f32::NAN 会一路传染进 tone 表）
+    let exposure = if exposure.is_finite() {
+        exposure as f32
+    } else {
+        0.0
+    };
+    let narrow = |v: i64, name: &'static str| -> Result<i32, FolderDbError> {
+        i32::try_from(v).map_err(|_| FolderDbError::ValueOutOfRange(name))
+    };
     Ok(AdjustParams {
-        exposure: exposure as f32,
-        contrast: i32::try_from(contrast)
-            .map_err(|_| FolderDbError::ValueOutOfRange("contrast"))?,
-        saturation: i32::try_from(saturation)
-            .map_err(|_| FolderDbError::ValueOutOfRange("saturation"))?,
-    })
+
+        exposure,
+        contrast: narrow(contrast, "contrast")?,
+        saturation: narrow(saturation, "saturation")?,
+        shadows: narrow(shadows, "shadows")?,
+        highlights: narrow(highlights, "highlights")?,
+        temperature: narrow(temperature, "temperature")?,
+        tint: narrow(tint, "tint")?,
+            ..AdjustParams::default()
+        })
 }
 
 fn file_fingerprint(path: &Path) -> std::io::Result<(u64, u64)> {
@@ -1227,9 +1323,11 @@ mod tests {
 
     fn make_adjustments() -> AdjustParams {
         AdjustParams {
+
             exposure: 1.25,
             contrast: -30,
             saturation: 45,
+            ..AdjustParams::default()
         }
     }
 
@@ -1684,6 +1782,22 @@ mod tests {
         assert_eq!(got.exposure, params.exposure);
         assert_eq!(got.contrast, params.contrast);
         assert_eq!(got.saturation, params.saturation);
+    }
+
+    /// 全量读取：一次拿到所有调整行（重扫回填「已调整」徽标用）
+    #[test]
+    fn test_all_adjustments_lists_every_row() {
+        let tmp = TempDir::new().unwrap();
+        let db = FolderDb::open_in_dir(tmp.path()).unwrap();
+        let params = make_adjustments();
+        db.put_adjustments("a.NEF", &params).unwrap();
+        db.put_adjustments("sub/b.jpg", &AdjustParams::default())
+            .unwrap();
+        let all = db.all_adjustments().unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all.get("a.NEF"), Some(&params));
+        // 全零行也在：是否算「已调整」由调用方的 is_neutral 判定，查询层不丢数据
+        assert!(all.get("sub/b.jpg").is_some_and(|p| p.is_neutral()));
     }
 
     #[test]

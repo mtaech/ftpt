@@ -15,13 +15,14 @@ pub fn grid_container_label(total: usize, cols: usize, selected: usize) -> Strin
     format!("照片网格：{total} 张照片，{cols} 列，已选 {selected} 张")
 }
 
-/// 网格 cell 名称：文件名 + 选中 + 评分 + 旗标 + 物种（缺项跳过，不补占位词）。
+/// 网格 cell 名称：文件名 + 选中 + 评分 + 旗标 + 物种 + 已调整（缺项跳过，不补占位词）。
 pub fn grid_cell_label(
     name: &str,
     selected: bool,
     rating: Rating,
     flag: Option<Flag>,
     taxon: Option<&str>,
+    adjusted: bool,
 ) -> String {
     let mut parts = vec![name.to_string()];
     if selected {
@@ -39,6 +40,9 @@ pub fn grid_cell_label(
     if let Some(taxon) = taxon.filter(|t| !t.is_empty()) {
         parts.push(taxon.to_string());
     }
+    if adjusted {
+        parts.push("已调整".to_string());
+    }
     parts.join("，")
 }
 
@@ -47,13 +51,17 @@ pub fn filmstrip_label(count: usize) -> String {
     format!("胶片条：{count} 张")
 }
 
-/// 胶片条单项名称：文件名（当前照片额外说明）。
-pub fn filmstrip_item_label(name: &str, is_current: bool) -> String {
-    if is_current {
+/// 胶片条单项名称：文件名（当前照片额外说明；已调整额外说明）。
+pub fn filmstrip_item_label(name: &str, is_current: bool, adjusted: bool) -> String {
+    let mut label = if is_current {
         format!("{name}（当前照片）")
     } else {
         name.to_string()
+    };
+    if adjusted {
+        label.push_str("，已调整");
     }
+    label
 }
 
 /// 右键菜单项名称：置灰项明说「不可用」——a11y 里没有 aria-disabled 通道，
@@ -83,7 +91,7 @@ mod tests {
     fn test_grid_cell_label_composes_only_present_states() {
         // 干净的一张：只有名字
         assert_eq!(
-            grid_cell_label("三宝鸟.jpg", false, Rating::None, None, None),
+            grid_cell_label("三宝鸟.jpg", false, Rating::None, None, None, false),
             "三宝鸟.jpg"
         );
         // 状态齐全：选中 + 4 星 + Pick + 物种
@@ -93,22 +101,38 @@ mod tests {
                 true,
                 Rating::Four,
                 Some(Flag::Pick),
-                Some("三宝鸟")
+                Some("三宝鸟"),
+                false
             ),
             "三宝鸟.jpg，已选中，4 星，标识为 Pick，三宝鸟"
         );
         // Reject 与空物种：空物种不补占位词
         assert_eq!(
-            grid_cell_label("a.RW2", false, Rating::None, Some(Flag::Reject), Some("")),
-            "a.RW2，标为 Reject"
+            grid_cell_label(
+                "a.RW2",
+                false,
+                Rating::None,
+                Some(Flag::Reject),
+                Some(""),
+                true
+            ),
+            "a.RW2，标为 Reject，已调整"
         );
     }
 
     #[test]
     fn test_filmstrip_labels() {
         assert_eq!(filmstrip_label(48), "胶片条：48 张");
-        assert_eq!(filmstrip_item_label("a.jpg", true), "a.jpg（当前照片）");
-        assert_eq!(filmstrip_item_label("a.jpg", false), "a.jpg");
+        assert_eq!(
+            filmstrip_item_label("a.jpg", true, false),
+            "a.jpg（当前照片）"
+        );
+        assert_eq!(filmstrip_item_label("a.jpg", false, false), "a.jpg");
+        // 已调整的照片：读屏也要能听出来（与网格徽标同一口径）
+        assert_eq!(
+            filmstrip_item_label("a.jpg", false, true),
+            "a.jpg，已调整"
+        );
     }
 
     #[test]

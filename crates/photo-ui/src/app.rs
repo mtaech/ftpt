@@ -19,6 +19,7 @@ use gpui_kit::{
 use photo_domain::{ColorLabel, Flag, Rating};
 
 use crate::actions::*;
+use crate::model::adjust::AdjustField;
 use crate::state::engine_ops::{
     defer_entity_action, set_color_label, set_flag, set_rating, start_recognition, start_scan,
 };
@@ -226,6 +227,13 @@ impl AppState {
             KeyBinding::new("v", ToggleBbox, None),
             KeyBinding::new("f", ToggleFocus, None),
             KeyBinding::new("o", ToggleClipping, None),
+            // 调整微调：[ / ] = 0.3 EV（一档），Shift 加速到 0.9 EV（三档）——与滑杆同一步进
+            KeyBinding::new("ctrl-shift-c", CopyAdjustments, None),
+            KeyBinding::new("ctrl-shift-v", PasteAdjustments, None),
+            KeyBinding::new("[", AdjustExposureDown, None),
+            KeyBinding::new("]", AdjustExposureUp, None),
+            KeyBinding::new("shift-[", AdjustExposureDownCoarse, None),
+            KeyBinding::new("shift-]", AdjustExposureUpCoarse, None),
             // 选择与面板与系统
             KeyBinding::new("ctrl-a", SelectAll, None),
             KeyBinding::new("ctrl-d", DeselectAll, None),
@@ -277,6 +285,12 @@ pub fn focus_root(view: &gpui_kit::Entity<AppState>, window: &mut Window, cx: &m
     window.on_next_frame(move |window, cx| handle.focus(window, cx));
 }
 
+/// before/after 的触发键：反斜杠。GPUI 的 keystroke.key 给的是字符本身或按键名
+/// （backslash），两种都认。
+fn is_before_after_key(key: &str) -> bool {
+    matches!(key, "\\" | "backslash")
+}
+
 impl Render for AppState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
@@ -290,6 +304,11 @@ impl Render for AppState {
             // 右键菜单的键盘导航（§13.4）：只有菜单打开时才吃键；根视图持有焦点，
             // 菜单作为子节点不需要自己抢焦点。Esc 走下面的 Escape action（handle_escape 第 0 优先级）。
             .on_key_down(cx.listener(|this, event: &gpui_kit::KeyDownEvent, _window, cx| {
+                // before/after：按住反斜杠看原图（按键重复会反复投递，set_before_after 内幂等）
+                if is_before_after_key(&event.keystroke.key) {
+                    this.set_before_after(true, cx);
+                    return;
+                }
                 if this.context_menu.is_none() {
                     return;
                 }
@@ -308,6 +327,13 @@ impl Render for AppState {
                         }
                     }
                     _ => {}
+                }
+            }))
+            // 松开反斜杠 → 回到调整后的画面。拿不到 KeyUp 时也不会卡住：切图 / 重扫
+            // 都会复位 before_after_held（无 WM 的 Xvfb 下修饰键事件就不投递，这里保守兜底）。
+            .on_key_up(cx.listener(|this, event: &gpui_kit::KeyUpEvent, _window, cx| {
+                if is_before_after_key(&event.keystroke.key) {
+                    this.set_before_after(false, cx);
                 }
             }))
             // ── 键位动作绑定 ──
@@ -546,8 +572,34 @@ impl Render for AppState {
                 this.show_focus = !this.show_focus;
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &CopyAdjustments, _window, cx| {
+                this.copy_adjustments();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &PasteAdjustments, window, cx| {
+                this.paste_adjustments(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &AdjustExposureDown, window, cx| {
+                this.nudge_adjust(AdjustField::Exposure, -0.3, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &AdjustExposureUp, window, cx| {
+                this.nudge_adjust(AdjustField::Exposure, 0.3, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &AdjustExposureDownCoarse, window, cx| {
+                this.nudge_adjust(AdjustField::Exposure, -0.9, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &AdjustExposureUpCoarse, window, cx| {
+                this.nudge_adjust(AdjustField::Exposure, 0.9, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleClipping, _window, cx| {
                 this.show_clipping = !this.show_clipping;
+                if this.show_clipping {
+                    // 打开：掩码要按当前参数重新烘焙一次（中性参数也要——request 的判据里带了它）
+                    this.refresh_adjust_preview(cx);
+                } else {
+                    // 关闭：立刻撤掉叠加层，不必等下一次渲染
+                    this.preview_clip_mask = None;
+                }
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleRegionSelect, _window, cx| {
@@ -578,9 +630,12 @@ impl Render for AppState {
             }))
             .on_action(cx.listener(|this, _: &Rescan, _window, cx| {
                 if let Some(dir) = this.current_dir.clone() {
+                    // 递归与否跟配置走：以前这里硬编码 false，用户报「刷新后列表不对」——
+                    // 开了「包含子目录」的目录，一按 F5 就退回单层扫描。
+                    let recursive = this.app_config.include_subdirectories;
                     let entity = cx.entity().clone();
                     defer_entity_action(cx, entity, move |entity, cx| {
-                        start_scan(entity, dir, false, cx);
+                        start_scan(entity, dir, recursive, cx);
                     });
                 }
             }))
@@ -599,7 +654,8 @@ impl Render for AppState {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Undo, _window, cx| {
-                let outcomes = this.op_journal.undo_last();
+                // 带 folder_db：调整参数类 op 要写回库（文件类 op 不用库，行为不变）
+                let outcomes = this.undo_last_op();
                 if !outcomes.is_empty() {
                     let success = outcomes.iter().filter(|o| o.result.is_ok()).count();
                     let failed = outcomes.len() - success;
@@ -650,7 +706,9 @@ impl Render for AppState {
                                 let path = folder.path().to_path_buf();
                                 let _ = async_app.update(|cx| {
                                     if let Some(entity) = weak_entity.upgrade() {
-                                        start_scan(entity, path, false, cx);
+                                        let recursive =
+                                            entity.read(cx).app_config.include_subdirectories;
+                                        start_scan(entity, path, recursive, cx);
                                     }
                                 });
                             }

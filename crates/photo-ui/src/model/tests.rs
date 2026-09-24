@@ -42,6 +42,7 @@ fn make_meta(base_name: &str, primary_path: &str, primary_format: &str) -> Captu
         subjects: vec![],
         failure_stage: None,
         candidates: Vec::new(),
+        has_adjustments: false,
     }
 }
 
@@ -202,6 +203,29 @@ fn test_has_active_filters() {
     let mut c2 = FilterCriteria::default();
     c2.unflagged_filter = true;
     assert!(has_active_filters(&c2));
+}
+
+#[test]
+fn test_empty_source_only_filters_zero_byte_files() {
+    let mut criteria = FilterCriteria::default();
+    criteria.empty_source_only = true;
+    assert!(
+        has_active_filters(&criteria),
+        "只看空文件也算筛选生效（批量操作安全边界要靠它）"
+    );
+
+    let mut broken = make_meta("broken", "/x/broken.RW2", "RW2");
+    broken.file_size = Some(0);
+    let mut broken_unknown = make_meta("unknown", "/x/unknown.RW2", "RW2");
+    broken_unknown.file_size = None;
+    let ok = make_meta("ok", "/x/ok.jpg", "JPEG");
+
+    let items = vec![broken, broken_unknown, ok];
+    assert_eq!(
+        filter_captures(&items, &criteria),
+        vec![0],
+        "只留 0 字节那张；大小未知的不冤判"
+    );
 }
 
 #[test]
@@ -416,21 +440,50 @@ fn test_starts_region_drag_accepts_toggle_or_shift() {
 #[test]
 fn test_region_hint_text_mentions_shift_and_active_mode() {
     // 常驻态必须把 Shift 快捷键写出来（「在界面上用文字提示」这条需求本身就是它）
-    let idle = region_hint_text(false, false);
+    let idle = region_hint_text(false, false, false);
     assert!(idle.contains("Shift"), "常驻提示要提到 Shift：{idle}");
     assert!(idle.contains("拖拽"), "常驻提示要说明操作方式：{idle}");
 
     // 按住 Shift 与常驻是两种文案：用户要能看出「现在按着 Shift」
-    let held = region_hint_text(false, true);
+    let held = region_hint_text(false, true, false);
     assert!(held.contains("Shift") && held != idle, "按住 Shift 应有独立文案：{held}");
 
     // 显式框选模式：说明松开即识别
-    let active = region_hint_text(true, false);
+    let active = region_hint_text(true, false, false);
     assert!(active.contains("框选识别已开启"), "开启态文案：{active}");
     assert!(active.contains("松开"), "开启态要说明松开即识别：{active}");
 
     // 模式优先于 Shift 态（开着 toggle 时按 Shift 不改文案）
-    assert_eq!(region_hint_text(true, true), active);
+    assert_eq!(region_hint_text(true, true, false), active);
+
+    // 拖拽中：必须把「Esc 可取消」写出来（用户报过「Shift 框选不能取消」）
+    let dragging = region_hint_text(false, true, true);
+    assert!(dragging.contains("Esc"), "拖拽中要提示 Esc 取消：{dragging}");
+    assert!(
+        region_hint_text(true, false, true) == dragging,
+        "拖拽态与进入方式无关（toggle 或 Shift 都同一句）"
+    );
+}
+
+#[test]
+fn test_region_escape_action_priority() {
+    // 拖拽中优先取消拖拽；只剩框时清框；都没有则不吃 Esc
+    assert_eq!(
+        crate::model::region::region_escape_action(true, true),
+        crate::model::region::RegionEscape::CancelDrag
+    );
+    assert_eq!(
+        crate::model::region::region_escape_action(true, false),
+        crate::model::region::RegionEscape::CancelDrag
+    );
+    assert_eq!(
+        crate::model::region::region_escape_action(false, true),
+        crate::model::region::RegionEscape::ClearBox
+    );
+    assert_eq!(
+        crate::model::region::region_escape_action(false, false),
+        crate::model::region::RegionEscape::None
+    );
 }
 
 #[test]

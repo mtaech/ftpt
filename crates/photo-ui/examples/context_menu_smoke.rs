@@ -13,7 +13,8 @@
 //!   3) 键盘上下移动：跳过置灰项、到边界不环绕
 //!   4) Esc 关菜单（handle_escape 第 0 优先级）
 //!   5) 执行：Pick 生效 / 打开预览 / 移至回收站只弹确认框（不动文件）
-//!   6) 菜单最大高度 240px 真的产生滚动范围（不是「有滚动条但滚不动」）
+//!   6) 10 项**一次看全**（高度按内容给，放得下就不滚动）——用户报过菜单太矮；
+//!      真正需要滚动时的高度/滚动判据由 model::context_menu 的纯逻辑单测覆盖
 //!   7) 目标已不在目录时诚实报错，不默默作用到别的照片
 //!   8) 菜单开着渲染多帧不 panic
 
@@ -151,11 +152,16 @@ fn main() {
                         == Some(target.clone())
                 );
 
-                // ── 2) 最大高度真的产生滚动（§13.4 点名的那条）──
+                // ── 2) 高度按内容给：10 项（288px）在 760px 窗口里一次看全，不需要滚动 ──
                 let max_off = read_state!(|s: &AppState| s.context_menu_scroll.max_offset());
                 check!(
-                    format!("10 项超过 240px 最大高 → 可滚动（max_offset {:?}）", max_off.y),
-                    f32::from(max_off.y) > 0.0
+                    format!("10 项一次看全（max_offset {:?}，应为 0）", max_off.y),
+                    f32::from(max_off.y) == 0.0
+                );
+                check!(
+                    "菜单项数仍是 10（高度按内容给，不再是 240px 上限）",
+                    read_state!(|s: &AppState| s.context_menu.as_ref().map(|m| m.items.len()))
+                        == Some(10)
                 );
 
                 // ── 3) 键盘移动：跳过置灰项、边界不环绕 ──

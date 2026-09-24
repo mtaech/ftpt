@@ -199,7 +199,7 @@ fn main() {
                 check!(
                     format!("首格名称与状态一致（{}）", label_of(&cell0)),
                     label_of(&cell0)
-                        == grid_cell_label(&name0, default_selected, Rating::None, None, None)
+                        == grid_cell_label(&name0, default_selected, Rating::None, None, None, false)
                 );
                 check!(
                     format!("扫描后默认选中首张（selected = {default_selected:?}）"),

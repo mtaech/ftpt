@@ -45,6 +45,14 @@ actions!(
         ToggleFocus,
         ToggleClipping,
         ToggleRegionSelect,
+        // 调整参数的复制 / 粘贴（Ctrl+Shift+C / Ctrl+Shift+V；不用系统剪贴板）
+        CopyAdjustments,
+        PasteAdjustments,
+        // 调整微调（[ / ] = 0.3 EV，Shift+[ / Shift+] = 0.9 EV）
+        AdjustExposureUp,
+        AdjustExposureDown,
+        AdjustExposureUpCoarse,
+        AdjustExposureDownCoarse,
         // 选择与面板与系统
         SelectAll,
         DeselectAll,

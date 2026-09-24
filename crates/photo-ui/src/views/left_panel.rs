@@ -98,7 +98,9 @@ fn render_dir_row(
             let dir = dir.clone();
             let entity = cx.entity().clone();
             defer_entity_action(cx, entity, move |entity, cx| {
-                start_scan(entity, dir, false, cx);
+                // 与 F5 / 打开目录同一口径：是否递归由配置决定
+                let recursive = entity.read(cx).app_config.include_subdirectories;
+                start_scan(entity, dir, recursive, cx);
             });
         }))
 }

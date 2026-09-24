@@ -83,8 +83,51 @@ pub fn move_selection(items: &[MenuItem], current: usize, delta: i32) -> usize {
     sel
 }
 
+/// 菜单单项高度（视图与「内容高」换算共用同一常量）
+pub const ITEM_H: f32 = 28.0;
+
+/// 菜单内容高 = 项数 × 单项高 + 上下内边距。
+///
+/// 内边距给了 16px（实际 py_1 只有 7.5px 左右）：留几像素余量，
+/// 免得小数取整后内容比卡片高 1-2px——那种"看起来全在，却能滚一点"的缝隙很像 bug。
+pub fn content_height(item_count: usize) -> f32 {
+    item_count as f32 * ITEM_H + 16.0
+}
+
+/// 菜单实际高度 = 内容高，但不超过「窗口高 - 边距」——**放得下就不滚动**。
+///
+/// 用户报过「右键菜单太矮」：原来是固定 240px 上限，10 项（288px）被砍掉两项还得滚。
+/// 现在按内容给高，只有真的放不下（项很多 / 窗口很矮）才限高滚动。
+pub fn menu_height(item_count: usize, viewport_height: f32) -> f32 {
+    let cap = (viewport_height - 8.0).max(120.0);
+    content_height(item_count).min(cap)
+}
+
+/// 该菜单是否需要滚动（内容高超过实际高度）
+pub fn needs_scroll(item_count: usize, viewport_height: f32) -> bool {
+    content_height(item_count) > menu_height(item_count, viewport_height) + 0.5
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{content_height, menu_height, needs_scroll, ITEM_H};
+
+    /// 高度口径：10 项一次看全；项多或窗口矮才限高滚动
+    #[test]
+    fn test_menu_height_fits_content_until_viewport_limits() {
+        assert_eq!(content_height(0), 16.0);
+        assert_eq!(content_height(10), 10.0 * ITEM_H + 16.0);
+        // 10 项（296px）在 760px 窗口里放得下 → 不滚动，高度就是内容高
+        assert_eq!(menu_height(10, 760.0), 296.0);
+        assert!(!needs_scroll(10, 760.0));
+        // 30 项（856px）超过 760-8 → 限高并需要滚动
+        assert_eq!(menu_height(30, 760.0), 752.0);
+        assert!(needs_scroll(30, 760.0));
+        // 窗口极矮也要留一个可用的最小值（120px），不能算成 0
+        assert_eq!(menu_height(10, 60.0), 120.0);
+        assert!(needs_scroll(10, 60.0));
+    }
+
     use super::*;
 
     fn items_with_disabled() -> Vec<MenuItem> {

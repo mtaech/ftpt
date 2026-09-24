@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use photo_config::AppConfig;
 use photo_domain::{AdjustParams, BBox, CaptureMeta, ImageFormat, SortBy, SortDirection};
 use photo_engine::folder_db::FolderDb;
+use photo_engine::histogram::HistogramData;
 use photo_engine::global_db::GlobalDb;
 use photo_engine::undo::OpJournal;
 
@@ -26,7 +27,8 @@ use gpui_kit::{
 use super::import::ImportState;
 use crate::image::{ImageManager, source_file_of};
 use crate::model::adjust::{
-    EXPOSURE_MAX, EXPOSURE_MIN, EXPOSURE_STEP, TONE_MAX, TONE_MIN, TONE_STEP, AdjustField,
+    AdjustField, adjust_targets, describe_adjust, preset_chip_label, preset_from_params,
+    preset_index_for_params, previous_in_order,
 };
 use crate::model::best_frame::pick_best_frame;
 use crate::model::export::ExportDraft;
@@ -292,6 +294,17 @@ pub struct AppState {
     pub preview_full: Option<(String, Arc<gpui_kit::Image>)>,
     /// 最近一次已发起的 1:1 全分辨率加载路径（去重；失败保留，避免重试风暴）
     pub preview_full_request: Option<String>,
+    /// preview_full 里这张是不是「调整后的全分辨率帧」，以及它是按哪组参数渲染的
+    /// （None = 槽位里是未调整图源 / 空）
+    pub preview_full_toned_params: Option<(String, AdjustParams)>,
+    /// 全分辨率调整帧的在途去重标记（path + 参数）
+    pub preview_full_toned_request: Option<(String, AdjustParams)>,
+    /// 滑杆停手去抖（400ms 内有新改动则作废）
+    pub adjust_full_debounce_seq: u64,
+    /// 全分辨率渲染世代：只有最新一次允许写回 preview_full
+    pub adjust_full_render_seq: u64,
+    /// 参数是否已停手（停手后才允许跑全分辨率重算；切图/装载后视为已停手）
+    pub adjust_full_settled: bool,
     pub preview_zoom: f64,
     pub preview_pan: (f64, f64),
     pub show_bbox: bool,
@@ -339,8 +352,24 @@ pub struct AppState {
     pub adjust_render_seq: u64,
     /// 当前 `preview_image` 是否为调整后的图（中性参数时避免无谓重算）
     pub adjust_preview_toned: bool,
+    /// 当前调整帧是否来自 RAW 的 16-bit 母版（ADR 0007；非 RAW / 8-bit 兜底时为 false）
+    pub adjust_preview_16bit: bool,
+    /// 当前预览图的直方图（有调整时 = 调整后的像素，§7.4）
+    pub preview_histogram: Option<HistogramData>,
+    /// 原图（中性）基线直方图——同屏对比「这一拉往哪边偏了」
+    pub preview_base_histogram: Option<HistogramData>,
+    /// 剪切警告叠加图（键 = 所属图片路径；仅 show_clipping 打开时生成，主图同尺寸叠放）
+    pub preview_clip_mask: Option<(String, Arc<gpui_kit::Image>)>,
+    /// before/after：按住反斜杠时预览改用未调整母版（只有当前图确实有调整时才生效）
+    pub before_after_held: bool,
+    /// 未调整母版图源（before/after 专用槽位；与 preview_image 分开，按住/松开互不覆盖）
+    pub preview_base_image: Option<(String, Arc<gpui_kit::Image>)>,
     /// 三条滑杆实体（首次渲染调整 tab 时懒创建）
     pub adjust_sliders: Option<AdjustSliders>,
+    /// 进程内「调整参数剪贴板」（不占系统剪贴板：Ctrl+C 已经是复制图片）
+    pub adjust_clipboard: Option<AdjustParams>,
+    /// 本次未落盘改动的「改前值」：落盘时写一条 UndoOp::Adjust（单张滑杆也能 Ctrl+Z）
+    pub adjust_before_change: Option<AdjustParams>,
 
     // ── 幻灯片状态 ──
     pub slideshow_pos: usize,
@@ -463,20 +492,20 @@ pub struct AppState {
 /// 懒创建：`SliderState` 需要 `Context` 才建得出来，而 `AppState::new` 里没有；
 /// 首次渲染调整 tab 时构造，之后随 AppState 生命周期持有（drop 即自动退订）。
 pub struct AdjustSliders {
-    pub exposure: Entity<SliderState>,
-    pub contrast: Entity<SliderState>,
-    pub saturation: Entity<SliderState>,
-    /// 三条滑杆的 Change 事件订阅；drop 即取消，必须持有
+    /// 与 AdjustField::ALL 同序（下标 = field.index()）
+    sliders: Vec<Entity<SliderState>>,
+    /// 各滑杆的 Change 事件订阅；drop 即取消，必须持有
     _subscriptions: Vec<Subscription>,
 }
 
 impl AdjustSliders {
     fn entity(&self, field: AdjustField) -> &Entity<SliderState> {
-        match field {
-            AdjustField::Exposure => &self.exposure,
-            AdjustField::Contrast => &self.contrast,
-            AdjustField::Saturation => &self.saturation,
-        }
+        &self.sliders[field.index()]
+    }
+
+    /// 全部滑杆实体（视图按 AdjustField::ALL 顺序取用）
+    pub fn all_entities(&self) -> Vec<Entity<SliderState>> {
+        self.sliders.clone()
     }
 }
 
@@ -495,6 +524,17 @@ impl AppState {
             return;
         }
         self.flush_adjustments();
+        // 换图先清统计：否则上一张的直方图 / 剪切掩码会顶在面板上直到新帧到达
+        self.preview_histogram = None;
+        self.preview_base_histogram = None;
+        self.preview_clip_mask = None;
+        self.preview_base_image = None;
+        self.before_after_held = false;
+        self.adjust_preview_16bit = false;
+        self.preview_full_toned_params = None;
+        self.preview_full_toned_request = None;
+        self.adjust_full_settled = true;
+        self.adjust_before_change = None;
         self.adjust = super::engine_ops::load_adjustments(self, primary_path);
         self.adjust_path = Some(primary_path.to_string());
         self.adjust_dirty = false;
@@ -502,52 +542,28 @@ impl AppState {
         self.request_adjust_preview(cx);
     }
 
-    /// 懒创建三条滑杆并接上 Change 事件（首次渲染调整 tab 时）。
+    /// 懒创建全部滑杆并接上 Change 事件（首次渲染调整 tab 时）。
+    ///
+    /// 数量与范围完全由 AdjustField::ALL 决定：加参数只需改枚举，这里不用动。
     pub fn ensure_adjust_sliders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.adjust_sliders.is_some() {
             return;
         }
-        let exposure = cx.new(|_| {
-            SliderState::new()
-                .min(EXPOSURE_MIN)
-                .max(EXPOSURE_MAX)
-                .step(EXPOSURE_STEP)
-        });
-        let contrast = cx.new(|_| {
-            SliderState::new()
-                .min(TONE_MIN)
-                .max(TONE_MAX)
-                .step(TONE_STEP)
-        });
-        let saturation = cx.new(|_| {
-            SliderState::new()
-                .min(TONE_MIN)
-                .max(TONE_MAX)
-                .step(TONE_STEP)
-        });
-
-        let subscriptions = vec![
-            cx.subscribe(&exposure, |state, _, event, cx| {
+        let mut sliders = Vec::with_capacity(AdjustField::ALL.len());
+        let mut subscriptions = Vec::with_capacity(AdjustField::ALL.len());
+        for field in AdjustField::ALL {
+            let (min, max, step) = field.range();
+            let slider = cx.new(|_| SliderState::new().min(min).max(max).step(step));
+            subscriptions.push(cx.subscribe(&slider, move |state, _, event, cx| {
                 if let SliderEvent::Change(value) = event {
-                    state.set_adjust_field(AdjustField::Exposure, value.start(), cx);
+                    state.set_adjust_field(field, value.start(), cx);
                 }
-            }),
-            cx.subscribe(&contrast, |state, _, event, cx| {
-                if let SliderEvent::Change(value) = event {
-                    state.set_adjust_field(AdjustField::Contrast, value.start(), cx);
-                }
-            }),
-            cx.subscribe(&saturation, |state, _, event, cx| {
-                if let SliderEvent::Change(value) = event {
-                    state.set_adjust_field(AdjustField::Saturation, value.start(), cx);
-                }
-            }),
-        ];
+            }));
+            sliders.push(slider);
+        }
 
         self.adjust_sliders = Some(AdjustSliders {
-            exposure,
-            contrast,
-            saturation,
+            sliders,
             _subscriptions: subscriptions,
         });
         self.sync_sliders(window, cx);
@@ -560,6 +576,7 @@ impl AppState {
         if next == self.adjust {
             return;
         }
+        self.note_adjust_before_change();
         self.adjust = next;
         self.on_adjust_changed(cx);
     }
@@ -574,6 +591,7 @@ impl AppState {
         if field.is_neutral(&self.adjust) {
             return;
         }
+        self.note_adjust_before_change();
         field.reset(&mut self.adjust);
         self.sync_one_slider(field, window, cx);
         self.on_adjust_changed(cx);
@@ -584,6 +602,7 @@ impl AppState {
         if self.adjust.is_neutral() {
             return;
         }
+        self.note_adjust_before_change();
         self.adjust = AdjustParams::default();
         self.sync_sliders(window, cx);
         self.on_adjust_changed(cx);
@@ -592,6 +611,15 @@ impl AppState {
     /// 参数变化后的统一收尾：立即重绘（数值 chip 跟手）+ 标脏去抖落盘 + 预览重算
     fn on_adjust_changed(&mut self, cx: &mut Context<Self>) {
         self.adjust_dirty = true;
+        // 1:1 / 高倍放大下的全分辨率重算：滑杆停手 400ms 后才跑（拖动中只走 1600 即时链路）
+        self.schedule_adjust_full(cx);
+        // 网格 / 胶片条的「已调整」徽标立即跟上，不等重扫（重扫只在打开新目录时发生）
+        if let Some(path) = self.adjust_path.clone() {
+            let adjusted = !self.adjust.is_neutral();
+            if let Some(meta) = self.items.iter_mut().find(|m| m.primary_path == path) {
+                meta.has_adjustments = adjusted;
+            }
+        }
         cx.notify();
         self.schedule_adjust_persist(cx);
         self.request_adjust_preview(cx);
@@ -631,13 +659,32 @@ impl AppState {
         };
         let params = self.adjust;
         super::engine_ops::persist_adjustments(self, &path, &params);
+        // 单张改动也进撤销日志（与批量/粘贴/预设共用同一条 Ctrl+Z 通道）：
+        // 一次连续拖动只记一条（快照在改动起点打，见 note_adjust_before_change）
+        let before = self.adjust_before_change.take();
+        if let Some(before) = before
+            && before != params
+            && let Some(dir) = self.current_dir.as_ref()
+            && let Some(rel) =
+                crate::model::adjust::rel_path_of(dir, std::path::Path::new(&path))
+        {
+            self.op_journal
+                .record(vec![photo_engine::undo::UndoOp::Adjust {
+                    rel_path: rel,
+                    before,
+                    after: params,
+                }]);
+        }
         self.adjust_dirty = false;
     }
 
-    /// 重新渲染当前焦点图的调整预览。
-    /// 中性参数 + 当前预览本来就是原图 → 无谓的重算直接跳过。
+    /// 重新渲染当前焦点图的调整预览（含直方图；show_clipping 打开时一并烘焙剪切掩码）。
+    ///
+    /// 中性参数 + 当前预览本来就是原图 + 没有剪切叠加需求 → 无谓的重算直接跳过；
+    /// 但「刚打开剪切警告」必须能强制重算一次，所以判据里带上 show_clipping。
     fn request_adjust_preview(&mut self, cx: &mut Context<Self>) {
-        if self.adjust.is_neutral() && !self.adjust_preview_toned {
+        let want_clip_mask = self.show_clipping;
+        if self.adjust.is_neutral() && !self.adjust_preview_toned && !want_clip_mask {
             return;
         }
         let Some(path) = self.adjust_path.clone() else {
@@ -658,7 +705,342 @@ impl AppState {
             path,
             source,
             params,
+            want_clip_mask,
             seq,
+            cx,
+        );
+    }
+
+    /// 全分辨率调整帧的停手去抖：400ms 内还有新改动就作废（ADR 0007：拖动中不跑全尺寸）。
+    fn schedule_adjust_full(&mut self, cx: &mut Context<Self>) {
+        self.adjust_full_settled = false;
+        self.adjust_full_debounce_seq = self.adjust_full_debounce_seq.wrapping_add(1);
+        let seq = self.adjust_full_debounce_seq;
+        let entity = cx.entity();
+        cx.spawn(
+            async move |_weak: gpui_kit::WeakEntity<AppState>,
+                        async_cx: &mut gpui_kit::AsyncApp| {
+                async_cx
+                    .background_executor()
+                    .timer(Duration::from_millis(400))
+                    .await;
+                async_cx.update(|cx| {
+                    entity.update(cx, |state, cx| {
+                        if state.adjust_full_debounce_seq == seq {
+                            state.adjust_full_settled = true;
+                            state.request_adjust_full(cx);
+                        }
+                    });
+                });
+            },
+        )
+        .detach();
+    }
+
+    /// 发起全分辨率调整帧（若确实需要、且同 (path, 参数) 还没跑过）。
+    ///
+    /// 「是否需要」由渲染层判定：它知道当前缩放与视口（显示尺寸是否超过 1600 链路）。
+    /// 这里只做停手闸门 + 去重，避免每帧重复发起秒级的全尺寸解码。
+    pub fn request_adjust_full(&mut self, cx: &mut Context<Self>) {
+        if !self.adjust_full_settled || self.adjust.is_neutral() {
+            return;
+        }
+        if self.view_mode != ViewMode::Preview {
+            return;
+        }
+        let Some(path) = self.adjust_path.clone() else {
+            return;
+        };
+        let params = self.adjust;
+        let done = self
+            .preview_full_toned_params
+            .as_ref()
+            .is_some_and(|(p, prm)| p == &path && *prm == params);
+        if done {
+            return;
+        }
+        let in_flight = self
+            .preview_full_toned_request
+            .as_ref()
+            .is_some_and(|(p, prm)| p == &path && *prm == params);
+        if in_flight {
+            return;
+        }
+        let Some(meta) = self.items.iter().find(|m| m.primary_path == path) else {
+            return;
+        };
+        let Some(source) = source_file_of(meta) else {
+            return;
+        };
+        self.adjust_full_render_seq = self.adjust_full_render_seq.wrapping_add(1);
+        let seq = self.adjust_full_render_seq;
+        self.preview_full_toned_request = Some((path.clone(), params));
+        super::engine_ops::render_adjust_full(
+            cx.entity(),
+            self.image_manager.clone(),
+            path,
+            source,
+            params,
+            seq,
+            cx,
+        );
+    }
+
+    /// 工具条 / O 键切换剪切警告后强制刷新一次预览帧（中性参数也要重算——要生成掩码）。
+    pub fn refresh_adjust_preview(&mut self, cx: &mut Context<Self>) {
+        self.request_adjust_preview(cx);
+    }
+
+    /// 批量 / 粘贴的作用域：有选中 → 选中集 ∩ 筛选结果；无选中 → 只作用于焦点图。
+    /// 绝不退化成「整个目录」（安全边界与批量文件操作同口径）。
+    pub fn adjust_apply_scope(&self) -> Vec<usize> {
+        let targets = adjust_targets(&self.selected_indices, &self.display_order);
+        if !targets.is_empty() {
+            return targets;
+        }
+        self.primary_selected_index().into_iter().collect()
+    }
+
+    /// 把参数写到目标集：逐张落库 + 徽标即时更新 + 记撤销 + 焦点图同步（面板/预览跟着变）。
+    pub fn apply_adjustments_to(
+        &mut self,
+        targets: &[usize],
+        params: AdjustParams,
+        verb: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if targets.is_empty() {
+            self.set_status_message("未选中照片");
+            cx.notify();
+            return;
+        }
+        // 批量路径自己产生逐张撤销记录：把单张快照清掉，避免同一次改动记两条
+        self.adjust_before_change = None;
+        let ops = super::engine_ops::apply_adjustments_batch(self, targets, params);
+        if !ops.is_empty() {
+            // 单槽日志：与批量文件操作共用 Ctrl+Z（撤销时带 folder_db，见 undo_last_op）
+            self.op_journal.record(ops);
+        }
+        // 焦点图在目标集里 → 面板数值、滑杆、预览一起跟上（否则面板显示的还是旧值）
+        if let Some(path) = self.adjust_path.clone()
+            && let Some(idx) = self.items.iter().position(|m| m.primary_path == path)
+            && targets.contains(&idx)
+        {
+            self.adjust = params;
+            self.adjust_dirty = false;
+            self.sync_sliders(window, cx);
+            self.request_adjust_preview(cx);
+        }
+        let n = targets.len();
+        self.set_status_message(format!("{verb}调整参数到 {n} 张（Ctrl+Z 可撤销）"));
+        cx.notify();
+    }
+
+    /// 「套用到选中 N 张」按钮：只认选中集 ∩ 筛选结果（按钮也只在 N > 1 时出现）
+    pub fn apply_adjustments_to_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let params = self.adjust;
+        let targets = adjust_targets(&self.selected_indices, &self.display_order);
+        self.apply_adjustments_to(&targets, params, "套用", window, cx);
+    }
+
+    /// 复制焦点图的调整参数到进程内剪贴板
+    pub fn copy_adjustments(&mut self) {
+        if self.adjust_path.is_none() {
+            self.set_status_message("未选中照片");
+            return;
+        }
+        self.adjust_clipboard = Some(self.adjust);
+        self.set_status_message(format!(
+            "已复制调整参数（{}）",
+            describe_adjust(&self.adjust)
+        ));
+    }
+
+    /// 粘贴到作用域（选中集 ∩ 筛选结果；无选中 = 焦点图）
+    pub fn paste_adjustments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(params) = self.adjust_clipboard else {
+            self.set_status_message("剪贴板里没有调整参数（先按 Ctrl+Shift+C 复制）");
+            cx.notify();
+            return;
+        };
+        let targets = self.adjust_apply_scope();
+        self.apply_adjustments_to(&targets, params, "粘贴", window, cx);
+    }
+
+    /// 保存当前参数为调整预设（自动命名「预设 N」；落配置文件，重启后仍在）
+    pub fn save_adjust_preset(&mut self, cx: &mut Context<Self>) {
+        let name = format!("预设 {}", self.app_config.adjust_presets.len() + 1);
+        let preset = preset_from_params(name.clone(), &self.adjust);
+        self.app_config.adjust_presets.push(preset);
+        self.save_config();
+        self.set_status_message(format!(
+            "已保存调整预设「{name}」（{}）",
+            preset_chip_label(&self.app_config.adjust_presets[self.app_config.adjust_presets.len() - 1])
+        ));
+        cx.notify();
+    }
+
+    /// 套用某个调整预设到作用域（选中集 ∩ 筛选结果；无选中 = 焦点图），可 Ctrl+Z 撤销
+    pub fn apply_adjust_preset(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(preset) = self.app_config.adjust_presets.get(index).cloned() else {
+            self.set_status_message("预设不存在（可能已被删除）");
+            cx.notify();
+            return;
+        };
+        let params = AdjustParams {
+            exposure: preset.exposure,
+            contrast: preset.contrast,
+            saturation: preset.saturation,
+            shadows: preset.shadows,
+            highlights: preset.highlights,
+            temperature: preset.temperature,
+            tint: preset.tint,
+        };
+        let targets = self.adjust_apply_scope();
+        let verb = format!("套用预设「{}」的", preset.name);
+        self.apply_adjustments_to(&targets, params, &verb, window, cx);
+    }
+
+    /// 删除某个调整预设（落配置文件）
+    pub fn delete_adjust_preset(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.app_config.adjust_presets.len() {
+            return;
+        }
+        let removed = self.app_config.adjust_presets.remove(index);
+        self.save_config();
+        self.set_status_message(format!("已删除调整预设「{}」", removed.name));
+        cx.notify();
+    }
+
+    /// 当前参数命中的预设下标（chip 选中态 / 删除按钮的判据）
+    pub fn current_adjust_preset(&self) -> Option<usize> {
+        preset_index_for_params(&self.app_config.adjust_presets, &self.adjust)
+    }
+
+    /// 沿用「可见顺序里的上一张」的调整参数（套到作用域上）
+    pub fn reuse_previous_adjustments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(prev) = previous_in_order(self.primary_selected_index(), &self.display_order)
+        else {
+            self.set_status_message("没有上一张可沿用");
+            cx.notify();
+            return;
+        };
+        let Some(prev_path) = self.items.get(prev).map(|m| m.primary_path.clone()) else {
+            return;
+        };
+        let params = super::engine_ops::load_adjustments(self, &prev_path);
+        let targets = self.adjust_apply_scope();
+        self.apply_adjustments_to(&targets, params, "沿用上一张的", window, cx);
+    }
+
+    /// 重扫后调用：焦点图若已不在列表里（源文件被外部删除），把预览 / 调整槽位一起清掉。
+    ///
+    /// 不清的话面板还挂着那张已经不存在的图（预览图、直方图、掩码、调整参数都是它）。
+    pub fn prune_preview_if_absent(&mut self) {
+        let Some((path, _)) = self.preview_image.as_ref() else {
+            return;
+        };
+        let path = path.clone();
+        if self.items.iter().any(|m| m.primary_path == path) {
+            return;
+        }
+        self.preview_image = None;
+        self.preview_request = None;
+        self.preview_full = None;
+        self.preview_full_request = None;
+        self.preview_full_toned_params = None;
+        self.preview_full_toned_request = None;
+        self.preview_histogram = None;
+        self.preview_base_histogram = None;
+        self.preview_clip_mask = None;
+        self.preview_base_image = None;
+        self.adjust_path = None;
+        self.adjust = AdjustParams::default();
+        self.adjust_preview_toned = false;
+        self.adjust_preview_16bit = false;
+        self.adjust_dirty = false;
+        self.adjust_before_change = None;
+    }
+
+    /// Ctrl+Z 的统一入口：带 folder_db 撤销（调整参数类 op 要写回库；文件类 op 不受影响）
+    pub fn undo_last_op(&mut self) -> Vec<photo_engine::undo::UndoOutcome> {
+        let ops = self.op_journal.take();
+        photo_engine::undo::undo_ops_with_db(&ops, self.folder_db.as_ref())
+    }
+
+    /// 单张改动的撤销快照：一次「未落盘的连续改动」开始时记下改前值。
+    /// 落盘（flush_adjustments）时据此写一条 UndoOp::Adjust —— 拖动一次只记一条，
+    /// 不是每帧一条（否则撤销栈会被拖动过程淹没）。
+    fn note_adjust_before_change(&mut self) {
+        if !self.adjust_dirty {
+            self.adjust_before_change = Some(self.adjust);
+        }
+    }
+
+    /// 键盘微调（[ / ]）：在当前值上叠加 delta，之后走与滑杆**完全相同**的量化 / 钳制 /
+    /// 落盘 / 预览重算路径（不另开一条写入逻辑，避免两处口径漂移）。
+    pub fn nudge_adjust(
+        &mut self,
+        field: AdjustField,
+        delta: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut next = self.adjust;
+        field.apply(&mut next, field.slider_value(&self.adjust) + delta);
+        if next == self.adjust {
+            return;
+        }
+        self.note_adjust_before_change();
+        self.adjust = next;
+        self.sync_one_slider(field, window, cx);
+        self.on_adjust_changed(cx);
+    }
+
+    /// before/after：按住反斜杠切到「未调整母版」。没调整时预览本来就是原图，不必动。
+    pub fn set_before_after(&mut self, held: bool, cx: &mut Context<Self>) {
+        if self.before_after_held == held {
+            return;
+        }
+        self.before_after_held = held;
+        if held {
+            self.ensure_base_preview(cx);
+        }
+        cx.notify();
+    }
+
+    /// 确保当前焦点图的未调整母版已备好（before/after 首次按住时后台加载一次）。
+    fn ensure_base_preview(&mut self, cx: &mut Context<Self>) {
+        if self.adjust.is_neutral() {
+            return;
+        }
+        let Some(path) = self.adjust_path.clone() else {
+            return;
+        };
+        if self
+            .preview_base_image
+            .as_ref()
+            .is_some_and(|(p, _)| p == &path)
+        {
+            return;
+        }
+        let Some(meta) = self.items.iter().find(|m| m.primary_path == path) else {
+            return;
+        };
+        let Some(source) = source_file_of(meta) else {
+            return;
+        };
+        super::engine_ops::load_preview_base_image(
+            cx.entity(),
+            self.image_manager.clone(),
+            path,
+            source,
             cx,
         );
     }
@@ -785,6 +1167,11 @@ impl AppState {
             preview_request: None,
             preview_full: None,
             preview_full_request: None,
+            preview_full_toned_params: None,
+            preview_full_toned_request: None,
+            adjust_full_debounce_seq: 0,
+            adjust_full_render_seq: 0,
+            adjust_full_settled: true,
             preview_zoom: 1.0,
             preview_pan: (0.0, 0.0),
             show_bbox: true,
@@ -809,7 +1196,15 @@ impl AppState {
             adjust_persist_seq: 0,
             adjust_render_seq: 0,
             adjust_preview_toned: false,
+            adjust_preview_16bit: false,
+            preview_histogram: None,
+            preview_base_histogram: None,
+            preview_clip_mask: None,
+            before_after_held: false,
+            preview_base_image: None,
             adjust_sliders: None,
+            adjust_clipboard: None,
+            adjust_before_change: None,
 
             slideshow_pos: 0,
             slideshow_paused: false,
@@ -1590,10 +1985,30 @@ impl AppState {
                 return true;
             }
         }
-        // 3. 识别进行中 -> 取消批量识别
+        // 3. 识别进行中 -> 取消批量识别（顺手把框选叠加层收掉，否则画框会一直留在画面上）
         if self.is_recognizing {
             self.recognize_cancel.store(true, Ordering::Relaxed);
+            self.region_drag_start = None;
+            self.region_bbox = None;
             return true;
+        }
+        // 3b. 框选状态 -> Esc 取消（进行中的拖拽优先，其次是已经画出来的框）
+        //     用户报过「Shift 框选不能取消」：以前 Esc 在这里什么都不做。
+        match crate::model::region::region_escape_action(
+            self.region_drag_start.is_some(),
+            self.region_bbox.is_some(),
+        ) {
+            crate::model::region::RegionEscape::CancelDrag => {
+                self.region_drag_start = None;
+                self.region_bbox = None;
+                self.set_status_message("已取消框选");
+                return true;
+            }
+            crate::model::region::RegionEscape::ClearBox => {
+                self.region_bbox = None;
+                return true;
+            }
+            crate::model::region::RegionEscape::None => {}
         }
         // 4. 幻灯片态 -> 退出幻灯片
         if self.view_mode == ViewMode::Slideshow {

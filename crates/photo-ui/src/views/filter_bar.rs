@@ -423,6 +423,30 @@ pub fn render_filter_bar(
                                 }),
                             )),
                     )
+                    // 3b. 空文件（源文件 0 字节：复制/传输中断的残骸，筛出来重拷或删除）
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .w(px(60.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("文件"),
+                            )
+                            .child(render_filter_chip(
+                                "只看空文件",
+                                state.criteria.empty_source_only,
+                                cx,
+                                cx.listener(|state, _, _, cx| {
+                                    state.criteria.empty_source_only =
+                                        !state.criteria.empty_source_only;
+                                    state.recompute_pipeline();
+                                    cx.notify();
+                                }),
+                            )),
+                    )
                     // 4. 识别状态
                     .child(
                         h_flex()

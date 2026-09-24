@@ -13,15 +13,11 @@ use gpui_kit::{
     prelude::*, px,
 };
 
-use crate::model::context_menu::ContextMenuAction;
+use crate::model::context_menu::{ContextMenuAction, ITEM_H, menu_height};
 use crate::state::AppState;
 use crate::state::app_state::PhotoContextMenu;
 use crate::state::engine_ops::defer_entity_action;
 
-/// 单项高度（与 model/context_menu.rs 里「10 项超过最大高」的注释同口径）
-const ITEM_H: f32 = 28.0;
-/// 菜单最大高度：超过就滚动（§13.4）
-const MAX_H: f32 = 240.0;
 const MENU_W: f32 = 252.0;
 
 /// 关菜单 + 派发动作（点击与回车共用；动作本身必须 defer 到实体归还之后）
@@ -45,9 +41,10 @@ pub fn render_photo_context_menu(
     _window: &mut Window,
     cx: &mut Context<AppState>,
 ) -> impl IntoElement + use<> {
-    let height = (menu.items.len() as f32 * ITEM_H + 8.0).min(MAX_H);
-    // 贴着窗口右下角打开时往回收，别把菜单画到窗口外面去
+    // 高度按内容给（放得下就不滚动）；只有窗口装不下才限高并滚动
     let viewport = _window.viewport_size();
+    let viewport_h = f32::from(viewport.height);
+    let height = menu_height(menu.items.len(), viewport_h);
     let x = menu
         .x
         .min((f32::from(viewport.width) - MENU_W - 4.0).max(0.0));

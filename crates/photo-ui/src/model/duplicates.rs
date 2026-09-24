@@ -140,6 +140,7 @@ mod tests {
             subjects: vec![],
             failure_stage: None,
             candidates: Vec::new(),
+            has_adjustments: false,
         }
     }
 

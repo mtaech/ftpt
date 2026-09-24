@@ -79,6 +79,9 @@ pub struct AppConfig {
     /// 导出预设列表（T1 批次：命名模板/长边/质量组合）。旧配置无此字段时为空。
     #[serde(default)]
     pub export_presets: Vec<ExportPreset>,
+    /// 调整预设列表（右栏「调整」tab：曝光/对比度/饱和度组合）。旧配置无此字段时为空。
+    #[serde(default)]
+    pub adjust_presets: Vec<AdjustPreset>,
     /// 上次使用的导出目标目录（导出对话框预填；None = 未设置，回退 `<当前目录>/exports`）。
     /// 旧配置无此字段时为 None（serde 静默忽略）；导入目标目录仍不记忆（#14 另一半）。
     #[serde(default)]
@@ -134,6 +137,60 @@ impl ExportPreset {
     }
 }
 
+/// 调整预设（ADR 0007 补充）：一组可复用的曝光/对比度/饱和度。
+///
+/// 与 sliders 同口径：曝光 ±3.0 EV 且 0.3 量化、对比度/饱和度 ±100。
+/// 空列表是合法默认（调整没有「原图预设」这种有意义的东西）。
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AdjustPreset {
+    pub name: String,
+    pub exposure: f32,
+    pub contrast: i32,
+    pub saturation: i32,
+    pub shadows: i32,
+    pub highlights: i32,
+    pub temperature: i32,
+    pub tint: i32,
+}
+
+impl AdjustPreset {
+    /// 字段钳制：与 UI 的量化口径一致（0.3 步进、±3.0 / ±100）。
+    /// 非有限曝光（NaN/inf）归零——否则存进 TOML 会写出读不回来的 nan。
+    pub fn clamped(mut self) -> Self {
+        let ev = if self.exposure.is_finite() {
+            self.exposure
+        } else {
+            0.0
+        };
+        self.exposure = ((ev / 0.3).round() * 0.3).clamp(-3.0, 3.0);
+        self.exposure = (self.exposure * 100.0).round() / 100.0;
+        self.contrast = self.contrast.clamp(-100, 100);
+        self.saturation = self.saturation.clamp(-100, 100);
+        self.shadows = self.shadows.clamp(-100, 100);
+        self.highlights = self.highlights.clamp(-100, 100);
+        self.temperature = self.temperature.clamp(-100, 100);
+        self.tint = self.tint.clamp(-100, 100);
+        self
+    }
+}
+
+impl Default for AdjustPreset {
+    fn default() -> Self {
+        Self {
+            name: "预设".to_string(),
+            exposure: 0.0,
+            contrast: 0,
+            saturation: 0,
+            shadows: 0,
+            highlights: 0,
+            temperature: 0,
+            tint: 0,
+        }
+    }
+}
+
 impl Default for ExportPreset {
     fn default() -> Self {
         Self {
@@ -177,6 +234,7 @@ impl Default for AppConfig {
             detection_source: DetectionSource::default(),
             include_subdirectories: false,
             export_presets: vec![ExportPreset::default()],
+            adjust_presets: vec![],
             export_dir: None,
             import_dir: None,
             recognizer_idle_unload_minutes: 0,
@@ -203,6 +261,13 @@ impl AppConfig {
             .export_presets
             .into_iter()
             .map(ExportPreset::clamped)
+            .collect();
+        // 调整预设：逐条钳制 + 上限 20 条（配置文件不该被无界增长拖大）
+        self.adjust_presets = self
+            .adjust_presets
+            .into_iter()
+            .map(AdjustPreset::clamped)
+            .take(20)
             .collect();
         self
     }
@@ -624,6 +689,92 @@ mod tests {
         let cfg = AppConfig::default();
         assert_eq!(cfg.export_presets.len(), 1);
         assert_eq!(cfg.export_presets[0], ExportPreset::default());
+    }
+
+    #[test]
+    fn test_adjust_preset_default_and_clamp() {
+        let cfg = AppConfig::default();
+        assert!(cfg.adjust_presets.is_empty(), "调整预设默认空列表");
+
+        // 曝光按 0.3 量化并钳到 ±3；对比度/饱和度钳到 ±100
+        let p = AdjustPreset {
+
+            name: "夜景".into(),
+            exposure: 9.0,
+            contrast: 300,
+            saturation: -300,
+            ..AdjustPreset::default()
+        }
+        .clamped();
+        assert_eq!(p.exposure, 3.0);
+        assert_eq!(p.contrast, 100);
+        assert_eq!(p.saturation, -100);
+
+        let q = AdjustPreset {
+            exposure: 0.37,
+            ..AdjustPreset::default()
+        }
+        .clamped();
+        assert_eq!(q.exposure, 0.3);
+
+        // 3.13 四个新参数同样逐条钳制
+        let wide = AdjustPreset {
+            shadows: 300,
+            highlights: -300,
+            temperature: 120,
+            tint: -120,
+            ..AdjustPreset::default()
+        }
+        .clamped();
+        assert_eq!(wide.shadows, 100);
+        assert_eq!(wide.highlights, -100);
+        assert_eq!(wide.temperature, 100);
+        assert_eq!(wide.tint, -100);
+
+        // 非有限曝光归零（否则 TOML 里会出现读不回来的 nan）
+        let nan = AdjustPreset {
+            exposure: f32::NAN,
+            ..AdjustPreset::default()
+        }
+        .clamped();
+        assert_eq!(nan.exposure, 0.0);
+    }
+
+    #[test]
+    fn test_adjust_presets_roundtrip_and_cap() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let cfg = AppConfig {
+            adjust_presets: vec![AdjustPreset {
+
+                name: "提亮".into(),
+                exposure: 0.9,
+                contrast: 12,
+                saturation: -5,
+            ..AdjustPreset::default()
+        }],
+            ..Default::default()
+        };
+        save_config(&path, &cfg).unwrap();
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(loaded.adjust_presets.len(), 1);
+        assert_eq!(loaded.adjust_presets[0].name, "提亮");
+        assert_eq!(loaded.adjust_presets[0].exposure, 0.9);
+        assert_eq!(loaded.adjust_presets[0].contrast, 12);
+
+        // 上限：手改配置塞 30 条，读入即截到 20
+        let many = AppConfig {
+            adjust_presets: (0..30)
+                .map(|i| AdjustPreset {
+                    name: format!("p{i}"),
+                    ..AdjustPreset::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        save_config(&path, &many).unwrap();
+        let capped = load_config(&path).unwrap();
+        assert_eq!(capped.adjust_presets.len(), 20);
     }
 
     #[test]

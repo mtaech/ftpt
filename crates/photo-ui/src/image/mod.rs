@@ -13,15 +13,24 @@ use std::sync::atomic::AtomicBool;
 
 use gpui_kit::{Image, ImageFormat};
 use photo_domain::{AdjustParams, CaptureMeta, ImageFormat as DomainFormat, SourceFile};
-use photo_engine::adjustments::{ToneParams, apply_tone8};
+use photo_engine::adjustments::{Rgb16Image, ToneParams, apply_tone16, apply_tone8};
+use photo_engine::convert::{decode_raw16_master, rgb16_to_rgb8};
+use photo_engine::histogram::{HistogramData, clipping_mask_rgba, compute_histogram};
 use photo_engine::thumbnail::ThumbnailCache;
 
 pub const THUMB_SIZE_GRID: u32 = 440;
 pub const THUMB_SIZE_FILMSTRIP: u32 = 180;
 pub const MASTER_SIZE: u32 = 2560;
+/// 调整预览的像素源长边（ADR 0007 的「显示链路恒 1600px」，2026-09-24 实测后落地）：
+/// 2560 链路单帧 69.8ms、其中 JPEG 编码 58.9ms（**84%**）；1600 链路 27.6ms。
+/// tone 变换本身 11.3ms(2560) / 4.7ms(1600)——ADR 的性能预算管的是这一段，编码才是瓶颈。
+/// 1600 在「适应窗口」下已 ≥ 视口；1:1 与高倍放大由全分辨率链路兜底（render_adjusted_full）。
+pub const ADJUST_SOURCE_SIZE: u32 = 1600;
 
 /// 调整预览重编码的 JPEG 质量：母版本身已是 JPEG，二次编码留足质量余量（ADR 0007 §预览）。
 const ADJUST_JPEG_QUALITY: u8 = 90;
+/// 1:1 全分辨率调整帧的 JPEG 质量：这是"最终看画质"的那一张，比即时预览给得高。
+const ADJUST_FULL_JPEG_QUALITY: u8 = 92;
 
 #[derive(Clone)]
 pub struct ImageManager {
@@ -32,6 +41,12 @@ pub struct ImageManager {
     /// 调整预览用的母版 8-bit 像素缓存（键 = 路径 + 文件大小，只留最近 2 张）。
     /// 拖动滑杆时只需"重算色调 + 重编码"，不必重新解码母版——这是实时预览的前提。
     base_cache: Arc<RwLock<HashMap<(String, u64), Arc<image::RgbImage>>>>,
+    /// 原图（中性）直方图缓存（键 = 路径 + 文件大小，只留最近 8 张）：
+    /// 调整时每帧都要拿它当基线对比，但每张图只算一次。
+    hist_cache: Arc<RwLock<HashMap<(String, u64), HistogramData>>>,
+    /// RAW 调整用的 16-bit 母版（half_size + 16bit；6MP ≈ 36MB，只留最近 1 张）。
+    /// 8-bit 母版拉大曝光会条带，16-bit 母版把这段动态范围留住（ADR 0007）。
+    base16_cache: Arc<RwLock<HashMap<(String, u64), Arc<Rgb16Image>>>>,
 }
 
 /// 从 CaptureMeta 构造引擎侧 SourceFile。
@@ -138,6 +153,8 @@ impl ImageManager {
             master_cache: Arc::new(RwLock::new(HashMap::new())),
             full_cache: Arc::new(RwLock::new(HashMap::new())),
             base_cache: Arc::new(RwLock::new(HashMap::new())),
+            hist_cache: Arc::new(RwLock::new(HashMap::new())),
+            base16_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -146,6 +163,8 @@ impl ImageManager {
         self.master_cache.write().clear();
         self.full_cache.write().clear();
         self.base_cache.write().clear();
+        self.hist_cache.write().clear();
+        self.base16_cache.write().clear();
     }
 
     pub fn thumbnail_cache(&self) -> Option<&ThumbnailCache> {
@@ -293,22 +312,58 @@ impl ImageManager {
         Ok(img)
     }
 
-    /// 渲染「带调整参数」的预览母版（ADR 0007）：母版像素 → 色调变换 → JPEG 字节 → Image。
+    /// 烘焙一次预览帧（ADR 0007 + §7.4）：显示图 + 直方图（含原图基线）+ 可选剪切掩码。
     ///
-    /// - 参数中性 → 直接返回未调整母版（短路到旧路径，零回归）
+    /// - 参数中性 → 显示图短路为未调整母版（零回归），直方图 = 原图基线
+    /// - 有参数 → 母版像素 → apply_tone8 → JPEG 字节；直方图与掩码都算在**烘焙后的像素**上，
+    ///   这样「+1 EV 之后高光溢出变多」才看得见（算原文件会出现拉了但红区没变的错觉）
     /// - 像素源是**已裁到 2560 的母版**（8-bit 语义，RAW/JPEG 同口径）：拖动滑杆只重算色调
     ///   + 重编码，不重新解码原图（RAW half_size 16-bit 解码 ≤2s，做不了实时交互）
     /// - 主线程零像素工作：调用方负责放进后台 executor
-    pub fn render_adjusted_master(
+    pub fn build_preview_frame(
         &self,
         source: &SourceFile,
         params: &AdjustParams,
-    ) -> Result<Arc<Image>, String> {
-        if params.is_neutral() {
-            return self.load_master_image(source, None);
-        }
+        want_clip_mask: bool,
+    ) -> Result<PreviewFrame, String> {
         let base = self.master_rgb8(source)?;
-        let toned = apply_tone8(&base, &ToneParams::from(params));
+        let base_histogram = self.base_histogram(source, &base);
+
+        if params.is_neutral() {
+            let image = self.load_master_image(source, None)?;
+            let clip_mask = if want_clip_mask {
+                Some(clip_mask_image(&base)?)
+            } else {
+                None
+            };
+            return Ok(PreviewFrame {
+                image,
+                histogram: base_histogram.clone(),
+                base_histogram,
+                clip_mask,
+                used_raw16: false,
+            });
+        }
+
+        let tone = ToneParams::from(params);
+        // RAW：优先用 16-bit 母版（8-bit 母版拉大曝光会条带）。16-bit 母版首次就绪是秒级
+        // half_size 解码，**不卡首帧**——先用 8-bit 出一帧，同时告诉调用方后台补一次升级，
+        // 升级完成后重出同一帧（那时才走 16-bit）。
+        let is_raw = matches!(source.format, DomainFormat::Raw(_));
+        let (toned, used_raw16) = if is_raw {
+            match self.cached_rgb16(source) {
+                Some(base16) => (rgb16_to_rgb8(&apply_tone16(&base16, &tone)), true),
+                None => (apply_tone8(&base, &tone), false),
+            }
+        } else {
+            (apply_tone8(&base, &tone), false)
+        };
+        let histogram = compute_histogram(&toned);
+        let clip_mask = if want_clip_mask {
+            Some(clip_mask_image(&toned)?)
+        } else {
+            None
+        };
         let mut buf = std::io::Cursor::new(Vec::new());
         let mut encoder =
             image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, ADJUST_JPEG_QUALITY);
@@ -320,10 +375,89 @@ impl ImageManager {
                 image::ExtendedColorType::Rgb8,
             )
             .map_err(|e| format!("调整预览编码失败: {e}"))?;
-        Ok(Arc::new(Image::from_bytes(
-            ImageFormat::Jpeg,
-            buf.into_inner(),
-        )))
+        Ok(PreviewFrame {
+            image: Arc::new(Image::from_bytes(ImageFormat::Jpeg, buf.into_inner())),
+            histogram,
+            base_histogram,
+            clip_mask,
+            used_raw16,
+        })
+    }
+
+    /// 16-bit 母版是否已就绪（只认缓存命中：解码是秒级操作，不在渲染路径上顺手做）。
+    pub fn has_raw16_master(&self, source: &SourceFile) -> bool {
+        self.base16_cache
+            .read()
+            .contains_key(&cache_key_of(source))
+    }
+
+    fn cached_rgb16(&self, source: &SourceFile) -> Option<Arc<Rgb16Image>> {
+        self.base16_cache
+            .read()
+            .get(&cache_key_of(source))
+            .cloned()
+    }
+
+    /// 解码并缓存 RAW 的 16-bit 预览母版（half_size + 16bit + 自动亮度 + sRGB + 相机白平衡）。
+    ///
+    /// 非 RAW 直接返回 Ok（JPEG 直出没有更高位宽可用）；同一张重复调用命中缓存。
+    /// 内存：6MP×3×2B ≈ 36MB/张，**只留焦点图一张**（ADR 0007 的内存预算 ≤40MB）。
+    pub fn ensure_raw16_master(&self, source: &SourceFile) -> Result<(), String> {
+        if !matches!(source.format, DomainFormat::Raw(_)) {
+            return Ok(());
+        }
+        let key = cache_key_of(source);
+        if self.base16_cache.read().contains_key(&key) {
+            return Ok(());
+        }
+        let started = std::time::Instant::now();
+        let img = decode_raw16_master(source, MASTER_SIZE).map_err(|e| e.to_string())?;
+        let (w, h) = img.dimensions();
+        {
+            let mut map = self.base16_cache.write();
+            map.clear();
+            map.insert(key, Arc::new(img));
+        }
+        tracing::debug!(
+            "RAW 16-bit 调整母版就绪 {} ({:?}, {w}×{h})",
+            source.path.display(),
+            started.elapsed()
+        );
+        Ok(())
+    }
+
+    /// 全分辨率调整帧（1:1 / 高倍放大用）：全尺寸解码 → tone → JPEG，交给渲染层。
+    ///
+    /// RAW 是 3-5s 的全尺寸 AHD 解码 + 编码，**只能异步**（ADR 0007：滑杆停手后才跑）；
+    /// 调用方负责放进后台 executor 并在停手后触发。
+    pub fn render_adjusted_full(
+        &self,
+        source: &SourceFile,
+        params: &AdjustParams,
+    ) -> Result<Arc<Image>, String> {
+        let bytes = photo_engine::convert::render_adjusted_full(
+            source,
+            params,
+            ADJUST_FULL_JPEG_QUALITY,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes)))
+    }
+
+    /// 原图（中性）直方图，按图片缓存——调整时每帧都要拿它当基线，
+    /// 但**每张图只算一次**（2560 母版一次遍历，不在滑杆拖动链路上重复付）。
+    fn base_histogram(&self, source: &SourceFile, base: &image::RgbImage) -> HistogramData {
+        let key = cache_key_of(source);
+        if let Some(h) = self.hist_cache.read().get(&key).cloned() {
+            return h;
+        }
+        let h = compute_histogram(base);
+        let mut map = self.hist_cache.write();
+        if map.len() >= 8 {
+            map.clear();
+        }
+        map.insert(key, h.clone());
+        h
     }
 
     /// 取母版的 8-bit RGB 像素（带内存缓存）：同一张图连续拖滑杆只解码一次母版。
@@ -341,8 +475,10 @@ impl ImageManager {
             .thumbnail_cache
             .as_ref()
             .ok_or_else(|| "缓存未初始化".to_string())?;
+        // 调整链路的像素源按 ADJUST_SOURCE_SIZE（1600）取，而不是预览母版的 2560：
+        // 实测 2560 单帧 69.8ms / 1600 单帧 27.6ms，而 tone 本身只占 11ms——省的是编码。
         let bytes = cache
-            .get_or_generate(source, MASTER_SIZE, None)
+            .get_or_generate(source, ADJUST_SOURCE_SIZE, None)
             .map_err(|e| e.to_string())?;
         let decoded = image::load_from_memory(&bytes)
             .map_err(|e| format!("母版解码失败: {e}"))?
@@ -358,4 +494,37 @@ impl ImageManager {
         }
         Ok(img)
     }
+}
+
+/// 一次预览烘焙的产物（§7.3 / §7.4）：显示图 + 直方图 + 可选剪切掩码。
+pub struct PreviewFrame {
+    /// 交给渲染层的图（未调整母版，或烘焙了参数的母版）
+    pub image: Arc<Image>,
+    /// 当前显示图的直方图（有调整时 = 调整后）
+    pub histogram: HistogramData,
+    /// 原图（中性）基线直方图——同屏对比用
+    pub base_histogram: HistogramData,
+    /// 剪切警告叠加图（仅要求时生成；红 = 高光溢出、蓝 = 死黑）
+    pub clip_mask: Option<Arc<Image>>,
+    /// 这一帧的像素是否来自 RAW 的 16-bit 母版（8-bit 兜底 / 非 RAW 时为 false）
+    pub used_raw16: bool,
+}
+
+/// 图片缓存键（路径 + 文件大小）：同名覆盖时靠大小失效，与母版缓存同口径。
+fn cache_key_of(source: &SourceFile) -> (String, u64) {
+    let size = std::fs::metadata(&source.path).map(|m| m.len()).unwrap_or(0);
+    (source.path.to_string_lossy().to_string(), size)
+}
+
+/// 剪切掩码 → 渲染层可直接叠放的 PNG Image。
+fn clip_mask_image(rgb: &image::RgbImage) -> Result<Arc<Image>, String> {
+    let rgba = clipping_mask_rgba(rgb);
+    let mut buf = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(rgba)
+        .write_to(&mut buf, image::ImageFormat::Png)
+        .map_err(|e| format!("剪切掩码编码失败: {e}"))?;
+    Ok(Arc::new(Image::from_bytes(
+        ImageFormat::Png,
+        buf.into_inner(),
+    )))
 }
