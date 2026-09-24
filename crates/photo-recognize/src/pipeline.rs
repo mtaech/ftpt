@@ -358,13 +358,86 @@ fn recognize_capture_impl(
 
     // ---- 3. 每个主体分类 + 名录映射（多主体：逐个分类） ----
     report_progress(on_progress, 0.7, "分类中");
-    let subjects: Vec<SubjectRecognition> = detections
+    let classified: Vec<SubjectRecognition> = detections
         .iter()
         .enumerate()
         .map(|(i, d)| classify_subject(classifier, catalog, &img, d.bbox, i as u32))
         .collect();
+
+    // ---- 4. 交叉验证（docs/todo.md #16）：检测器粗类 ↔ 分类器细类不自洽的框判为误检 ----
+    //
+    // 与 bioclip_demo 的 prune 同一顺序：交叉验证必须在去重之前（类名错的框会先把
+    // 类名对的框顶掉，再去重就把对的也一起丢了）。本模块的「去背景 + IoU 去重 + 上限 8」
+    // 已在 detect::run_yolo_detection_resized 里完成，所以这里只剩一致性过滤。
+    let det_classes: Vec<&str> = detections.iter().map(|d| d.class_name).collect();
+    let subjects = cross_validate_subjects(classified, &det_classes);
+
+    if subjects.is_empty() {
+        // 所有框都被判为误检 → 退回整图识别（与「检测无框」同一条兜底，
+        // 绝不把整张图的结果一起丢掉）。
+        tracing::debug!(
+            "[识别] {} 的 {} 个检测框全部未通过交叉验证，退回整图识别",
+            capture.base_name,
+            detections.len()
+        );
+        if classifier.whole_image_on_no_detection() {
+            report_progress(on_progress, 0.8, "整图识别");
+            let subject =
+                classify_subject(classifier, catalog, &img, BBox::new(0.0, 0.0, 1.0, 1.0), 0);
+            report_progress(on_progress, 0.85, "结果整理中");
+            return Ok(build_recognition(vec![subject], recognized_at));
+        }
+        let (status, failure_stage) = stage_to_status(RecognitionFailureStage::Detection, true);
+        return Ok(Recognition {
+            status,
+            taxon: None,
+            class_index: None,
+            confidence: None,
+            bbox: None,
+            candidates: vec![],
+            failure_stage,
+            recognized_at,
+            subjects: vec![],
+        });
+    }
+
     report_progress(on_progress, 0.85, "结果整理中");
     Ok(build_recognition(subjects, recognized_at))
+}
+
+/// 候选框交叉验证：丢掉「检测器粗类与分类器细类不自洽」的误检框，并把 index 重排成连续。
+///
+/// 认不出粗类名（unknown / 未来新增类）、以及**没有物种结论**的主体一律放行——
+/// 不拿不确定当证据丢框。丢掉后若一个都不剩，调用方会退回整图识别。
+fn cross_validate_subjects(
+    subjects: Vec<SubjectRecognition>,
+    det_classes: &[&str],
+) -> Vec<SubjectRecognition> {
+    let mut kept: Vec<SubjectRecognition> = Vec::with_capacity(subjects.len());
+    for (subject, det_class) in subjects.into_iter().zip(det_classes.iter()) {
+        let consistent = subject
+            .taxon
+            .as_ref()
+            .map_or(true, |t| detect::class_is_consistent(det_class, &t.ranks));
+        if consistent {
+            kept.push(subject);
+        } else {
+            let latin = subject
+                .taxon
+                .as_ref()
+                .map(|t| t.latin_name.clone())
+                .unwrap_or_default();
+            tracing::debug!(
+                "[识别] 交叉验证丢弃误检框: 检测器={det_class} 分类器={latin} bbox={:?}",
+                subject.bbox
+            );
+        }
+    }
+    // 丢框会留下空号，序号重排成连续的（0 = 主主体，下游/存储都依赖这个口径）
+    for (i, subject) in kept.iter_mut().enumerate() {
+        subject.index = i as u32;
+    }
+    kept
 }
 
 /// 用户手动框选区域识别：跳过 YOLO 检测，直接对用户给的 bbox 分类 + 名录映射。
@@ -549,8 +622,66 @@ pub(crate) fn stage_to_status(
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
-    use super::{build_recognition, focus_to_bbox, stage_to_status};
-    use photo_domain::{BBox, FocusPoint, RecognitionFailureStage, RecognitionStatus, SubjectRecognition};
+    use super::{build_recognition, cross_validate_subjects, focus_to_bbox, stage_to_status};
+    use photo_domain::{
+        BBox, CnLevel, FocusPoint, RecognitionFailureStage, RecognitionStatus, SubjectRecognition,
+        TaxonMatch,
+    };
+
+    fn subject(index: u32, kind: &str) -> SubjectRecognition {
+        let ranks = match kind {
+            "bird" => vec!["Animalia", "Chordata", "Aves"],
+            "plant" => vec!["Plantae", "Tracheophyta", "Magnoliopsida"],
+            _ => vec!["", "", ""],
+        };
+        SubjectRecognition {
+            index,
+            bbox: BBox::new(0.1, 0.1, 0.4, 0.4),
+            taxon: (kind != "none").then(|| TaxonMatch {
+                taxon_id: None,
+                cn_name: String::new(),
+                latin_name: format!("{kind}us testus"),
+                cn_level: CnLevel::Missing,
+                ranks: ranks.iter().map(|s| s.to_string()).collect(),
+            }),
+            class_index: Some(1),
+            confidence: Some(50.0),
+            candidates: vec![],
+            failure: RecognitionFailureStage::None,
+        }
+    }
+
+    #[test]
+    fn test_cross_validate_drops_mismatched_and_renumbers() {
+        // 三个框：鸟（检测器说 bird，自洽）、植物（检测器说 flower，自洽）、
+        // 一朵被误检成鸟的花（检测器说 bird、分类器说是植物 → 丢）
+        let subjects = vec![subject(0, "bird"), subject(1, "plant"), subject(2, "plant")];
+        let classes = ["bird", "flower", "bird"];
+        let kept = cross_validate_subjects(subjects, &classes);
+        assert_eq!(kept.len(), 2, "误检框应被丢掉");
+        assert_eq!(kept[0].index, 0);
+        assert_eq!(kept[1].index, 1, "丢框后序号要重排成连续");
+        assert_eq!(kept[0].taxon.as_ref().unwrap().latin_name, "birdus testus");
+        assert_eq!(kept[1].taxon.as_ref().unwrap().latin_name, "plantus testus");
+    }
+
+    #[test]
+    fn test_cross_validate_keeps_unmapped_and_unknown_classes() {
+        // 没有物种结论的主体、以及未知粗类名都放行（不拿不确定当证据丢框）
+        let subjects = vec![subject(0, "none"), subject(1, "bird")];
+        let kept = cross_validate_subjects(subjects, &["plant", "unknown"]);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].index, 0);
+        assert_eq!(kept[1].index, 1);
+    }
+
+    #[test]
+    fn test_cross_validate_can_empty_out() {
+        // 全部不自洽 → 空（调用方据此退回整图识别，不丢整张图）
+        let subjects = vec![subject(0, "plant"), subject(1, "bird")];
+        let kept = cross_validate_subjects(subjects, &["bird", "flower"]);
+        assert!(kept.is_empty());
+    }
 
     /// 对焦点 → ROI 构造：三种形状的尺寸/位置语义与保底下限
     #[test]

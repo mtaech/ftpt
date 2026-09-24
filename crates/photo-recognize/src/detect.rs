@@ -181,6 +181,63 @@ fn pick_subjects(candidates: &[Candidate]) -> Vec<DetectionResult> {
     kept.into_iter().map(to_result).collect()
 }
 
+/// 交叉验证（docs/todo.md #16，规则搬自 bioclip_demo/src/detect.rs）：
+/// 检测器声称的**粗类群**与 BioCLIP 认出的**细类群**是否自洽。
+///
+/// 不自洽说明这个框是误检——例如花朵被误检成鸟，裁出来 BioCLIP 说是植物。
+/// 检测器只是我们的前处理，拿不准的框宁可丢掉：丢掉后会退回整图识别，
+/// 不会把整张图的结果一起丢（见 pipeline 的兜底）。
+///
+/// ranks 是七级分类 [界, 门, 纲, 目, 科, 属, 种]，空串 = 该级缺。
+/// **认不出的粗类名一律放行**（不拿不确定当证据丢框）。
+/// 与 bioclip_demo 的一处**有意差别**：那边标签路径永远来自标签空间，而本仓的
+/// 名录兜底路径会产出空 ranks（catalog.rs 的 TaxonMatch.ranks = vec![]）。
+/// 没有分类证据时一律放行——否则凡是走名录兜底的主体都会被误判成误检丢掉。
+pub fn class_is_consistent(det_class: &str, ranks: &[String]) -> bool {
+    if ranks.iter().all(|s| s.is_empty()) {
+        return true;
+    }
+    let get = |i: usize| ranks.get(i).map_or("", String::as_str);
+    let (kingdom, phylum, class) = (get(0), get(1), get(2));
+    match det_class {
+        "animal" => kingdom == "Animalia",
+        "bird" => class == "Aves",
+        "mammal" => class == "Mammalia",
+        "reptile" => matches!(
+            class,
+            "Reptilia" | "Squamata" | "Testudines" | "Crocodylia" | "Rhynchocephalia"
+        ),
+        "amphibian" => class == "Amphibia",
+        "fish" => matches!(
+            class,
+            "Actinopterygii"
+                | "Chondrichthyes"
+                | "Sarcopterygii"
+                | "Myxini"
+                | "Petromyzontida"
+                | "Cephalaspidomorphi"
+        ),
+        "insect" => class == "Insecta",
+        "spider" => class == "Arachnida",
+        "crustacean" => matches!(
+            class,
+            "Malacostraca" | "Branchiopoda" | "Maxillopoda" | "Ostracoda" | "Remipedia"
+        ),
+        "mollusk" => phylum == "Mollusca",
+        // 环节/扁形/线虫分散在好几个门，没法用一条规则收；认不出具体门时放行
+        "worm" => matches!(
+            phylum,
+            "" | "Annelida" | "Platyhelminthes" | "Nematoda" | "Sipuncula" | "Echiura"
+        ),
+        "plant" | "flower" | "tree" | "leaf" | "fruit" | "grass" => {
+            matches!(kingdom, "Plantae" | "Archaeplastida")
+        }
+        // 地衣是真菌与藻类的共生体，名录里归在真菌界
+        "mushroom" | "lichen" => kingdom == "Fungi",
+        _ => true,
+    }
+}
+
 /// 两个归一化框的 IoU（0..1）。
 fn iou(a: &BBox, b: &BBox) -> f32 {
     let ix = (a.x2.min(b.x2) - a.x1.max(b.x1)).max(0.0);
@@ -228,6 +285,47 @@ mod tests {
         let mut r = vec![x1, y1, x2, y2, conf, cls];
         r.extend(std::iter::repeat(0.0).take(32));
         r
+    }
+
+    fn ranks(kingdom: &str, phylum: &str, class: &str) -> Vec<String> {
+        [kingdom, phylum, class, "", "", "", ""]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn test_class_is_consistent_accepts_matching_kinds() {
+        let bird = ranks("Animalia", "Chordata", "Aves");
+        assert!(class_is_consistent("bird", &bird));
+        assert!(class_is_consistent("animal", &bird));
+        let plant = ranks("Plantae", "Tracheophyta", "Magnoliopsida");
+        assert!(class_is_consistent("flower", &plant));
+        assert!(class_is_consistent("tree", &plant));
+        let mushroom = ranks("Fungi", "Basidiomycota", "Agaricomycetes");
+        assert!(class_is_consistent("mushroom", &mushroom));
+        assert!(class_is_consistent("lichen", &mushroom));
+    }
+
+    #[test]
+    fn test_class_is_consistent_rejects_mismatched_kinds() {
+        // 花朵被误检成鸟：检测器说 bird、分类器说是植物 → 误检，丢掉
+        let plant = ranks("Plantae", "Tracheophyta", "Magnoliopsida");
+        assert!(!class_is_consistent("bird", &plant));
+        assert!(!class_is_consistent("mammal", &plant));
+        // 反过来同样成立：鸟被误检成花
+        let bird = ranks("Animalia", "Chordata", "Aves");
+        assert!(!class_is_consistent("flower", &bird));
+        assert!(!class_is_consistent("insect", &bird));
+    }
+
+    #[test]
+    fn test_class_is_consistent_passes_unknown_and_missing_ranks() {
+        // 防御：认不出的粗类名、空 ranks 都不该被当成「不自洽」丢框
+        assert!(class_is_consistent("unknown", &ranks("Plantae", "", "")));
+        assert!(class_is_consistent("worm", &ranks("", "", "")));
+        assert!(class_is_consistent("animal", &[]));
+        assert!(class_is_consistent("bird", &[]));
     }
 
     #[test]
