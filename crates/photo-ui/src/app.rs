@@ -29,6 +29,14 @@ use crate::views::*;
 
 pub type AppRoot = AppState;
 
+/// 导入弹窗文本框变化 → 排一次去抖重算（计划的实时化靠它，不再有「生成计划」按钮）。
+fn schedule_import_replan(cx: &mut Context<AppState>) {
+    let entity = cx.entity();
+    defer_entity_action(cx, entity, |entity, cx| {
+        crate::state::import::schedule_plan(entity, cx)
+    });
+}
+
 /// 从多选下拉事件里取当前选中值：Change（每次勾选）与 Confirm（关窗）都带完整选中集。
 fn combobox_values(
     event: &ComboboxEvent<SearchableVec<crate::state::app_state::ChoiceOption>>,
@@ -204,6 +212,30 @@ impl AppState {
         state.import_rename_input = Some(cx.new(|cx| {
             InputState::new(window, cx).placeholder("{name}_{date}_{seq}（留空 = 保留原名）")
         }));
+        // 导入弹窗的两个文本框没有 Change 事件订阅，计划就只会「点了才更新」；
+        // 这里 observe 输入实体：文本一变（且确实变了）就同步进状态并排一次去抖重算。
+        if let Some(input) = state.import_dest_input.clone() {
+            let sub = cx.observe(&input, |state, input, cx| {
+                let text = input.read(cx).value().to_string();
+                if state.import.dest_root == text {
+                    return;
+                }
+                state.import.dest_root = text;
+                schedule_import_replan(cx);
+            });
+            state._import_input_subs.push(sub);
+        }
+        if let Some(input) = state.import_rename_input.clone() {
+            let sub = cx.observe(&input, |state, input, cx| {
+                let text = input.read(cx).value().to_string();
+                if state.import.rename_template == text {
+                    return;
+                }
+                state.import.rename_template = text;
+                schedule_import_replan(cx);
+            });
+            state._import_input_subs.push(sub);
+        }
         // 导出弹窗输入框：目标目录 / 命名模板
         state.export_dest_input = Some(cx.new(|cx| {
             InputState::new(window, cx).placeholder("/导出目标目录（不存在时自动创建）")
@@ -476,6 +508,10 @@ impl Render for AppState {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &TogglePlay, _window, cx| {
+                // 有模态弹窗时忽略：导入审阅里按空格的本意绝不是「切到幻灯片」
+                if this.active_dialog.is_some() {
+                    return;
+                }
                 if this.view_mode == ViewMode::Slideshow {
                     this.slideshow_paused = !this.slideshow_paused;
                     cx.notify();

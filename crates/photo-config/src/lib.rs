@@ -100,6 +100,16 @@ pub struct AppConfig {
     /// 旧配置无此字段时为 None（serde 静默忽略）。
     #[serde(default)]
     pub import_dir: Option<String>,
+    /// 导入配方（Phase 4）：把「常用导入姿势」记下来，插卡后一键复用。
+    /// 用字符串而不是 engine 的枚举——photo-config 不依赖 photo-engine，保持依赖方向。
+    #[serde(default)]
+    pub import_recipe: ImportRecipe,
+    /// 导入弹窗宽度（右下角拖拽调整；渲染时还会按窗口大小再夹一次，见 photo-ui）。
+    #[serde(default = "default_import_dialog_width")]
+    pub import_dialog_width: u32,
+    /// 导入弹窗高度（同上）
+    #[serde(default = "default_import_dialog_height")]
+    pub import_dialog_height: u32,
     /// 扫描是否包含子目录（递归扫描全部子层）。默认 false = 单层扫描（保持现状）。
     /// 布尔字段无需钳制；改动后需重新扫描生效（scan 编排处按此值选单层/递归）。
     #[serde(default)]
@@ -115,6 +125,81 @@ pub struct AppConfig {
     /// html font-size = 15 × ui_scale/100，Tailwind 全 rem 等比缩放整体 UI。
     #[serde(default = "default_ui_scale")]
     pub ui_scale: u32,
+}
+
+/// 导入配方：目标目录 + 子目录/命名 + 方式 + 过滤 + 冲突策略 + 校验/弹出。
+///
+/// 取值用字符串（`none`/`dateDash`/`dateSlash`/`dateCompact`、`copy`/`move`、
+/// `skip`/`rename`/`overwrite`），由 photo-ui 侧解析；未知值一律归一为默认，
+/// 手改配置文件写坏不会让导入弹窗打不开。
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ImportRecipe {
+    /// 目标根目录（None = 每次手动选）
+    pub dest_root: Option<String>,
+    /// 子目录模式：none / dateDash / dateSlash / dateCompact
+    pub subfolder: String,
+    /// 重命名模板（空 = 保留原名）
+    pub rename_template: String,
+    /// 导入方式：copy / move
+    pub mode: String,
+    /// 收常规图片
+    pub photos: bool,
+    /// 收 RAW
+    pub raw: bool,
+    /// 收视频
+    pub videos: bool,
+    /// RAW+JPEG 双拍时跳过 JPEG
+    pub skip_jpeg_with_raw: bool,
+    /// 冲突策略：skip / rename / overwrite
+    pub policy: String,
+    /// 复制后校验落地大小
+    pub verify: bool,
+    /// 完成后弹出源盘（仅 Linux 生效）
+    pub eject_after: bool,
+}
+
+impl Default for ImportRecipe {
+    fn default() -> Self {
+        Self {
+            dest_root: None,
+            subfolder: "dateDash".to_string(),
+            rename_template: String::new(),
+            mode: "copy".to_string(),
+            photos: true,
+            raw: true,
+            videos: true,
+            skip_jpeg_with_raw: false,
+            policy: "skip".to_string(),
+            verify: true,
+            eject_after: false,
+        }
+    }
+}
+
+impl ImportRecipe {
+    /// 取值归一：未知枚举值回退默认；空目标目录归 None。
+    pub fn clamped(mut self) -> Self {
+        if !matches!(
+            self.subfolder.as_str(),
+            "none" | "dateDash" | "dateSlash" | "dateCompact"
+        ) {
+            self.subfolder = "dateDash".to_string();
+        }
+        if !matches!(self.mode.as_str(), "copy" | "move") {
+            self.mode = "copy".to_string();
+        }
+        if !matches!(self.policy.as_str(), "skip" | "rename" | "overwrite") {
+            self.policy = "skip".to_string();
+        }
+        self.dest_root = self
+            .dest_root
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty());
+        self.rename_template = self.rename_template.trim().to_string();
+        self
+    }
 }
 
 /// 导出预设（T1 批次）：导出对话框的可复用组合（预设名 + 长边 + JPEG 质量 + 命名模板）。
@@ -224,6 +309,16 @@ fn default_ui_scale() -> u32 {
     100
 }
 
+/// 导入弹窗默认宽（一屏三列：左 240 + 中审阅 + 右 320）
+fn default_import_dialog_width() -> u32 {
+    1120
+}
+
+/// 导入弹窗默认高
+fn default_import_dialog_height() -> u32 {
+    720
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -243,6 +338,9 @@ impl Default for AppConfig {
             adjust_presets: vec![],
             export_dir: None,
             import_dir: None,
+            import_recipe: ImportRecipe::default(),
+            import_dialog_width: default_import_dialog_width(),
+            import_dialog_height: default_import_dialog_height(),
             recognizer_idle_unload_minutes: 0,
             recognition_region: String::new(),
             stack_mode: StackMode::default(),
@@ -267,6 +365,11 @@ impl AppConfig {
         // 按「无地区数据」保守放行，不阻断识别。
         self.recognition_region = self.recognition_region.trim().to_string();
         self.accent_color = self.accent_color.as_deref().and_then(normalize_accent_hex);
+        self.import_recipe = self.import_recipe.clamped();
+        // 导入弹窗尺寸：手改配置越界时归一（真正能显示多大还取决于窗口，渲染时再夹一次）。
+        // 下限与 photo-ui 的 MIN_DIALOG_W/H 对齐（三列布局的物理下限）。
+        self.import_dialog_width = self.import_dialog_width.clamp(900, 1920);
+        self.import_dialog_height = self.import_dialog_height.clamp(520, 1400);
         self.export_presets = self
             .export_presets
             .into_iter()

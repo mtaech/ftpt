@@ -120,14 +120,15 @@ pub fn render_file_tree_tab(
         .w_full()
         .flex_1()
         .gap_3()
-        // 导入 SD 卡按钮（精致副按钮卡片）
+        // 导入按钮（精致副按钮卡片）。刻意不写「从 SD 卡」——卡/外接盘/普通目录
+        // 都是它的来源，「单纯打开一个文件夹看看」也走这里（弹窗左栏的「仅添加并浏览」）
         .child(
-            Button::new("btn-import-sd")
+            Button::new("btn-import-photos")
                 .secondary()
                 .small()
                 .w_full()
                 .icon(IconName::ArrowDown)
-                .label("从 SD 卡导入照片...")
+                .label("导入照片...")
                 .on_click(cx.listener(|state, _, window, cx| {
                     state.open_import_dialog(window, cx);
                 })),

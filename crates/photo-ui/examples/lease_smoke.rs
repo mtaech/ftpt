@@ -286,8 +286,9 @@ fn main() {
                         .read(cx)
                         .import
                         .result
-                        .map(|r| (r.imported, r.failed))
-                        == Some((2, 0)))
+                        .as_ref()
+                        .map(|r| (r.imported, r.failed.is_empty()))
+                        == Some((2, true)))
                 );
                 check!(
                     "导入文件落盘",

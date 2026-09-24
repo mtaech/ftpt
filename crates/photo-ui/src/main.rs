@@ -6,7 +6,25 @@ use gpui_kit::{AppContext as _, Bounds, Point, WindowBounds, WindowOptions, px, 
 use photo_ui::state::AppState;
 use photo_ui::state::engine_ops::start_scan;
 
+/// 解析命令行导入入口：`--import <挂载点>` 或 `--import=<挂载点>`（手册 §10.3 的外部入口）。
+fn cli_import_path() -> Option<PathBuf> {
+    let args: Vec<String> = std::env::args().collect();
+    let mut iter = args.iter().skip(1);
+    while let Some(arg) = iter.next() {
+        if let Some(value) = arg.strip_prefix("--import=") {
+            return Some(PathBuf::from(value));
+        }
+        if arg == "--import" {
+            return iter.next().map(PathBuf::from);
+        }
+    }
+    None
+}
+
 fn main() {
+    // 命令行入口：命令行给了导入源就优先走「插卡即导入」，不再恢复上次目录
+    let import_arg = cli_import_path();
+
     // 日志管道必须最先装：Rust 侧（engine / recognize / 本 crate）已有大量 tracing 埋点，
     // 没有订阅者时全部被静默丢弃。WorkerGuard 存活到进程退出，保证退出时缓冲日志落盘。
     let _log_guard = photo_ui::logging::init();
@@ -22,7 +40,7 @@ fn main() {
     // 图标资产：默认 Assets 只打包 101 个组件图标，这里注册 AllAssets 用完整
     // Lucide / GPUI Kit 目录（1,830 个，二进制约 +1 MiB），避免"这个图标不在内置集里"。
     let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
-    app.run(|cx| {
+    app.run(move |cx| {
         gpui_kit::component::init(cx);
 
         // 按持久化配置激活主题（Material You · 墨白；seed 非法 / 缺失回退默认）
@@ -79,9 +97,12 @@ fn main() {
             // 所有按钮与快捷键都会失灵。
             photo_ui::app::focus_root(&app_state, window, cx);
 
-            // 启动自愈：检查上次打开的目录
+            // 外部入口优先：命令行 --import <挂载点> 直接打开导入弹窗、预选源并扫描；
+            // 否则才是「启动自愈：恢复上次打开的目录」
             let last_dir = app_state.read(cx).app_config.last_directory.clone();
-            if let Some(dir_str) = last_dir {
+            if let Some(path) = import_arg.clone() {
+                photo_ui::state::import::open_with_source(app_state.clone(), path, window, cx);
+            } else if let Some(dir_str) = last_dir {
                 let path = PathBuf::from(&dir_str);
                 if path.is_dir() {
                     let recursive = app_state.read(cx).app_config.include_subdirectories;

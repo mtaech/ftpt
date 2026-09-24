@@ -1,7 +1,7 @@
 //! 应用主状态定义与状态机（对应 §3、§5、§8）。
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -393,6 +393,14 @@ pub struct AppState {
     pub stats_species_scroll: ScrollHandle,
     pub stats_photos_scroll: ScrollHandle,
     pub import_scroll: ScrollHandle,
+    /// 导入弹窗三列里「审阅网格」的滚动句柄（与主网格同规格：track_scroll + Scrollbar）
+    pub import_review_scroll: UniformListScrollHandle,
+    /// 导入审阅用的独立 ImageManager：缩略图缓存写**配置目录**，不往卡上写 .pt
+    pub import_preview: Option<ImageManager>,
+    /// 导入弹窗两个输入框的变更订阅（文本一变就重排实时计划）
+    pub _import_input_subs: Vec<Subscription>,
+    /// 导入弹窗正在拖拽调整大小：(按下时的鼠标窗口坐标 x, y, 起始宽, 起始高)
+    pub import_resize_drag: Option<(f32, f32, f32, f32)>,
     pub filmstrip_scroll: ScrollHandle,
     /// 拖宽去抖保存的世代号（350ms 内多次变更只落盘一次）
     layout_save_generation: u64,
@@ -1223,6 +1231,10 @@ impl AppState {
             stats_species_scroll: ScrollHandle::new(),
             stats_photos_scroll: ScrollHandle::new(),
             import_scroll: ScrollHandle::new(),
+            import_review_scroll: UniformListScrollHandle::new(),
+            import_preview: None,
+            _import_input_subs: Vec::new(),
+            import_resize_drag: None,
             filmstrip_scroll: ScrollHandle::new(),
             dup_scroll: ScrollHandle::new(),
             layout_save_generation: 0,
@@ -1291,13 +1303,20 @@ impl AppState {
     /// 打开导入弹窗：复位状态、刷新可移动盘、把目标目录预填进输入框。
     pub fn open_import_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.current_dir.clone();
+        self.import_resize_drag = None;
         self.import.reset(current.as_deref());
-        // 目标目录记忆（#14 导入侧）：上次导入用过就用上次的，否则回退当前浏览目录
-        if let Some(saved) = self
-            .app_config
-            .import_dir
-            .clone()
-            .filter(|s| !s.trim().is_empty())
+        // 导入配方（Phase 4）：子目录/命名/方式/过滤/策略/校验/弹出 全套复用上次的取值
+        let recipe = self.app_config.import_recipe.clone();
+        super::import::apply_recipe(&mut self.import, &recipe);
+        // 目标目录记忆（#14 导入侧）：配方里的目标 → 上次导入用过的 → 当前浏览目录。
+        // 注意 reset() 已经把「当前浏览目录」写进 dest_root 了，所以判空永远不成立——
+        // 这里按「配方有没有指定目标」来决定要不要动用 import_dir 记忆。
+        if recipe.dest_root.is_none()
+            && let Some(saved) = self
+                .app_config
+                .import_dir
+                .clone()
+                .filter(|s| !s.trim().is_empty())
         {
             self.import.dest_root = saved;
         }
@@ -1307,13 +1326,34 @@ impl AppState {
                 input_state.set_value(dest.clone(), window, cx);
             });
         }
+        let template = self.import.rename_template.clone();
         if let Some(input) = self.import_rename_input.clone() {
             input.update(cx, |input_state, cx| {
-                input_state.set_value("", window, cx);
+                input_state.set_value(template.clone(), window, cx);
             });
         }
         self.active_dialog = Some(ActiveDialog::Import);
         cx.notify();
+    }
+
+    /// 取（必要时新建）导入审阅用的 ImageManager。
+    ///
+    /// 缓存目录随源变化而切换：配置目录下的 `import_preview/<源路径哈希>/`——**绝不写源盘**
+    /// （现在浏览卡会在卡上生成 .pt/thumbs，导入审阅再往卡上写千张缩略图既慢又脏）。
+    pub fn import_preview_manager(&mut self, source_root: &Path) -> ImageManager {
+        let dir = super::import::preview_cache_dir(source_root);
+        let current_matches = self
+            .import_preview
+            .as_ref()
+            .and_then(ImageManager::thumbnail_cache)
+            .map(|cache| cache.cache_dir() == dir.as_path())
+            .unwrap_or(false);
+        if !current_matches {
+            self.import_preview = Some(ImageManager::new(Some(dir)));
+        }
+        self.import_preview
+            .clone()
+            .expect("刚创建过 import_preview")
     }
 
     // ── 导出弹窗（§9.10：预设 / 长边 / 质量 / 命名模板 / 目标目录）──
@@ -1981,7 +2021,13 @@ impl AppState {
         }
         // 2. 弹窗打开 -> 关弹窗（除导入有状态外）
         if let Some(dialog) = &self.active_dialog {
-            if *dialog != ActiveDialog::Import {
+            if *dialog == ActiveDialog::Import {
+                // 导入弹窗本身不关（扫描/计划是有状态的流程），但放大视图先退回网格
+                if self.import.review_loupe.take().is_some() {
+                    self.import.loupe_thumb = None;
+                    return true;
+                }
+            } else {
                 // 重复检测进行中：关窗要顺手取消——否则弹窗没了，用户再没有取消入口，
                 // 而检测结果本身也不该在用户离场后继续落库（取消 = 不落库）
                 if *dialog == ActiveDialog::Duplicates && self.is_detecting_duplicates {
