@@ -13,25 +13,34 @@ use gpui_kit::{
 };
 
 use crate::image::THUMB_SIZE_GRID;
+use crate::model::filmstrip::{THUMB_GAP, THUMB_W, content_width};
 use crate::state::AppState;
 use crate::views::scroll_area::scroll_area_h;
 
-/// 缩略图项宽（px，手册 §9.6）
-const THUMB_W: f32 = 96.0;
-/// 缩略图间距（px，手册 §9.6）
-const THUMB_GAP: f32 = 6.0;
-
 pub fn render_filmstrip(
     state: &AppState,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<AppState>,
 ) -> impl IntoElement {
     let active_idx = state.primary_selected_index();
     let count = state.display_order.len();
-    // 横向滚动的内容必须显式撑宽（flex 项默认被拉伸到容器宽，不给宽度滚动条长度为 0）
-    let content_w = count as f32 * THUMB_W
-        + count.saturating_sub(1) as f32 * THUMB_GAP
-        + 16.0;
+    // 横向滚动的内容必须显式撑宽（flex 项默认被拉伸到容器宽，不给宽度滚动条长度为 0）。
+    // 公式与「切图自动定位」共用 `model::filmstrip`，两边各写一份必然漂移。
+    let content_w = content_width(count);
+
+    // 切图（键盘 / 网格点击 / 统计跳转 / 导入…）后把当前那张滚进可视区：用户报「切换到单张的
+    // 时候底下的滚动条没有同步定位」。视口尺寸要等本帧布局完才有，所以真正的偏移放 defer 里做
+    // （与筛选栏同步候选同一手法）；只在「扫描世代 / 主选中项」变化后做一次，手动拖动不会被打断。
+    let sync_key = (state.scan_generation, active_idx);
+    if state.filmstrip_synced.get() != Some(sync_key) {
+        cx.defer_in(window, move |state, _window, cx| {
+            if state.filmstrip_synced.get() == Some(sync_key) {
+                return;
+            }
+            state.sync_filmstrip_to_active(sync_key);
+            cx.notify();
+        });
+    }
 
     let thumbs: Vec<gpui_kit::AnyElement> = state
         .display_order
@@ -48,7 +57,7 @@ pub fn render_filmstrip(
             Some(
                 div()
                     .id(("filmstrip-thumb", item_idx))
-                    .w(px(96.))
+                    .w(px(THUMB_W))
                     .h(px(72.))
                     .flex_shrink_0()
                     .rounded(px(10.))

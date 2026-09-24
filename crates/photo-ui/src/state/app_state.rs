@@ -264,6 +264,9 @@ pub struct AppState {
     // ── 右键菜单（§13.4）──
     /// 打开中的右键菜单（None = 未打开）
     pub context_menu: Option<PhotoContextMenu>,
+    /// 胶片条「切图自动定位」的进度：上一次同步过的（扫描世代, 主选中项）。
+pub filmstrip_synced: std::cell::Cell<Option<(u64, Option<usize>)>>,
+
     /// 菜单内容的滚动句柄（超过最大高度时用；键盘移动会 scroll_to_item 跟随）
     pub context_menu_scroll: ScrollHandle,
 
@@ -1246,6 +1249,7 @@ impl AppState {
             _import_input_subs: Vec::new(),
             import_resize_drag: None,
             filmstrip_scroll: ScrollHandle::new(),
+            filmstrip_synced: std::cell::Cell::new(None),
             dup_scroll: ScrollHandle::new(),
             layout_save_generation: 0,
             _dock_subscription: None,
@@ -1878,7 +1882,52 @@ impl AppState {
 
     // ── 收藏 / 最近打开（左栏目录行）──
 
-    /// 切换某目录的收藏状态（左栏目录行的星标）。返回切换**之后**是否已收藏。
+    // ── 胶片条自动定位（§9.6）──
+
+    /// 让胶片条滚到主选中那张（用户报「切换到单张的时候底下的滚动条没有同步定位」）。
+    ///
+    /// `key` = （扫描世代, 主选中项）——**只在换了图之后做一次**：用户手动拖动胶片条时
+    /// 主选中项没变，就不会被每帧拉回来。视口尺寸要等胶片条布局过一次才有，因此本方法在
+    /// `views::filmstrip` 的 `defer_in` 里调用（那时本帧布局已完成）；视口还没有尺寸就直接放弃
+    /// （下一次渲染会再排一次）。
+    pub fn sync_filmstrip_to_active(&mut self, key: (u64, Option<usize>)) {
+        if self.filmstrip_synced.get() == Some(key) {
+            return;
+        }
+        self.filmstrip_synced.set(Some(key));
+
+        let viewport_w = f32::from(self.filmstrip_scroll.bounds().size.width);
+        if viewport_w <= 0.0 {
+            return; // 胶片条还没布局过（本帧刚出现）
+        }
+        let Some(pos) = key
+            .1
+            .and_then(|idx| self.display_order.iter().position(|&i| i == idx))
+        else {
+            return; // 主选中项不在可见序列里（被筛掉 / 列表为空）
+        };
+
+        let content_w = crate::model::filmstrip::content_width(self.display_order.len());
+        let max_offset = f32::from(self.filmstrip_scroll.max_offset().x).max(0.0);
+        // 内容坐标口径：视口左缘 = −offset.x（gpui 的 offset 往右滚为负）
+        let current = -f32::from(self.filmstrip_scroll.offset().x);
+        let Some(target) = crate::model::filmstrip::ensure_visible_offset(
+            current,
+            viewport_w,
+            max_offset,
+            crate::model::filmstrip::item_left(pos),
+            crate::model::filmstrip::THUMB_W,
+        ) else {
+            return; // 已经在可视区里 → 不动
+        };
+        tracing::debug!("胶片条定位：pos={pos} {current:.0} → {target:.0}（内容宽 {content_w:.0}）");
+        self.filmstrip_scroll.set_offset(gpui_kit::point(
+            gpui_kit::px(-target),
+            self.filmstrip_scroll.offset().y,
+        ));
+    }
+
+    /// 切换某目录的收藏状态（左栏目录行的星号）。返回切换**之后**是否已收藏。
     ///
     /// 收藏与最近打开以前只有「读」：`favorite_dirs` 只拿来渲染、`recent_dirs` 没有移除
     /// 入口（用户报「最近打开不能移除和收藏」）。两个动作都要**写回配置并落盘**，

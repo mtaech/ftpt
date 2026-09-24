@@ -10,6 +10,7 @@ pub mod duplicates;
 pub mod burst;
 pub mod ebird;
 pub mod export;
+pub mod filmstrip;
 pub mod filter;
 pub mod histogram;
 pub mod preview_math;

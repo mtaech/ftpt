@@ -338,6 +338,41 @@ fn main() {
                     item_count >= 16 && film_vp > 0.0 && film_max > 0.0
                 );
 
+                // ── 5c-2) 切图后胶片条跟着定位 ──
+                // 用户报「切换到单张的时候底下的滚动条没有同步定位」：单张态底部胶片条一直停在
+                // 最左边，当前那张在屏幕外。这里切到最后一张，断言它真的进了可视区。
+                let last_idx = read_state!(|s: &AppState| s.display_order.last().copied())
+                    .expect("列表非空");
+                async_cx.update(|cx| {
+                    task_state.update(cx, |s, cx| {
+                        s.select_single(last_idx);
+                        cx.notify();
+                    });
+                });
+                pump(async_cx, 800).await;
+                let (offset_after, last_pos) = read_state!(|s: &AppState| {
+                    (
+                        f32::from(s.filmstrip_scroll.offset().x),
+                        s.display_order.iter().position(|&i| i == last_idx),
+                    )
+                });
+                let item_left = 8.0 + last_pos.unwrap_or(0) as f32 * (96.0 + 6.0);
+                let visible_left = -offset_after;
+                check!(
+                    format!(
+                        "切到最后一张后胶片条滚到位（偏移 {offset_after:.0}，当前项左缘 {item_left:.0}，视口宽 {film_vp}）"
+                    ),
+                    visible_left <= item_left + 0.5 && item_left + 96.0 <= visible_left + film_vp + 0.5
+                );
+
+                // 没换图时不该被每帧拉回来（否则用户手动拖动胶片条会被顶回去）
+                pump(async_cx, 600).await;
+                let offset_stable = read_state!(|s: &AppState| f32::from(s.filmstrip_scroll.offset().x));
+                check!(
+                    format!("没换图时胶片条偏移不再变动（{offset_stable:.0}）"),
+                    (offset_stable - offset_after).abs() < 0.5
+                );
+
                 // ── 5d) 导入弹窗内容滚动区接上了句柄 ──
                 async_cx.update(|cx| {
                     let _ = handle.update(cx, |_view, window, cx| {
