@@ -314,6 +314,25 @@ pub fn render_photo_preview(
                         }
                     }),
                 )
+                // 右键菜单（§13.4）：目标是当前这张预览图
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|state, event: &gpui_kit::MouseDownEvent, _window, cx| {
+                        let path = state
+                            .primary_selected_meta()
+                            .map(|m| m.primary_path.clone())
+                            .unwrap_or_default();
+                        if path.is_empty() {
+                            return;
+                        }
+                        state.open_photo_context_menu(
+                            f32::from(event.position.x),
+                            f32::from(event.position.y),
+                            path,
+                            cx,
+                        );
+                    }),
+                )
                 .on_mouse_up(
                     MouseButton::Left,
                     cx.listener(move |state, event: &gpui_kit::MouseUpEvent, _window, cx| {

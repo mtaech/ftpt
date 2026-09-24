@@ -394,6 +394,31 @@ fn render_grid_cell(
                 },
             ),
         )
+        // 右键菜单（§13.4）：命中的照片若已在选中集里就保留多选，否则单选到它，
+        // 然后在该点开菜单。位置是**窗口坐标**（与 MouseDownEvent.position 同口径），
+        // 菜单浮层直接按它做绝对定位。
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(
+                move |state: &mut AppState, event: &gpui_kit::MouseDownEvent, _window, cx| {
+                    let target = active_item_idx;
+                    if !state.selected_indices.contains(&target) {
+                        state.select_single(target);
+                    }
+                    let path = state
+                        .items
+                        .get(target)
+                        .map(|m| m.primary_path.clone())
+                        .unwrap_or_default();
+                    state.open_photo_context_menu(
+                        f32::from(event.position.x),
+                        f32::from(event.position.y),
+                        path,
+                        cx,
+                    );
+                },
+            ),
+        )
         // ── 1. 图片区 ──
         // 正方形裁切（§9.5）：边长由网格容器实测宽度推出。以前写死 170px，侧栏一收
         // cell 变宽，ObjectFit::Cover 就把照片裁成 1.9:1 的扁横条，观感很差。

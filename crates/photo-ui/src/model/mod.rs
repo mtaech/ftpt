@@ -4,6 +4,7 @@
 
 pub mod adjust;
 pub mod best_frame;
+pub mod context_menu;
 pub mod duplicates;
 pub mod burst;
 pub mod ebird;
@@ -23,6 +24,9 @@ pub use adjust::{
     format_exposure, format_tone, has_adjustments, quantize_exposure, quantize_tone, rel_path_of,
 };
 pub use best_frame::{non_best_paths, pick_best_frame};
+pub use context_menu::{
+    ContextMenuAction, MenuItem, initial_selection, move_selection, photo_menu_items,
+};
 pub use duplicates::{
     DEFAULT_THRESHOLD, DuplicateGroup, THRESHOLD_OPTIONS, duplicate_scope, group_views,
     summarize, to_full_groups, to_rel_groups,

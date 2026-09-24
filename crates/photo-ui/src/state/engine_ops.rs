@@ -1092,6 +1092,132 @@ pub fn release_recognizer(state_entity: Entity<AppState>, cx: &mut App) {
     drop(taken);
 }
 
+/// 把文本写进系统剪贴板（右键菜单「复制文件路径」）。
+///
+/// 与图片同一条 X11 规则：必须复用常驻持有者，否则 arboard 一 drop，选择所有权就没了，
+/// 用户粘贴出来是空的（见 write_image_to_system_clipboard 的说明）。
+pub fn copy_text_to_system_clipboard(text: &str) -> Result<(), String> {
+    let slot = CLIPBOARD_OWNER.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = slot.lock().map_err(|_| "剪贴板状态锁失效".to_string())?;
+    if guard.is_none() {
+        *guard = Some(arboard::Clipboard::new().map_err(|e| e.to_string())?);
+    }
+    let clipboard = guard.as_mut().ok_or_else(|| "剪贴板初始化失败".to_string())?;
+    clipboard
+        .set_text(text.to_string())
+        .map_err(|e| e.to_string())
+}
+
+/// 右键菜单项的执行入口（菜单点击与回车都走这里，§13.4）。
+///
+/// 先把右键命中的照片**选中**——后面每个动作（旗标/评分/识别/复制）都作用在选中集上，
+/// 与键盘快捷键共用同一套语义，不另造一条路径。
+pub fn apply_context_menu_action(
+    state_entity: Entity<AppState>,
+    action: crate::model::context_menu::ContextMenuAction,
+    target: String,
+    cx: &mut App,
+) {
+    use crate::model::context_menu::ContextMenuAction as A;
+
+    // 目标可能刚被移走/删除：定位不到就诚实报错，不要默默作用于别的照片
+    let found = state_entity.update(cx, |state, cx| {
+        let idx = state.items.iter().position(|m| m.primary_path == target);
+        if let Some(idx) = idx {
+            state.select_single(idx);
+        }
+        cx.notify();
+        idx.is_some()
+    });
+    if !found {
+        state_entity.update(cx, |state, cx| {
+            state.set_status_message("该照片已不在当前目录（可能刚被移动或删除）");
+            cx.notify();
+        });
+        return;
+    }
+
+    match action {
+        A::OpenPreview => {
+            state_entity.update(cx, |state, cx| {
+                state.view_mode = ViewMode::Preview;
+                cx.notify();
+            });
+        }
+        A::CopyImage => {
+            let (manager, source) = state_entity.update(cx, |state, _| {
+                (
+                    state.image_manager.clone(),
+                    state.primary_selected_meta().and_then(source_file_of),
+                )
+            });
+            match source {
+                Some(source) => copy_image_to_clipboard(state_entity.clone(), manager, source, cx),
+                None => state_entity.update(cx, |state, cx| {
+                    state.set_status_message("复制失败：这张照片没有可解码的源文件");
+                    cx.notify();
+                }),
+            }
+        }
+        A::CopyPath => {
+            let result = copy_text_to_system_clipboard(&target);
+            state_entity.update(cx, |state, cx| {
+                match result {
+                    Ok(()) => state.set_status_message(format!("已复制路径到剪贴板：{target}")),
+                    Err(e) => state.set_status_message(format!("复制路径失败：{e}")),
+                }
+                cx.notify();
+            });
+        }
+        A::OpenFolder => {
+            let parent = Path::new(&target).parent().map(|p| p.to_path_buf());
+            match parent {
+                Some(dir) => {
+                    let result = open::that(&dir);
+                    state_entity.update(cx, |state, cx| {
+                        if let Err(e) = result {
+                            state.set_status_message(format!("打开文件夹失败：{e}"));
+                        }
+                        cx.notify();
+                    });
+                }
+                None => state_entity.update(cx, |state, cx| {
+                    state.set_status_message("打开文件夹失败：拿不到父目录");
+                    cx.notify();
+                }),
+            }
+        }
+        A::SetPick => state_entity.update(cx, |state, cx| {
+            set_flag(state, Some(Flag::Pick));
+            state.set_status_message("已标识为 Pick");
+            cx.notify();
+        }),
+        A::SetReject => state_entity.update(cx, |state, cx| {
+            set_flag(state, Some(Flag::Reject));
+            state.set_status_message("已标为 Reject");
+            cx.notify();
+        }),
+        A::ClearFlag => state_entity.update(cx, |state, cx| {
+            set_flag(state, None);
+            state.set_status_message("已清除旗标");
+            cx.notify();
+        }),
+        A::RateFive => state_entity.update(cx, |state, cx| {
+            set_rating(state, Rating::Five);
+            state.set_status_message("已评 5 星");
+            cx.notify();
+        }),
+        A::RecognizeThis => start_recognition(state_entity, false, false, cx),
+        A::MoveToTrash => {
+            // 复用删除确认框（Delete 键那条）：绝不在这里直接删
+            state_entity.update(cx, |state, cx| {
+                state.active_dialog = Some(super::app_state::ActiveDialog::DeleteConfirm);
+                cx.notify();
+            });
+        }
+    }
+}
+
 /// 识别器空闲自动卸载（docs/todo.md #17）：每 30s 检查一次是否该释放。
 ///
 /// 判据在 model::recognizer::should_unload_recognizer（纯逻辑 + 单测）：配置 0 = 关闭、

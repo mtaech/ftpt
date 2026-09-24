@@ -7,7 +7,7 @@
 //! - 单击切图，右键上下文操作
 
 use gpui_kit::component::{ActiveTheme as _, h_flex};
-use gpui_kit::{Context, IntoElement, Window, div, img, prelude::*, px};
+use gpui_kit::{Context, IntoElement, MouseButton, Window, div, img, prelude::*, px};
 
 use crate::image::THUMB_SIZE_GRID;
 use crate::state::AppState;
@@ -62,6 +62,28 @@ pub fn render_filmstrip(
                         state.select_single(item_idx);
                         cx.notify();
                     }))
+                    // 右键菜单（§13.4）：与网格同一套
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(
+                            move |state, event: &gpui_kit::MouseDownEvent, _window, cx| {
+                                if !state.selected_indices.contains(&item_idx) {
+                                    state.select_single(item_idx);
+                                }
+                                let path = state
+                                    .items
+                                    .get(item_idx)
+                                    .map(|m| m.primary_path.clone())
+                                    .unwrap_or_default();
+                                state.open_photo_context_menu(
+                                    f32::from(event.position.x),
+                                    f32::from(event.position.y),
+                                    path,
+                                    cx,
+                                );
+                            },
+                        ),
+                    )
                     .child(div().w_full().h_full().bg(cx.theme().background).child(
                         if let Some(path) = thumb_path {
                             img(path).w_full().h_full().into_any_element()

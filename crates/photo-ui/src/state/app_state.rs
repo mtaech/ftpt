@@ -208,6 +208,19 @@ pub struct StatsPhoto {
     pub rel_path: String,
 }
 
+/// 照片右键菜单的打开状态（§13.4：自绘菜单，键盘导航 + 最大高度滚动）
+#[derive(Debug, Clone)]
+pub struct PhotoContextMenu {
+    /// 打开位置（**窗口坐标**：右键事件的 position 就是这个口径，直接当绝对定位用）
+    pub x: f32,
+    pub y: f32,
+    /// 右键命中的照片（主路径）：动作都作用在它（先被选中）
+    pub target: String,
+    pub items: Vec<crate::model::context_menu::MenuItem>,
+    /// 键盘/鼠标高亮的项下标
+    pub selected: usize,
+}
+
 /// 应用核心权威与派生状态
 pub struct AppState {
     pub settings_tab: SettingsTab,
@@ -245,6 +258,12 @@ pub struct AppState {
     /// 常驻识别器最近一次「在用」的时刻：空闲自动卸载（#17）据此计时。
     /// 识别进行中每个检查 tick 都会刷新，所以长批量跑完还有完整的一段空闲窗口。
     pub recognizer_last_used: Instant,
+
+    // ── 右键菜单（§13.4）──
+    /// 打开中的右键菜单（None = 未打开）
+    pub context_menu: Option<PhotoContextMenu>,
+    /// 菜单内容的滚动句柄（超过最大高度时用；键盘移动会 scroll_to_item 跟随）
+    pub context_menu_scroll: ScrollHandle,
 
     // ── 派生管线 ──
     pub criteria: FilterCriteria,
@@ -744,6 +763,8 @@ impl AppState {
             _species_filter_sub: None,
             filter_options_generation: 0,
             recognizer_last_used: Instant::now(),
+            context_menu: None,
+            context_menu_scroll: ScrollHandle::new(),
 
             criteria: default_filter_criteria(),
             sort_by: SortBy::FileName,
@@ -1055,6 +1076,53 @@ impl AppState {
         if let Some(input) = self.export_template_input.clone() {
             self.export.template = input.read(cx).value().to_string();
         }
+    }
+
+    // ── 右键菜单（§13.4）──
+
+    /// 打开照片右键菜单（x/y 是**窗口坐标**，与 MouseDownEvent.position 同口径）。
+    pub fn open_photo_context_menu(
+        &mut self,
+        x: f32,
+        y: f32,
+        target: String,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::model::context_menu::{initial_selection, photo_menu_items};
+        let items = photo_menu_items(self.view_mode == ViewMode::Preview);
+        self.context_menu = Some(PhotoContextMenu {
+            x,
+            y,
+            target,
+            selected: initial_selection(&items),
+            items,
+        });
+        cx.notify();
+    }
+
+    /// 关闭右键菜单（Esc / 点空白 / 执行完动作）。
+    pub fn close_context_menu(&mut self, cx: &mut Context<Self>) {
+        if self.context_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// 键盘上下移动高亮项（跳过置灰项，边界停住），并让滚动跟随选中项。
+    pub fn move_context_menu_selection(&mut self, delta: i32) {
+        if let Some(menu) = &mut self.context_menu {
+            menu.selected =
+                crate::model::context_menu::move_selection(&menu.items, menu.selected, delta);
+            self.context_menu_scroll.scroll_to_item(menu.selected);
+        }
+    }
+
+    /// 当前高亮项对应的动作与目标（置灰项返回 None）。
+    pub fn selected_context_menu_action(
+        &self,
+    ) -> Option<(crate::model::context_menu::ContextMenuAction, String)> {
+        let menu = self.context_menu.as_ref()?;
+        let item = menu.items.get(menu.selected)?;
+        (!item.disabled).then(|| (item.action, menu.target.clone()))
     }
 
     // ── 多选筛选器（§13.3）──
@@ -1500,6 +1568,11 @@ impl AppState {
 
     /// 处理 Esc 按键（§5.4 严格按优先级链分发）
     pub fn handle_escape(&mut self) -> bool {
+        // 0. 右键菜单打开 -> 关菜单（它盖在所有东西上面，优先级最高）
+        if self.context_menu.is_some() {
+            self.context_menu = None;
+            return true;
+        }
         // 1. 地图浮层打开 -> 关地图
         if self.map_overlay {
             self.map_overlay = false;

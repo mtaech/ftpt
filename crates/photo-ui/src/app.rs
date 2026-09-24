@@ -287,6 +287,29 @@ impl Render for AppState {
             .when_some(self.focus_handle.clone(), |this, handle| {
                 this.track_focus(&handle)
             })
+            // 右键菜单的键盘导航（§13.4）：只有菜单打开时才吃键；根视图持有焦点，
+            // 菜单作为子节点不需要自己抢焦点。Esc 走下面的 Escape action（handle_escape 第 0 优先级）。
+            .on_key_down(cx.listener(|this, event: &gpui_kit::KeyDownEvent, _window, cx| {
+                if this.context_menu.is_none() {
+                    return;
+                }
+                match event.keystroke.key.as_str() {
+                    "up" => {
+                        this.move_context_menu_selection(-1);
+                        cx.notify();
+                    }
+                    "down" => {
+                        this.move_context_menu_selection(1);
+                        cx.notify();
+                    }
+                    "enter" | "return" => {
+                        if let Some((action, target)) = this.selected_context_menu_action() {
+                            run_context_menu_action(this, action, target, cx);
+                        }
+                    }
+                    _ => {}
+                }
+            }))
             // ── 键位动作绑定 ──
             .on_action(cx.listener(|this, _: &Escape, _window, cx| {
                 if !this.handle_escape() {
@@ -694,6 +717,10 @@ impl Render for AppState {
                         render_rename_dialog(self, window, cx).into_any_element()
                     }
                 })
+            })
+            // ── 6. 照片右键菜单（§13.4：键盘导航 + 最大高度滚动；画在弹窗之上）──
+            .when_some(self.context_menu.clone(), |this, menu| {
+                this.child(render_photo_context_menu(self, &menu, window, cx))
             })
     }
 }
