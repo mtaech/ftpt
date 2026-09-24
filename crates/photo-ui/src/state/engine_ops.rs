@@ -64,6 +64,10 @@ pub fn start_scan(state_entity: Entity<AppState>, dir: PathBuf, recursive: bool,
         let new_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         state.scan_cancel = new_cancel.clone();
         state.is_scanning = true;
+        // 记住这次扫描的递归模式：后续「重扫当前视图」（F5 / 删除 / 撤销 / 批量操作）
+        // 都用它，而不是读配置——否则导入的「仅添加并浏览」（显式递归、配置未勾）会在
+        // 一次删除后被退回单层，子目录里的照片全部消失。
+        state.scan_recursive = recursive;
         state.scan_stage = Some("正在扫描文件...".to_string());
         state.scan_done = 0;
         state.scan_total = 0;
@@ -106,12 +110,31 @@ pub fn start_scan(state_entity: Entity<AppState>, dir: PathBuf, recursive: bool,
                             .image_manager
                             .set_cache_dir(Some(dir.join(".pt").join("thumbs")));
 
-                        // 记录到最近打开
-                        if !state.recent_dirs.contains(&dir) {
+                        // 记录到最近打开，**并写回配置**。
+                        // 以前这里只改运行时 Vec<PathBuf>，`app_config.recent_directories`
+                        // 从来没人同步 → 重启就丢（用户报「最近打开记录里没有我浏览打开的
+                        // 目录」）；`last_directory` 更是**全仓没人写过**，于是 main.rs 的
+                        // 「启动自愈：恢复上次打开的目录」一直是死代码。
+                        // 已经打开过的目录要**提到最前**（「最近」按最近使用排序，不是按首次）。
+                        let dir_text = dir.to_string_lossy().to_string();
+                        let mut persist = false;
+                        if state.recent_dirs.first() != Some(&dir) {
+                            state.recent_dirs.retain(|d| d != &dir);
                             state.recent_dirs.insert(0, dir.clone());
-                            if state.recent_dirs.len() > 20 {
-                                state.recent_dirs.truncate(20);
-                            }
+                            state.recent_dirs.truncate(20);
+                            state.app_config.recent_directories = state
+                                .recent_dirs
+                                .iter()
+                                .map(|p| p.to_string_lossy().to_string())
+                                .collect();
+                            persist = true;
+                        }
+                        if state.app_config.last_directory.as_deref() != Some(dir_text.as_str()) {
+                            state.app_config.last_directory = Some(dir_text);
+                            persist = true;
+                        }
+                        if persist {
+                            state.save_config();
                         }
 
                         // 重算子目录
@@ -1030,7 +1053,7 @@ fn batch_scope(state: &AppState) -> Option<(PathBuf, bool, std::collections::Has
     if paths.is_empty() {
         return None;
     }
-    Some((dir, state.app_config.include_subdirectories, paths))
+    Some((dir, state.scan_recursive, paths))
 }
 
 /// 批量复制 / 移动到目标目录 / 删除到回收站（左栏批量面板 + 确认弹窗）。
@@ -1195,7 +1218,7 @@ pub fn start_batch_rename(state_entity: Entity<AppState>, template: String, cx: 
             cx.notify();
             return None;
         }
-        Some((dir, state.app_config.include_subdirectories, jobs))
+        Some((dir, state.scan_recursive, jobs))
     }) else {
         return;
     };
@@ -1335,11 +1358,14 @@ pub fn apply_context_menu_action(
 ) {
     use crate::model::context_menu::ContextMenuAction as A;
 
-    // 目标可能刚被移走/删除：定位不到就诚实报错，不要默默作用于别的照片
+    // 目标可能刚被移走/删除：定位不到就诚实报错，不要默默作用于别的照片。
+    // 定位到之后**不塌成单选**（2026-09 用户报的 bug）：命中项已在选中集里就保留整批多选，
+    // 批量动作（旗标/评分/识别/删除）才真的作用于用户选中的全部；只把 anchor 移到命中项，
+    // 让预览/复制图片这类单张动作落到用户点的那张。
     let found = state_entity.update(cx, |state, cx| {
         let idx = state.items.iter().position(|m| m.primary_path == target);
         if let Some(idx) = idx {
-            state.select_single(idx);
+            state.focus_selection_on(idx);
         }
         cx.notify();
         idx.is_some()
@@ -1360,11 +1386,15 @@ pub fn apply_context_menu_action(
             });
         }
         A::CopyImage => {
+            // 只对**命中那一张**生效（剪贴板一次只装得下一张图）。按路径取，不读
+            // primary_selected_meta：多选时 primary 是 anchor ?? 末尾，可能不是用户点的那张。
             let (manager, source) = state_entity.update(cx, |state, _| {
-                (
-                    state.image_manager.clone(),
-                    state.primary_selected_meta().and_then(source_file_of),
-                )
+                let source = state
+                    .items
+                    .iter()
+                    .find(|m| m.primary_path == target)
+                    .and_then(source_file_of);
+                (state.image_manager.clone(), source)
             });
             match source {
                 Some(source) => copy_image_to_clipboard(state_entity.clone(), manager, source, cx),
@@ -1375,10 +1405,15 @@ pub fn apply_context_menu_action(
             }
         }
         A::CopyPath => {
-            let result = copy_text_to_system_clipboard(&target);
+            // 多选时把整个选中集复制出去（资源管理器/编辑器的惯例：一行一个路径）
+            let paths = state_entity.update(cx, |state, _| state.context_menu_paths(&target));
+            let text = paths.join("\n");
+            let result = copy_text_to_system_clipboard(&text);
             state_entity.update(cx, |state, cx| {
                 match result {
-                    Ok(()) => state.set_status_message(format!("已复制路径到剪贴板：{target}")),
+                    Ok(()) if paths.len() > 1 => state
+                        .set_status_message(format!("已复制 {} 个路径到剪贴板", paths.len())),
+                    Ok(()) => state.set_status_message(format!("已复制路径到剪贴板：{text}")),
                     Err(e) => state.set_status_message(format!("复制路径失败：{e}")),
                 }
                 cx.notify();
@@ -1422,7 +1457,8 @@ pub fn apply_context_menu_action(
             state.set_status_message("已评 5 星");
             cx.notify();
         }),
-        A::RecognizeThis => start_recognition(state_entity, false, false, cx),
+        // 作用域 = mark_indices()：命中的照片若在选中集里，这里就是整批（与键盘 R 同口径）
+        A::Recognize => start_recognition(state_entity, false, false, cx),
         A::MoveToTrash => {
             // 复用删除确认框（Delete 键那条）：绝不在这里直接删
             state_entity.update(cx, |state, cx| {
@@ -1489,27 +1525,13 @@ pub fn pick_batch_target_dir(
     window: &mut Window,
     cx: &mut Context<AppState>,
 ) {
-    cx.spawn_in(window, async move |weak, async_cx| {
-        let Some(folder) = rfd::AsyncFileDialog::new()
-            .set_title("选择批量操作的目标目录")
-            .pick_folder()
-            .await
-        else {
-            return;
-        };
-        let path = folder.path().to_path_buf();
-        let _ = async_cx.update(|_window, cx| {
-            let Some(entity) = weak.upgrade() else {
-                return;
-            };
-            entity.update(cx, |state, cx| {
-                state.batch_target_dir = Some(path.clone());
-                state.active_dialog = Some(super::app_state::ActiveDialog::BatchConfirm(op_type));
-                cx.notify();
-            });
+    super::folder_picker::pick_folder_async(window, cx, move |entity, _window, cx, path| {
+        entity.update(cx, |state, cx| {
+            state.batch_target_dir = Some(path.clone());
+            state.active_dialog = Some(super::app_state::ActiveDialog::BatchConfirm(op_type));
+            cx.notify();
         });
-    })
-    .detach();
+    });
 }
 
 /// 删除指定路径列表到回收站（重复检测弹窗的「其余移入回收站」、Delete 键确认后）。
@@ -1518,12 +1540,12 @@ pub fn delete_paths(state_entity: Entity<AppState>, paths: Vec<PathBuf>, cx: &mu
     if paths.is_empty() {
         return;
     }
+    // 用户报的 bug：多选删除后整列表空掉。这里的重扫以前读配置，而「仅添加并浏览」
+    // 是**显式递归**的视图（配置默认单层）——重扫退回单层就一张都找不到，看起来像
+    // 「所有图片都不显示了」（其实文件好好在子目录里）。重扫必须保持当前视图的模式。
     let (current_dir, recursive) = {
         let state = state_entity.read(cx);
-        (
-            state.current_dir.clone(),
-            state.app_config.include_subdirectories,
-        )
+        (state.current_dir.clone(), state.scan_recursive)
     };
 
     let rescan_dir = current_dir.clone();
@@ -2664,27 +2686,18 @@ pub fn start_ebird_export(state_entity: Entity<AppState>, cx: &mut App) {
 
 /// 选择导出目标目录（系统目录对话框）→ 回填草稿与输入框。
 pub fn pick_export_dest(window: &mut Window, cx: &mut Context<AppState>) {
-    cx.spawn_in(window, async move |weak, async_cx| {
-        let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await else {
-            return;
-        };
-        let text = folder.path().to_string_lossy().to_string();
-        let _ = async_cx.update(|window, cx| {
-            let Some(entity) = weak.upgrade() else {
-                return;
-            };
-            entity.update(cx, |state, cx| {
-                state.export.dest_dir = text.clone();
-                if let Some(input) = state.export_dest_input.clone() {
-                    input.update(cx, |input_state, cx| {
-                        input_state.set_value(text.clone(), window, cx);
-                    });
-                }
-                cx.notify();
-            });
+    super::folder_picker::pick_folder_async(window, cx, |entity, window, cx, path| {
+        let text = path.to_string_lossy().to_string();
+        entity.update(cx, |state, cx| {
+            state.export.dest_dir = text.clone();
+            if let Some(input) = state.export_dest_input.clone() {
+                input.update(cx, |input_state, cx| {
+                    input_state.set_value(text.clone(), window, cx);
+                });
+            }
+            cx.notify();
         });
-    })
-    .detach();
+    });
 }
 
 // ── 重复/相似照片检测（docs/todo.md #2）──

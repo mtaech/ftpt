@@ -92,7 +92,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 |运行核心测试|`cargo test -p photo-engine -p photo-recognize -p photo-domain -p photo-config`|
 |前端单测|`cargo test -p photo-ui`（`src/model/` 纯逻辑 + `theme/` 色彩用例）|
 |开发运行（GPUI 桌面窗口）|`cargo run -p photo-ui`|
-|无头冒烟|`XDG_CONFIG_HOME=/tmp/ptlease-config xvfb-run -a cargo run -p photo-ui --example lease_smoke`（另有 `preview_full_smoke`、`clipboard_smoke`、`adjust_smoke`、`grid_scroll_smoke`、`filter_bar_smoke`、`export_smoke`、`duplicates_smoke`、`batch_ops_smoke`、`context_menu_smoke`、`a11y_smoke`、`recognize_smoke`、`region_smoke`、`stats_smoke`、`master_bench`）|
+|无头冒烟|`XDG_CONFIG_HOME=/tmp/ptlease-config xvfb-run -a cargo run -p photo-ui --example lease_smoke`（另有 `preview_full_smoke`、`clipboard_smoke`、`adjust_smoke`、`grid_scroll_smoke`、`filter_bar_smoke`、`export_smoke`、`duplicates_smoke`、`batch_ops_smoke`、`context_menu_smoke`、`a11y_smoke`、`recognize_smoke`、`region_smoke`、`rescan_smoke`、`folder_picker_smoke`、`stats_smoke`、`master_bench`）|
 |EXIF 提取验证|`cargo run -p photo-engine --example focus_check -- <图片>`（打印 ExifMetadata + 对焦点；exiftool 不可用或残留进程时先 `taskkill //F //IM perl.exe`）|
 
 ---
@@ -144,12 +144,17 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 - **exiftool 定位优先级**：`PHOTO_EXIFTOOL` env → exe 同级 `exiftool/`（打包）→ 仓库 `local-lib/exiftool/`（开发）→ PATH；升级版本见 `docs/exiftool-update.md`
 - **配置目录定位（`photo_config::config_dir()`）**：`PHOTO_CONFIG_DIR`（值就是目录本身）→ `XDG_CONFIG_HOME`（取 `pt/` 子目录）→ `~/.config/pt`；空串按未设置。刻意不用 `dirs::config_dir()`（它在 Windows 给 `%APPDATA%`，会破坏全平台同一相对布局）。`config.toml` 与 `logs/` 都在这个目录下（`logging::init` 从 `determine_config_path()` 的父目录派生）。**无头冒烟的 `XDG_CONFIG_HOME=...` 隔离靠这条生效**：2026-09-19 之前这里硬编码 home，冒烟其实一直读写用户真实配置，`lease_smoke` 的「左停靠区宽度来自配置」检查因此在左栏被拖宽过的机器上假失败。
 - **arboard 剪贴板必须留常驻持有者（X11）**：X11 剪贴板的数据是进程应答 X 请求时才提供的，`arboard::Clipboard` 一 drop，选择所有权就没了——「复制图片到剪贴板」会静默变成什么都没复制。`engine_ops` 用 `CLIPBOARD_OWNER` 静态把实例持有到进程退出（Wayland 的 data-control 由合成器接管，不受影响）。`clipboard_smoke` 长期没抓到这条：它以前跑在用户的 Wayland 会话上（窗口根本没落到 Xvfb），读回的是合成器接管的那份数据。
-- **无头冒烟必须钉住 X11 后端**：GPUI 选后端只看环境变量（`platform::guess_compositor()`）：`WAYLAND_DISPLAY` 非空 → Wayland，其次 `DISPLAY` → X11。而 `xvfb-run` 只准备 X 显示：在 Wayland 会话里跑冒烟时窗口会落到**用户真实桌面**，帧由真实合成器决定（被遮挡/最小化时不产帧），于是**渲染驱动的行为根本没被测**——渲染驱动的检查（如「对比窗格加载母版」）就因此同一份代码一会儿 13/13 一会儿 12/13（母版加载只在视图真的渲染时才发起；`compare_smoke` 当年就是这样抓出来的，该视图已移除）。所以 14 个 GPUI 冒烟都在 `gpui_kit::application()` 之前调 `photo_ui::app::prepare_headless_smoke()`（把 `WAYLAND_DISPLAY` 置空，GPUI 判空即视为未设置）；要真机 Wayland 目检时设 `PHOTO_SMOKE_ALLOW_WAYLAND=1`。
+- **无头冒烟必须钉住 X11 后端**：GPUI 选后端只看环境变量（`platform::guess_compositor()`）：`WAYLAND_DISPLAY` 非空 → Wayland，其次 `DISPLAY` → X11。而 `xvfb-run` 只准备 X 显示：在 Wayland 会话里跑冒烟时窗口会落到**用户真实桌面**，帧由真实合成器决定（被遮挡/最小化时不产帧），于是**渲染驱动的行为根本没被测**——渲染驱动的检查（如「对比窗格加载母版」）就因此同一份代码一会儿 13/13 一会儿 12/13（母版加载只在视图真的渲染时才发起；`compare_smoke` 当年就是这样抓出来的，该视图已移除）。所以 17 个 GPUI 冒烟都在 `gpui_kit::application()` 之前调 `photo_ui::app::prepare_headless_smoke()`（把 `WAYLAND_DISPLAY` 置空，GPUI 判空即视为未设置）；要真机 Wayland 目检时设 `PHOTO_SMOKE_ALLOW_WAYLAND=1`。
 - **模型/名录库/全局索引库定位（`data_root()`，lib.rs）**：`PHOTO_DATA_DIR` env → exe 同级 `models/`+`data/`（打包便携）→ 仓库根（开发回退，从 CARGO_MANIFEST_DIR/cwd 向上找同时含 `models/` 与 `data/bird_catalog.db` 的目录）；`cargo run -p photo-ui` 下模型在仓库根，否则会报「检测模型文件不存在: <target>/debug/models/org_det.onnx」
 - **识别资产（随包分发，均不入 git）**：`models/org_det.onnx`（通用主体检测）+ `models/bioclip2_model_int8.onnx` + `data/bird_catalog.db`（已瘦身为 `animal_info(id, latin_name, cn_name)` 三列，2026-09-22）+ `data/taxon/`（名录子集包：`txt_emb_bioclip-2.{npy,json}` + `zh_names.json` + `VERSION`，**93,484 类**）+ `data/taxon/bird_regions.json`（**可选**：1356 个鸟种的省级分布，`AppConfig.recognition_region` 的地区过滤用；缺失时过滤关闭、识别不受影响）。BioCLIP 的资产目录固定在**名录库同级**的 `taxon/`（即 `data_root()/data/taxon/`）。包 = CoL China 中国名录（硬地理先验）+ **家养/外来补充名单**（30 个学名，2026-09-23 起）+ **3 个文本塔另算列**（马铃薯/葡萄/侧柏——名字在标签空间里但列落在全零填充区）。工具与名单都在 `bioclip_demo/data/`：`build_taxon_pack.py --extra domestic_exotic.txt --computed <dir>`、`compute_text_embedding.py`（文本塔，配方与上游 `make_txt_embedding.py` 逐字一致）。**没有独立的家犬/家猪类**：上游把犬/猪压在 `Canis lupus`（俗名 Domestic Dog）/`Sus scrofa`（俗名 Pig）这同一列里，只能改中文名口径（家犬（狼）/家猪（野猪）），理由与实测见 `docs/todo.md` #7。缺哪个就在 `Recognizer::new` 报对应的 `ModelLoad`，状态栏透传。`bird_model.onnx`（26MB）/ `eye.onnx`（19MB）/ `detect.onnx`（19MB）已删除（备份 /tmp/pt-asset-backup/）；`data/global.db` 是派生索引，删除后重扫自动重建
 - 使用了 let-chains（edition 2024 特性），如 `photo-config/config.rs` 便携路径判断
 - **评分/旗标/色标筛选在 UI 侧执行**（`crates/photo-ui/src/model/filter.rs`）；`FilterCriteria::has_active_filter` 语义 = 批量操作安全边界（无筛选时禁用）
 - **窗口根视图必须是 gpui-component 的 `Root`**：`Button::tooltip` 最终调 `Root::tooltip_overlay(window, cx)`，而它靠 `window.root::<Root>()` 查找——根视图不是 `Root`（例如直接把 `AppState` 当根视图）时**所有 tooltip 被静默丢弃**，表现就是「图标按钮悬停没有提示」（曾把整个 app 的 tooltip 都吃掉：侧边栏 5 个图标、Dock 折叠按钮、预览工具条）。`main.rs` 已用 `Root::new(app_state, window, cx).bordered(false)` 包一层（系统装饰窗口不要再叠自绘边框），无头冒烟 `clipboard_smoke` 会断言根视图是 `Root`。另注意 gpui 的 `InteractiveElement::disabled` 会屏蔽 hover，**disabled 按钮不显示 tooltip**（如未选中照片时的「识别」）
+- **Linux 上目录选择对话框别用 rfd 的 XDG portal 后端**（2026-09-25）：rfd 0.14 在 Linux 默认走 portal
+  （ashpd + zbus），而它在 GPUI 的 executor 上 `AsyncFileDialog::pick_folder()` **永远不返回、也不报错**
+  ——portal 收不到请求（journal 里没有 `parent_window`），rfd 自带的 zenity 兜底又只在 portal **报错**时
+  才走。表现就是「打开目录点了没反应、日志干净」。目录选择统一走 `state/folder_picker.rs`
+  （KDE → kdialog，其余 → zenity，两个都没有才退回 rfd），回归网 `folder_picker_smoke`。
 - **GPUI 鼠标事件给的是「窗口坐标」，不是元素坐标**：`MouseDownEvent` / `MouseUpEvent` /
   `MouseMoveEvent` 的 `position`，gpui 原文是 “The position of the mouse on the window”；
   而 `div().absolute().top(...).left(...)` 画的叠加层是**父元素坐标**——两者直接混用，叠加层会
@@ -171,10 +176,10 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 
 ## 测试与 QA
 
-- Rust：`#[test]` 分布在 5 个 crate 的源文件内联 `#[cfg(test)] mod tests`（domain 39 / config 23 / engine 211 / recognize 35 / photo-ui 109），另有 1 个 `#[ignore]` 真机冒烟
+- Rust：`#[test]` 分布在 5 个 crate 的源文件内联 `#[cfg(test)] mod tests`（domain 39 / config 23 / engine 211 / recognize 35 / photo-ui 113），另有 1 个 `#[ignore]` 真机冒烟
 - 发布包校验（跨平台，不需要 Windows）：`pwsh scripts/package.ps1 -VerifyOnly`——只做「必需资产 + `data/taxon/VERSION` 字段」校验并打印将要打进去的清单，不构建/不拷贝/不打包。Linux 上没装 pwsh 时可下便携版（GitHub 直连不通就用镜像，如 `https://ghfast.top/https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/powershell-7.6.6-linux-x64.tar.gz`，解压即用）
 - 真机识别冒烟：`cargo test -p photo-recognize -- --ignored`（需 worktree/发布根有 `models/` 与 `data/bird_catalog.db`）；单文件手动识别工具：`cargo run -p photo-recognize --example recognize_file -- <图片路径> [models_dir] [catalog_db]`
-- 无头冒烟：`lease_smoke` 16 项 / `preview_full_smoke` 5 项 / `clipboard_smoke`（派发 CopyImage 动作 → 解码 → arboard 写剪贴板 → 读回校验尺寸）/ `adjust_smoke` 16 项（自建 1200×800 JPEG：预览装载参数 / 三条滑杆实体 / 面板可渲染 / 滑杆 Change 事件量化 0.37→0.35 / +1 EV 后预览更亮 149.0→202.9 / 350ms 去抖落库 / 原文件字节不变 / 重置回原图并复位）/ `grid_scroll_smoke` 4 项（自建 48 张 JPEG：网格滚动句柄拿到真实视口 / 内容高于视口 / 写句柄偏移跨帧保留；另支持 `PHOTO_SMOKE_HOLD_MS` 保持窗口供 Xvfb 外部截图目检、`PHOTO_SMOKE_HIDE_PANELS=1` 收起左右侧栏、`PHOTO_SMOKE_COLS=N` 指定列数、`PHOTO_SMOKE_WINDOW=WxH` 指定窗口尺寸、`PHOTO_SMOKE_HOLD_STILL=1` 保持画面静止（注入鼠标做交互验证时要逐像素对比，默认会轻推偏移让滚动条 thumb 停在可见态），并打印 `[diag] 窗口宽/列数/实测容器/列表视口宽`）/ `filter_bar_smoke` **17 项**（筛选栏四个下拉；不需素材：排序/列数两个下拉的创建与选中一致 / emit `SelectEvent::Confirm` 走真实订阅改状态 / 列数写回配置 / 设置页改列数后下拉同步；**镜头 / 物种多选（#13.3）**：注入 3 张 items 后**渲染期自动同步候选**（defer_in）/ 单值 Change 生效 2/3 张 / 与物种取交集 1/3 / 多值 = 命中任一即保留（2 值 → 3 张）/ 清空归位 / 计入 `has_active_filters`）/ `export_smoke` 27 项（**不需模型**：顶栏 / Ctrl+E 的 action 真的打开弹窗 / 输入框文本→草稿 / 已选口径只导出 1 张 vs 取消选择导出筛选结果全部 5 张 / `{seq}` 补零渲染 / 同 stem 不同扩展自动 `_1` 去重 / 长边 600 真的生效 / 质量 95 体积大于 85 / 原文件字节不变 / 目标目录写回配置 / 目标目录不可创建时给真实错误 / **eBird CSV（#9）**：造识别记录 → 门控放行 → 落盘 + BOM 表头 + 物种聚合行；配置目录由冒烟自己钉 `PHOTO_CONFIG_DIR` 隔离）/ `recognize_smoke` 6 项（需 models/：扫描素材 / 识别途中能观察到中间进度 / 跑完 done==total 且每张有状态 / 取消 5s 内生效 / **识别地区装配后启用**）/ `region_smoke` **19 项**（需 models/：扫描素材 / 框选模式开关 / **识别器懒装配与常驻**（冷装配→热复用两段计时）/ 首次框选建结论 / 二次框选**追加**为主体 / `folder_db` 持久化同步 / 全局索引落行 / 批量识别复用同一实例 / **回归**：旧 Unrecognized 记录框选后内存摘要显示物种 + 落库顶层同步为 subjects[0] + 存量坏数据（顶层 NULL + subjects 有结论）重扫后仍显示 + 清临时行）/ `stats_smoke` 15 项（**不需模型**：扫描+缩略图管线 / 全局索引写行 / 选中物种取记录 / 缩略图按各自目录解析 / 统计视图渲染 / 点击跳转选中 / **滚动条（#4/#3）**：物种榜 max_offset 850 / 照片网格 1531 / 偏移跨帧保留 / 胶片条横向 862 / 导入弹窗视口 502 / 清临时行）/ `duplicates_smoke` **25 项**（**不需模型**、自建位模式素材：入口开窗 / 作用域 8 张 / 2 组各 2 张 / 无关照片不误报 / keeper = 路径首张 / 落库阈值 + keeper + 时间 / 标 Rejected 不动文件且同步 xmp / 重开弹窗读回落库结果 / 同 stem 多格式被排除 / **空文件健壮性**（0 字节文件进扫描结果但不卡管线、收尾汇总一次、检测仍能收尾）/ 渲染多帧不 panic；支持 `PHOTO_SMOKE_HOLD_MS` 保持窗口截图目检）/ `batch_ops_smoke` **25 项**（**不需模型**、自建 4 张 JPEG：无筛选时批量操作默认锁住 / 「显式确认」解锁 / 筛选一变自动收回 / Delete 键只弹确认不动文件 / 确认后进回收站且记撤销日志 / **Ctrl+Z 真从回收站恢复** / 批量移动落地 4 个文件并撤销回原位 / 批量复制落地 4 个副本并撤销删副本 / 批量重命名生效并撤销改回 / 空模板被拒有提示 / 确认框与重命名弹窗渲染多帧不 panic；支持 `PHOTO_SMOKE_HOLD_MS`）/ `context_menu_smoke` **20 项**（**不需模型**、自建 3 张 JPEG：右键打开菜单 / 10 项 / 目标正确 / **10 项超过 240px 最大高真的产生滚动范围**（max_offset 50px）/ 上下移动跳过置灰项且到边界不环绕 / 预览态首项置灰 / Esc 关闭 / Pick 写进摘要 / 切预览 / 移至回收站只弹确认框且文件未动 / 目标失效诚实报错不误伤别的照片 / 渲染多帧不 panic）/ `a11y_smoke` **21 项**（**不需模型**、自建 3 张 JPEG：网格容器 role=Grid + 名称报「N 张 / M 列 / 已选 K 张」/ 行 role=Row / 格子 role=GridCell + 名称随状态（选中·N 星·Pick）实时更新 + selected 迁移 / 胶片条 role=List + 项 role=ListItem / 右键菜单 role=Menu + 项 role=MenuItem + 置灰项名称带「（不可用）」+ 键盘高亮项报 selected）/ `master_bench` 计时；15 个 GPUI 冒烟都先调 `app::prepare_headless_smoke()` 把后端钉在 Xvfb 的 X11 上（否则 Wayland 会话下窗口落到真实桌面、渲染帧不可控），`xvfb-run` 下无需真实显示器（见开发命令）
+- 无头冒烟：`lease_smoke` 16 项 / `preview_full_smoke` 5 项 / `clipboard_smoke`（派发 CopyImage 动作 → 解码 → arboard 写剪贴板 → 读回校验尺寸）/ `adjust_smoke` 16 项（自建 1200×800 JPEG：预览装载参数 / 三条滑杆实体 / 面板可渲染 / 滑杆 Change 事件量化 0.37→0.35 / +1 EV 后预览更亮 149.0→202.9 / 350ms 去抖落库 / 原文件字节不变 / 重置回原图并复位）/ `grid_scroll_smoke` 4 项（自建 48 张 JPEG：网格滚动句柄拿到真实视口 / 内容高于视口 / 写句柄偏移跨帧保留；另支持 `PHOTO_SMOKE_HOLD_MS` 保持窗口供 Xvfb 外部截图目检、`PHOTO_SMOKE_HIDE_PANELS=1` 收起左右侧栏、`PHOTO_SMOKE_COLS=N` 指定列数、`PHOTO_SMOKE_WINDOW=WxH` 指定窗口尺寸、`PHOTO_SMOKE_HOLD_STILL=1` 保持画面静止（注入鼠标做交互验证时要逐像素对比，默认会轻推偏移让滚动条 thumb 停在可见态），并打印 `[diag] 窗口宽/列数/实测容器/列表视口宽`）/ `filter_bar_smoke` **17 项**（筛选栏四个下拉；不需素材：排序/列数两个下拉的创建与选中一致 / emit `SelectEvent::Confirm` 走真实订阅改状态 / 列数写回配置 / 设置页改列数后下拉同步；**镜头 / 物种多选（#13.3）**：注入 3 张 items 后**渲染期自动同步候选**（defer_in）/ 单值 Change 生效 2/3 张 / 与物种取交集 1/3 / 多值 = 命中任一即保留（2 值 → 3 张）/ 清空归位 / 计入 `has_active_filters`）/ `export_smoke` 27 项（**不需模型**：顶栏 / Ctrl+E 的 action 真的打开弹窗 / 输入框文本→草稿 / 已选口径只导出 1 张 vs 取消选择导出筛选结果全部 5 张 / `{seq}` 补零渲染 / 同 stem 不同扩展自动 `_1` 去重 / 长边 600 真的生效 / 质量 95 体积大于 85 / 原文件字节不变 / 目标目录写回配置 / 目标目录不可创建时给真实错误 / **eBird CSV（#9）**：造识别记录 → 门控放行 → 落盘 + BOM 表头 + 物种聚合行；配置目录由冒烟自己钉 `PHOTO_CONFIG_DIR` 隔离）/ `recognize_smoke` 6 项（需 models/：扫描素材 / 识别途中能观察到中间进度 / 跑完 done==total 且每张有状态 / 取消 5s 内生效 / **识别地区装配后启用**）/ `region_smoke` **19 项**（需 models/：扫描素材 / 框选模式开关 / **识别器懒装配与常驻**（冷装配→热复用两段计时）/ 首次框选建结论 / 二次框选**追加**为主体 / `folder_db` 持久化同步 / 全局索引落行 / 批量识别复用同一实例 / **回归**：旧 Unrecognized 记录框选后内存摘要显示物种 + 落库顶层同步为 subjects[0] + 存量坏数据（顶层 NULL + subjects 有结论）重扫后仍显示 + 清临时行）/ `folder_picker_smoke` **7 项**（**不需模型、不弹真框**：PATH 前置假的 kdialog/zenity —— KDE 优先 kdialog / kdialog 失败回退 zenity / 取消返回 None 不报错 / **端到端：派发 OpenDirectory 后真的扫描了假选择器返回的目录**（「打开目录失效」的回归网）/ 写进运行时最近列表 / 同步进 AppConfig / **重读配置文件仍在**（「最近打开 / 上次目录」落盘的回归网））/ `rescan_smoke` **12 项**（重扫与视图扫描模式：默认单层 / 「仅添加并浏览」式**递归视图被记录**（配置仍是单层）/ F5 保持视图模式 / **删除后重扫仍保持递归**——用户报「多选删除完成后所有图片都不显示了」，bug 重现时列表是 `[]` / 删除后的重扫不把模式降级 / Ctrl+Z 后仍递归 / 按新值重扫回单层 / 失踪文件剔除 + 预览槽位清理）/ `stats_smoke` 15 项（**不需模型**：扫描+缩略图管线 / 全局索引写行 / 选中物种取记录 / 缩略图按各自目录解析 / 统计视图渲染 / 点击跳转选中 / **滚动条（#4/#3）**：物种榜 max_offset > 0 / 照片网格 1531 / 偏移跨帧保留 / 胶片条横向 862 / 导入弹窗视口 549（2026-09-25 来源条合并成一行后）/ 清临时行）/ `duplicates_smoke` **25 项**（**不需模型**、自建位模式素材：入口开窗 / 作用域 8 张 / 2 组各 2 张 / 无关照片不误报 / keeper = 路径首张 / 落库阈值 + keeper + 时间 / 标 Rejected 不动文件且同步 xmp / 重开弹窗读回落库结果 / 同 stem 多格式被排除 / **空文件健壮性**（0 字节文件进扫描结果但不卡管线、收尾汇总一次、检测仍能收尾）/ 渲染多帧不 panic；支持 `PHOTO_SMOKE_HOLD_MS` 保持窗口截图目检）/ `batch_ops_smoke` **25 项**（**不需模型**、自建 4 张 JPEG：无筛选时批量操作默认锁住 / 「显式确认」解锁 / 筛选一变自动收回 / Delete 键只弹确认不动文件 / 确认后进回收站且记撤销日志 / **Ctrl+Z 真从回收站恢复** / 批量移动落地 4 个文件并撤销回原位 / 批量复制落地 4 个副本并撤销删副本 / 批量重命名生效并撤销改回 / 空模板被拒有提示 / 确认框与重命名弹窗渲染多帧不 panic；支持 `PHOTO_SMOKE_HOLD_MS`）/ `context_menu_smoke` **31 项**（**不需模型**、自建 3 张 JPEG：右键打开菜单 / 10 项 / 目标正确 / **10 项超过 240px 最大高真的产生滚动范围**（max_offset 50px）/ 上下移动跳过置灰项且到边界不环绕 / 预览态首项置灰 / Esc 关闭 / Pick 写进摘要 / 切预览 / 移至回收站只弹确认框且文件未动 / 目标失效诚实报错不误伤别的照片 / 渲染多帧不 panic / **批量选中 3 张后右键（2026-09-25 回归）**：菜单作用域 = 3、文案说「识别选中的 3 张」「标识为 Pick（3 张）」、Pick 写进整批 3 张、多选不被塌成单选、回收站确认框口径 = 3 张、确认后 3 张一起进回收站、Ctrl+Z 一起恢复）/ `a11y_smoke` **21 项**（**不需模型**、自建 3 张 JPEG：网格容器 role=Grid + 名称报「N 张 / M 列 / 已选 K 张」/ 行 role=Row / 格子 role=GridCell + 名称随状态（选中·N 星·Pick）实时更新 + selected 迁移 / 胶片条 role=List + 项 role=ListItem / 右键菜单 role=Menu + 项 role=MenuItem + 置灰项名称带「（不可用）」+ 键盘高亮项报 selected）/ `master_bench` 计时；17 个 GPUI 冒烟都先调 `app::prepare_headless_smoke()` 把后端钉在 Xvfb 的 X11 上（否则 Wayland 会话下窗口落到真实桌面、渲染帧不可控），`xvfb-run` 下无需真实显示器（见开发命令）
 
 ### 测试分布
 
@@ -212,6 +217,108 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 ---
 
 ## 近期修复记录
+
+- **2026-09-25 fix(photo-ui)：最近打开 / 上次目录从来没落盘（用户：「我浏览打开的目录没有了」）**：
+  **根因**：`start_scan` 只把目录插进运行时 `state.recent_dirs`（左栏「最近打开」卡片读的就是它，所以
+  **本次运行里看得到**），而 `AppConfig.recent_directories` **全仓没有任何地方同步**——`save_config` 的注释
+  写着「收藏 / 上次目录 / 最近打开都由前端维护」，但前端从来没写过；`last_directory` 更极端：只有 `main.rs`
+  读它（「启动自愈：恢复上次打开的目录」），**没有任何地方写**，是死配置。于是重启后最近列表回到配置里的旧值
+  （新开的目录一个没有），自动恢复上次目录也从来没生效过。
+  **修法**：`start_scan` 扫描成功后同时同步 `app_config.recent_directories` 与 `app_config.last_directory`
+  并 `save_config()`（只在**真的有变化**时写盘，不是每次重扫都写）；顺手把语义改对——重复打开的目录**提到最前**
+  （「最近」按最近使用排序），而不是第一次插入后就不再动。
+  **验证（先红后绿）**：`folder_picker_smoke` 4→**7 项**，新增三条：写进运行时最近列表 / 同步进 AppConfig /
+  **重读配置文件仍在**（唯一能证明「重启还在」的断言）。把同步块临时去掉重跑，后两条精确失败（`None / None`
+  ——正是用户看到的「没有了」）；恢复后 7/7 全过。`cargo test -p photo-ui` **113 项**、
+  `cargo check --workspace --all-targets` 0 warning、`rescan_smoke` 12 项、`stats_smoke` 15 项回归全过。
+
+- **2026-09-25 fix(photo-ui)：目录选择对话框全线静默失效（「打开目录」点了没反应）**：
+  用户截图报「打开目录失效了」。**根因不在我们的分发链**：派发 `OpenDirectory` → 处理器 → rfd 都跑到了
+  （用假总线探测可证：portal 连不上时 rfd 立刻回退 zenity，框真弹出来）。问题是 **rfd 0.14 在 Linux 默认
+  走 XDG portal（ashpd + zbus），而它在 GPUI 的 executor 上永远不返回**：真会话总线下
+  `rfd::AsyncFileDialog::pick_folder()` 既不弹框、也不报错——`xdg-desktop-portal-kde` 的 journal 里连一次
+  `parent_window` 记录都没有（请求根本没到 portal），而 rfd 自带的 zenity 兜底**只在 portal 报错时才走**，
+  我们这里是**卡住**。于是「打开目录」静默失败、日志干净（最难查的那种）。同一个调用换成 zenity 立刻出框。
+  **影响面**：photo-ui 里 5 处 rfd 目录对话框全中——打开目录（空态按钮 / Ctrl+O / 活动栏）、导入弹窗
+  「浏览…」、导入目标根目录、批量操作目标目录、导出目标目录。
+  **修法**：新增 `state/folder_picker.rs` 统一收口：Linux 上按桌面挑**会真的弹出来**的命令行选择器
+  （KDE → `kdialog --getexistingdirectory`，其余 → `zenity --file-selection --directory`），两个都没装才退回
+  rfd（Windows/macOS 仍走 rfd 原生对话框）；对话框放**独立线程**跑（不占 UI 线程，也不占后台执行器的
+  线程池——用户慢慢挑目录时不该 parked 一个线程），前台 80ms 轮询取结果；取消 = 什么都不做，失败**写状态栏**
+  （不再静默）。5 处调用点全部改走 `pick_folder_async`。
+  **验证**：新增 `folder_picker_smoke` **4 项**（PATH 前置假的 kdialog/zenity，不弹真框）：KDE 优先 kdialog
+  且路径解析正确 / kdialog 失败（退出码 2）回退 zenity / 取消（退出码 1）返回 None 而非报错 / **端到端：
+  派发 OpenDirectory 动作后真的扫描了假选择器返回的目录**（这条就是「打开目录失效」的回归网）。
+  `cargo test -p photo-ui` 111→**113**（`picker_order` 桌面优先序 + `parse_picker_output` 取值/空输出）；
+  `cargo check --workspace --all-targets` 0 warning；`stats_smoke` / `export_smoke` / `batch_ops_smoke` 回归全过。
+  **未在真机 KDE 上手点验证**：本地只有「真总线卡死 / 死总线兜底出框」两条对照证据，真对话框要用户点一次确认。
+
+- **2026-09-25 feat(photo-ui)：导入弹窗把左栏来源合并成顶部来源条 —— 审阅区拿回整幅宽度**：
+  用户看导入弹窗说「左边的空间合并到最顶上」。原布局是 LR 式一屏三列：左栏 240px 竖排
+  「来源 / 当前来源 / 不搬运只看」三张卡片，但卡片下面大半是空白，审阅网格反被挤掉约两列。
+  做法：删掉左栏，标题下方加一条**整宽的来源条**（`render_source_bar`）——**一行约 40px**：
+  可移动盘 chip、当前来源路径（占满中间、太长省略）、三个动作按钮（浏览 / 重新扫描 / 仅添加并浏览）。
+  `review_grid_metrics` 的可用宽度不再减 `LEFT_COL_W`（同宽弹窗下审阅网格多排约两列），该常量删除。
+  手册 §10.2 表格与 §10.3 已同步（一屏三列 → 顶部来源条 + 两列）。
+  **第二轮按用户反馈瘦身**：第一版做成了三张等高卡片（合计约 145px），还带着「来源 / 当前来源 /
+  不搬运只看」三个小标题和一句「直接把来源目录打开到网格里浏览（递归），不动任何文件」；用户回
+  「搞那么大干啥，缩小啊。文字精简」——于是压成上面这一行：三个小标题全删（路径与按钮自带语义），
+  说明句收进按钮 tooltip，连「已扫描 N 个文件」也删（分诊条已有各类计数），只服务于大卡片的
+  `bar_card` / `hint_line` 两个 helper 一并删掉。
+  **验证**：GPUI 无头截图目检（临时 example 打开弹窗 + `import -window root`，用完即删）——
+  1400×900 窗口与 950×720 窗口（弹窗被夹到最小 900px）两档都无溢出、三个动作都完整；
+  `cargo test -p photo-ui` 110→**111**（新增 `test_review_grid_fills_available_width`：900–1600px
+  各档下「列数 × 边长 + 间距」必须正好等于可用宽度——钉住那一对公式同步，以后再加/减一列或改
+  右栏宽度时，忘了改另一边就会露白或溢出）；`stats_smoke` 15 项全过（导入弹窗视口 **549**）。
+  **顺带修好一条早就红了的冒烟**：`stats_smoke` 的「右栏照片记录扩到 36 条 / 照片网格滚动条」
+  自 `62e561c` 起就是红的——那笔提交给 `select_stats_species` 加了「源文件已失踪的索引行不进列表」
+  的过滤，而这个 fixture 一直用**不存在的** `syn_*.jpg` 当占位 tile，34 条被整批滤掉、滚动范围恒为 0。
+  现改为在 `dir/syn/` 下真的写 34 张图（放子目录，避开主目录的单层扫描），收尾把两个文件夹的索引行
+  一起清掉。这条与上面的布局改动无关，是核对回归时发现的。
+
+- **2026-09-25 fix(photo-ui)：多选删除后「所有图片都不显示了」—— 重扫丢掉了当前视图的递归模式**：
+  用户报「我多选删除完成后，直接所有图片都不显示了，我是用导入然后选择仅仅添加并浏览的方式打开的」。
+  **根因**：导入弹窗的「仅添加并浏览」走 `open_source_in_grid` → `start_scan(source, true)`，是**显式递归**
+  的视图；而删除 / 撤销 / F5 / 批量操作后的重扫一律读 `AppConfig.include_subdirectories`（默认单层）。
+  照片都在来源目录的子目录里（卡上的 DCIM/100_xxx 这种），退回单层扫描后顶层一张都匹配不上 → 列表变空。
+  **文件没丢**（回收站只收了选中的那几张），纯粹是「视图模式被一次操作改掉了」。
+  **修法**：① `AppState.scan_recursive` 记录当前视图的扫描模式（`start_scan` 每次写入），
+  `include_subdirectories` 降级为「打开新目录时的默认值」；② 所有「重扫当前视图」的路径改用它
+  ——删除后（`delete_paths`，本 bug 的直接原因）、Ctrl+Z 撤销后、F5（`Rescan`）、批量复制/移动/删除的
+  作用域重扫、重命名作用域重扫；③ 顺带修掉设置页「包含递归子目录」开关里 `start_scan(entity, dir, true, cx)`
+  的**硬编码 true**——关掉开关也还是递归扫，开关看起来失灵（改成传 `val`）。打开新目录的入口
+  （启动恢复、左栏文件树、Ctrl+O、统计跳转、设置开关）继续按配置决定。
+  **验证（先红后绿）**：`rescan_smoke` 5→**12 项**——递归视图被记录 / F5 保持模式 /
+  **删掉顶层那张后重扫仍显示子目录里那张**（把 `delete_paths` 那行改回读配置重跑，实测列表是 `[]`、
+  3 项失败，正是用户看到的现象）/ 删除后的重扫不把模式降级 / Ctrl+Z 后仍递归 / 按新值重扫回单层 /
+  失踪文件剔除 + 预览槽位清理。回归：`cargo test -p photo-ui` **110 项**、
+  `cargo check --workspace --all-targets` 0 warning、`batch_ops_smoke` 25 项、`context_menu_smoke` 31 项、
+  `duplicates_smoke` 25 项全过。**未验证**：设置页那个开关只做了类型检查 + 代码评审（没有冒烟去点 switch），
+  `val` 的接线是一行改动。
+
+- **2026-09-25 fix(photo-ui)：批量选中后右键菜单只对一张生效 —— 动作分发把多选塌成了单选**：
+  用户截图报「批量选择照片后很多的右键菜单又是只针对一张图片起效，比如识别，比如移动到回收站」。
+  **根因**：右键处理器本身是对的（命中项已在选中集里就保留多选），但点击菜单项后的
+  `engine_ops::apply_context_menu_action` **无条件 `state.select_single(命中项)`**——多选在动作分发
+  的第一步就被塌成 1 张，而旗标/评分/识别/删除全都按 `mark_indices()`（网格/预览态 = 选中集）取作用域，
+  于是「选中 5 张 → 右键识别」只识别 1 张，「移至回收站」的确认框也只报 1 张（弹窗文案「选中的 N 张」
+  里的 N 跟着变 1）。**修法三处**：① `AppState::focus_selection_on`（命中项在选中集里 → **保留整批多选**，
+  只把 anchor 移到命中项；不在选中集里 → 单选到它）取代无条件 `select_single`，网格/胶片条右键也改走它
+  ——anchor 必须跟着走，否则「在预览中打开」「复制图片到剪贴板」这类只作用于一张的动作会落到
+  anchor ?? 末尾那张（点谁却动谁）；② 单张动作显式按**命中路径**取图（复制图片不再读
+  `primary_selected_meta`），「复制文件路径」多选时复制整个选中集（一行一个）；③ 菜单文案随作用域变
+  （`AppState::context_menu_scope_count` → `photo_menu_items(in_preview, affected)`）：单选仍是
+  「识别这一张」「评 5 星」，多选说「识别选中的 3 张」「评 5 星（3 张）」——只修行为不改文案，
+  单选字面在多选下就是假话。顺带把 `ContextMenuAction::RecognizeThis` 更名 `Recognize`（它从来就是按
+  `mark_indices()` 取作用域的）。
+  **验证**：`cargo test -p photo-ui` 109→**110**（新增 `test_photo_menu_items_labels_scale_with_selection_scope`：
+  单选 / 多选 / affected=0 兜底三档文案）；`context_menu_smoke` 21→**31 项** ALL PASS，新增的 10 项是
+  端到端回归——批量选中 3 张后右键：菜单作用域 = 3、文案说「识别选中的 3 张」、Pick 写进整批 3 张、
+  **多选不被塌成单选**、回收站确认框口径 = 3 张、确认后 3 张一起进回收站、Ctrl+Z 3 张一起恢复；
+  `a11y_smoke` 21 项、`batch_ops_smoke` 25 项回归全过。**未验证**：真实鼠标右键的 UI 路径没注入事件
+  （冒烟走的是 `open_photo_context_menu` + `run_context_menu_action`，与点击/回车同一条分发），
+  标签与作用域的对应由纯逻辑单测 + 冒烟两侧钉住。**另**：本文档上面「无头冒烟」清单里
+  `context_menu_smoke` 一直写的是 20 项，实际改动前是 21 项（这次一并核对了）。
 
 - **2026-09-24 feat(photo-recognize/photo-config/photo-ui)：地区设置 —— 识别候选按「省级鸟种分布」裁剪（todo #19）**：
   用户报「我本地没有这个鸟也给我推荐了这个结果」。中国包是**全国**硬先验，别省的鸟会被全国推荐。

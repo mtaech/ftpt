@@ -703,9 +703,10 @@ impl Render for AppState {
             }))
             .on_action(cx.listener(|this, _: &Rescan, _window, cx| {
                 if let Some(dir) = this.current_dir.clone() {
-                    // 递归与否跟配置走：以前这里硬编码 false，用户报「刷新后列表不对」——
-                    // 开了「包含子目录」的目录，一按 F5 就退回单层扫描。
-                    let recursive = this.app_config.include_subdirectories;
+                    // 递归与否跟**当前视图的扫描模式**走（start_scan 记录）：以前这里硬编码
+                    // false，用户报「刷新后列表不对」；改成读配置后又漏了另一半——导入的
+                    // 「仅添加并浏览」是显式递归的视图，读配置（默认单层）会把列表刷空。
+                    let recursive = this.scan_recursive;
                     let entity = cx.entity().clone();
                     defer_entity_action(cx, entity, move |entity, cx| {
                         start_scan(entity, dir, recursive, cx);
@@ -755,7 +756,8 @@ impl Render for AppState {
                     };
                     this.set_status_message(msg);
                     if let Some(dir) = this.current_dir.clone() {
-                        let recursive = this.app_config.include_subdirectories;
+                        // 撤销后的重扫同样保持当前视图模式（撤销可能恢复的是子目录里的照片）
+                        let recursive = this.scan_recursive;
                         let entity = cx.entity().clone();
                         defer_entity_action(cx, entity, move |entity, cx| {
                             start_scan(entity, dir, recursive, cx);
@@ -769,26 +771,18 @@ impl Render for AppState {
             .on_action(cx.listener(|this, _: &CopyImage, _window, cx| {
                 this.copy_current_image_to_clipboard(cx);
             }))
-            .on_action(cx.listener(|_this, _: &OpenDirectory, _window, cx| {
-                cx.spawn(
-                    |weak_entity: gpui_kit::WeakEntity<AppState>,
-                     async_cx: &mut gpui_kit::AsyncApp| {
-                        let async_app = async_cx.clone();
-                        async move {
-                            if let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await {
-                                let path = folder.path().to_path_buf();
-                                let _ = async_app.update(|cx| {
-                                    if let Some(entity) = weak_entity.upgrade() {
-                                        let recursive =
-                                            entity.read(cx).app_config.include_subdirectories;
-                                        start_scan(entity, path, recursive, cx);
-                                    }
-                                });
-                            }
-                        }
+            .on_action(cx.listener(|_this, _: &OpenDirectory, window, cx| {
+                // 目录对话框统一走 folder_picker：Linux 上 rfd 的 portal 后端在 GPUI
+                // executor 上会**静默卡死**（请求根本到不了 portal，也不走 rfd 自带的兜底），
+                // 表现就是「打开目录」点了没反应——详见 folder_picker 模块文档。
+                crate::state::folder_picker::pick_folder_async(
+                    window,
+                    cx,
+                    |entity, _window, cx, path| {
+                        let recursive = entity.read(cx).app_config.include_subdirectories;
+                        start_scan(entity, path, recursive, cx);
                     },
-                )
-                .detach();
+                );
             }))
             // ── 1. 自绘标题栏（36px）：仅当窗口是客户端装饰时。
             // 系统已经画了标题栏（服务端装饰）就不要再画一条，避免两条标题栏。

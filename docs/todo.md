@@ -309,6 +309,15 @@
      随后的「扫描完成…」顶掉，用户看不到「Ctrl+Z 可撤销」）。
    验证：`ops`/`undo` 新增 8 个单测（engine 191→**199**）；新冒烟 `batch_ops_smoke`
    **25 项全过**（含「确认后进回收站 → Ctrl+Z 真恢复」「移动/复制/重命名各自撤销」）。
+   **后续修复（2026-09-25，用户报「多选删除完成后所有图片都不显示了」）**：删除 / 撤销 / F5 / 批量操作
+   后的重扫一律读 `AppConfig.include_subdirectories`（默认单层），而导入弹窗的「仅添加并浏览」是
+   **显式递归**的视图（`start_scan(dir, true)`）——删除后重扫退回单层，子目录里的照片一张都匹配不上，
+   列表看起来全空（文件其实还在盘上，回收站只收了选中的那几张）。做法：`AppState.scan_recursive`
+   记录当前视图模式（`start_scan` 每次写入），上述重扫一律用它；`include_subdirectories` 降级为
+   「打开新目录时的默认值」。顺带修掉设置页开关里 `start_scan(entity, dir, true, cx)` 的硬编码 true
+   （关掉开关也还是递归扫，开关看起来失灵）。验证：`rescan_smoke` 5→**12 项**（bug 重现时
+   「删掉顶层那张后重扫」断言拿到的是 `[]`）；`batch_ops_smoke` / `context_menu_smoke` /
+   `duplicates_smoke` 回归全过。
 3. ✅ **镜头 / 物种多选筛选器已建出来**（2026-09-24）。原条目写「无方向键导航」，
    实际 GPUI 版**连这两个控件都没有**（`FilterCriteria.lens_filter` / `taxon_names`
    一直没有任何 UI 入口）。本轮直接用了 gpui-component 的 **Combobox**（多选 + 可搜索 +
@@ -332,12 +341,24 @@
      的 track_scroll + Scrollbar，贴边时往回收）；点击与悬停同步高亮
    - app.rs：根视图 `on_key_down` 处理 Up/Down/Enter（根视图持有焦点，菜单不抢焦点）；
      Esc 走 `handle_escape` 第 0 优先级
-   - `engine_ops::apply_context_menu_action`：点击与回车共用一条分发——先选中命中照片，
+   - `engine_ops::apply_context_menu_action`：点击与回车共用一条分发——先定位命中照片
+     （**命中项已在选中集里就保留整批多选**，只把主选中移到它身上；否则单选到它），
      再 打开预览 / 复制图片 / 复制路径 / 打开所在文件夹 / Pick / Reject / 清旗标 / 评 5 星 /
-     识别这一张 / 移至回收站（只弹确认框）；目标已不在目录时诚实报错、不误伤别的照片
+     识别 / 移至回收站（只弹确认框）；目标已不在目录时诚实报错、不误伤别的照片
    - 网格 cell、胶片条缩略图、预览三处都接上右键
-   验证：新增 `context_menu_smoke` **20 项**全过（含「10 项超过最大高**真的产生滚动范围**
+   验证：新增 `context_menu_smoke`（含「10 项超过最大高**真的产生滚动范围**
    max_offset 50px」「上下移动跳过置灰项且不环绕」「回收站只弹确认框且文件未动」）。
+   **后续修复（2026-09-25，用户报「批量选中后右键菜单还只对一张生效」）**：上面这条当初写成
+   「先选中命中照片」，实现成了无条件 `select_single`——多选在分发的第一步被塌成 1 张，而旗标/评分/
+   识别/删除都按 `mark_indices()`（= 选中集）取作用域，于是「选中 5 张 → 右键识别」只识别 1 张、
+   回收站确认框也只报 1 张。现改为 `AppState::focus_selection_on`：命中项在选中集里就保留多选、
+   只移动 anchor（否则预览/复制图片会落到 anchor ?? 末尾那张，点谁却动谁）；单张动作按命中路径取图，
+   「复制文件路径」多选时复制整个选中集；菜单文案随作用域变（`photo_menu_items(in_preview, affected)`
+   → 「识别选中的 3 张」「评 5 星（3 张）」，单选字面不变）。验证：`cargo test -p photo-ui` 109→**110**
+   （新增 `test_photo_menu_items_labels_scale_with_selection_scope`）；`context_menu_smoke` 21→**31 项**
+   ALL PASS（新增 10 项端到端：作用域 = 3 / 文案 / Pick 写进整批 3 张 / 多选不被塌成单选 /
+   确认框口径 = 3 张 / 确认后 3 张一起进回收站 / Ctrl+Z 一起恢复）；`a11y_smoke` 21 项、
+   `batch_ops_smoke` 25 项回归全过。
    **同条的「网格无表格语义」也已做完**（2026-09-24，见下方「无障碍语义」段）。
    **无障碍语义（#13.4 后半，2026-09-24 补完）**：先更正我之前的判断——GPUI（gpui-pre 0.3.4）
    **有完整的 AccessKit API**（`role` / `aria_label` / `aria_selected` /

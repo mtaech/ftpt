@@ -17,7 +17,8 @@ pub enum ContextMenuAction {
     SetReject,
     ClearFlag,
     RateFive,
-    RecognizeThis,
+    /// 识别命中/选中的照片（作用域 = AppState::mark_indices()：多选时整批，与键盘 R 同口径）
+    Recognize,
     MoveToTrash,
 }
 
@@ -29,9 +30,9 @@ pub struct MenuItem {
     pub disabled: bool,
 }
 
-fn item(label: &str, action: ContextMenuAction, disabled: bool) -> MenuItem {
+fn item(label: impl Into<String>, action: ContextMenuAction, disabled: bool) -> MenuItem {
     MenuItem {
-        label: label.to_string(),
+        label: label.into(),
         action,
         disabled,
     }
@@ -39,19 +40,52 @@ fn item(label: &str, action: ContextMenuAction, disabled: bool) -> MenuItem {
 
 /// 照片右键菜单项。10 项是有意的：菜单最大高 240px、每项 28px——超过 8 项就会
 /// 真的出现滚动条（§13.4 要求「有最大高度、能滚」），否则滚动这条永远测不到。
-/// `in_preview` 时「在预览中打开」置灰（已经在预览里了）。
-pub fn photo_menu_items(in_preview: bool) -> Vec<MenuItem> {
+///
+/// - `in_preview`：已经在预览里 → 「在预览中打开」置灰（仍占位，菜单项位置稳定）。
+/// - `affected`：**这一份菜单上的批量动作会作用于几张照片**——命中项已在选中集里时
+///   = 选中集张数，否则 1（见 AppState::context_menu_scope_count）。
+///
+/// 多选时文案必须自己说出作用域（「评 5 星（3 张）」「识别选中的 3 张」）。用户报过
+/// 「批量选中后右键菜单还只对一张生效」：那次根因是动作分发把多选塌成了单选；但如果
+/// 只修行为不改文案，「识别这一张」在 3 张被选中时就成了假话。只作用于**命中那一张**的
+/// 动作（预览 / 复制图片 / 打开所在文件夹）文案恒定——剪贴板一次也只装得下一张图。
+pub fn photo_menu_items(in_preview: bool, affected: usize) -> Vec<MenuItem> {
+    let affected = affected.max(1);
+    let batch = affected > 1;
+    let scope = |base: &str| {
+        if batch {
+            format!("{base}（{affected} 张）")
+        } else {
+            base.to_string()
+        }
+    };
     vec![
         item("在预览中打开", ContextMenuAction::OpenPreview, in_preview),
         item("复制图片到剪贴板", ContextMenuAction::CopyImage, false),
-        item("复制文件路径", ContextMenuAction::CopyPath, false),
+        item(
+            if batch {
+                format!("复制 {affected} 个文件路径")
+            } else {
+                "复制文件路径".to_string()
+            },
+            ContextMenuAction::CopyPath,
+            false,
+        ),
         item("打开所在文件夹", ContextMenuAction::OpenFolder, false),
-        item("标识为 Pick", ContextMenuAction::SetPick, false),
-        item("标为 Reject", ContextMenuAction::SetReject, false),
-        item("清除旗标", ContextMenuAction::ClearFlag, false),
-        item("评 5 星", ContextMenuAction::RateFive, false),
-        item("识别这一张", ContextMenuAction::RecognizeThis, false),
-        item("移至回收站…", ContextMenuAction::MoveToTrash, false),
+        item(scope("标识为 Pick"), ContextMenuAction::SetPick, false),
+        item(scope("标为 Reject"), ContextMenuAction::SetReject, false),
+        item(scope("清除旗标"), ContextMenuAction::ClearFlag, false),
+        item(scope("评 5 星"), ContextMenuAction::RateFive, false),
+        item(
+            if batch {
+                format!("识别选中的 {affected} 张")
+            } else {
+                "识别这一张".to_string()
+            },
+            ContextMenuAction::Recognize,
+            false,
+        ),
+        item(scope("移至回收站…"), ContextMenuAction::MoveToTrash, false),
     ]
 }
 
@@ -142,14 +176,45 @@ mod tests {
     #[test]
     fn test_photo_menu_items_has_scrollable_size_and_preview_gate() {
         // 10 项 × 28px > 240px 最大高 → 保证「最大高度滚动」这条有真实的滚动场景
-        let items = photo_menu_items(false);
+        let items = photo_menu_items(false, 1);
         assert_eq!(items.len(), 10);
         assert!(items.iter().all(|i| !i.disabled), "不在预览里时每项都可用");
 
         // 已经在预览里 → 「在预览中打开」置灰，但仍然占位（菜单项位置稳定）
-        let in_preview = photo_menu_items(true);
+        let in_preview = photo_menu_items(true, 1);
         assert!(in_preview[0].disabled);
         assert!(!in_preview[1].disabled);
+    }
+
+    /// 多选时批量动作的文案必须说出作用域，单选时保持原来的字面（用户报过
+    /// 「批量选中后右键菜单只对一张生效」——行为修了，文案也得跟着说清楚）
+    #[test]
+    fn test_photo_menu_items_labels_scale_with_selection_scope() {
+        let single = photo_menu_items(false, 1);
+        assert_eq!(single[2].label, "复制文件路径");
+        assert_eq!(single[4].label, "标识为 Pick");
+        assert_eq!(single[8].label, "识别这一张");
+        assert_eq!(single[9].label, "移至回收站…");
+
+        let batch = photo_menu_items(false, 3);
+        assert_eq!(batch.len(), 10);
+        assert_eq!(batch[2].label, "复制 3 个文件路径");
+        assert_eq!(batch[4].label, "标识为 Pick（3 张）");
+        assert_eq!(batch[5].label, "标为 Reject（3 张）");
+        assert_eq!(batch[6].label, "清除旗标（3 张）");
+        assert_eq!(batch[7].label, "评 5 星（3 张）");
+        assert_eq!(batch[8].label, "识别选中的 3 张");
+        assert_eq!(batch[9].label, "移至回收站…（3 张）");
+
+        // 只作用于命中那一张的动作：文案恒定（剪贴板一次只装得下一张图）
+        assert_eq!(batch[0].label, "在预览中打开");
+        assert_eq!(batch[1].label, "复制图片到剪贴板");
+        assert_eq!(batch[3].label, "打开所在文件夹");
+
+        // affected = 0 是调用方的口径错误：兜底成单选文案，绝不能出现「0 张」
+        let zero = photo_menu_items(false, 0);
+        assert_eq!(zero[8].label, "识别这一张");
+        assert!(!zero[4].label.contains('0'));
     }
 
     #[test]

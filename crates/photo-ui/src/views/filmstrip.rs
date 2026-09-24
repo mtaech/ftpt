@@ -71,9 +71,8 @@ pub fn render_filmstrip(
                         MouseButton::Right,
                         cx.listener(
                             move |state, event: &gpui_kit::MouseDownEvent, _window, cx| {
-                                if !state.selected_indices.contains(&item_idx) {
-                                    state.select_single(item_idx);
-                                }
+                                // 命中项已在选中集里 → 保留整批多选，只把主选中移到它身上
+                                state.focus_selection_on(item_idx);
                                 let path = state
                                     .items
                                     .get(item_idx)

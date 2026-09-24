@@ -414,6 +414,14 @@ pub struct AppState {
     pub scan_done: u32,
     pub scan_total: u32,
     pub scan_cancel: Arc<AtomicBool>,
+    /// 当前视图的扫描模式（递归与否），由 start_scan 记录，**不复读配置**。
+    ///
+    /// 为什么要有它：include_subdirectories 只是「打开新目录时的默认值」；导入的
+    /// 「仅添加并浏览」等入口会显式递归扫描（弹窗上写着「递归」）。而删除 / 撤销 /
+    /// 批量操作 / F5 后的重扫以前一律读配置——于是「递归打开、配置未勾」的视图在一次
+    /// 操作后被退回单层扫描，子目录里的照片全部从列表里消失（用户报的「多选删除后
+    /// 所有图片都不显示了」就是这个）。
+    pub scan_recursive: bool,
 
     // ── 缩略图后台生成管线（§7.1）──
     pub thumb_done: usize,
@@ -1136,6 +1144,8 @@ impl AppState {
         let right_panel_width = app_config.right_panel_width.clamp(200, 480) as f32;
 
         let global_db = data_root().and_then(|r| GlobalDb::open(&r.join("data")).ok());
+        // 视图扫描模式的初值 = 配置默认（真正权威的值由 start_scan 每次记录）
+        let scan_recursive = app_config.include_subdirectories;
 
         Self {
             settings_tab: SettingsTab::General,
@@ -1246,6 +1256,7 @@ impl AppState {
             scan_done: 0,
             scan_total: 0,
             scan_cancel: Arc::new(AtomicBool::new(false)),
+            scan_recursive,
 
             thumb_done: 0,
             thumb_total: 0,
@@ -1521,6 +1532,56 @@ impl AppState {
 
     // ── 右键菜单（§13.4）──
 
+    /// 把「主选中」定位到右键命中的照片，但**保留多选**。
+    ///
+    /// 右键动作分发以前无条件 select_single(命中项)：批量选中 5 张后右键其中一张点
+    /// 「识别 / 移至回收站 / 旗标」，作用域被塌成 1 张（用户报的 bug）。正确语义与
+    /// 资源管理器一致——命中项已在选中集里 → 整个选中集照旧，只把 anchor 移到它身上；
+    /// 不在选中集里 → 单选到它。anchor 必须跟着走，否则「在预览中打开」「复制图片到
+    /// 剪贴板」这类只作用于一张的动作会落到选中集里另一张（anchor ?? 末尾）身上。
+    pub fn focus_selection_on(&mut self, item_idx: usize) {
+        if self.selected_indices.contains(&item_idx) {
+            self.anchor_index = Some(item_idx);
+        } else {
+            self.select_single(item_idx);
+        }
+    }
+
+    /// 右键菜单上**批量动作会作用于几张照片**：命中项已在选中集里 = 整个选中集，
+    /// 否则 1。必须与 apply_context_menu_action 实际作用范围一致——动作走
+    /// mark_indices()（网格/预览态 = 选中集），菜单文案按这个数生成。
+    pub fn context_menu_scope_count(&self, target: &str) -> usize {
+        let Some(idx) = self.items.iter().position(|m| m.primary_path == target) else {
+            return 1;
+        };
+        if self.selected_indices.contains(&idx) {
+            self.mark_indices().len().max(1)
+        } else {
+            1
+        }
+    }
+
+    /// 右键「复制文件路径」要复制的路径：命中项在选中集里且多选 → 整个选中集
+    /// （按显示顺序，一行一个）；否则只有命中那一张。
+    pub fn context_menu_paths(&self, target: &str) -> Vec<String> {
+        let Some(idx) = self.items.iter().position(|m| m.primary_path == target) else {
+            return vec![target.to_string()];
+        };
+        if !self.selected_indices.contains(&idx) {
+            return vec![target.to_string()];
+        }
+        let mut paths: Vec<String> = self
+            .display_order
+            .iter()
+            .filter(|i| self.selected_indices.contains(i))
+            .filter_map(|&i| self.items.get(i).map(|m| m.primary_path.clone()))
+            .collect();
+        if paths.is_empty() {
+            paths.push(target.to_string());
+        }
+        paths
+    }
+
     /// 打开照片右键菜单（x/y 是**窗口坐标**，与 MouseDownEvent.position 同口径）。
     pub fn open_photo_context_menu(
         &mut self,
@@ -1530,7 +1591,9 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         use crate::model::context_menu::{initial_selection, photo_menu_items};
-        let items = photo_menu_items(self.view_mode == ViewMode::Preview);
+        // 命中的照片若已在选中集里，菜单上的批量动作就是对整批生效——文案随之变化
+        let affected = self.context_menu_scope_count(&target);
+        let items = photo_menu_items(self.view_mode == ViewMode::Preview, affected);
         self.context_menu = Some(PhotoContextMenu {
             x,
             y,

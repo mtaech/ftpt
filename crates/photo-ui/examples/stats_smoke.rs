@@ -235,10 +235,25 @@ fn main() {
                 );
 
                 // ── 5b) 滚动条（docs/todo.md #4）：统计页两处列表真的有滚动范围 ──
-                // 右栏照片网格：补 34 条记录（文件不存在 → 占位 tile）撑出纵向溢出；
-                // 左栏排行榜：补 30 个物种（各 1 条）。两条列表此前都是裸 overflow_y_scroll。
+                // 右栏照片网格：补 34 条记录撑出纵向溢出；左栏排行榜：补 30 个物种（各 1 条）。
+                // 两条列表此前都是裸 overflow_y_scroll。
+                // **这 34 条的源文件必须真实存在**：select_stats_species 会过滤「磁盘上已失踪」
+                // 的索引行（外部删除 / 盘没挂载）。这条过滤是 62e561c 加的，而这个 fixture 一直
+                // 用不存在的 syn_*.jpg 当占位 tile——加上过滤后 34 条被全数剔掉，滚动范围恒为 0，
+                // 冒烟自那时起就是红的（2026-09-25 核对发现，与本次改动无关）。
+                // 放在子目录 syn/ 里：主目录是单层扫描，不会把这 34 张扫进 items。
+                let syn_dir = dir.join("syn");
+                std::fs::create_dir_all(&syn_dir).expect("建占位素材目录失败");
+                for i in 0..34 {
+                    write_jpeg(&syn_dir.join(format!("syn_{i}.jpg")), (200, 200, 120));
+                }
+                let syn_folder = syn_dir.to_string_lossy().to_string();
                 let extra_photos: Vec<SpeciesRow> = (0..34)
-                    .map(|i| mk_row(&format!("syn_{i}.jpg"), 70.0))
+                    .map(|i| {
+                        let mut row = mk_row(&format!("syn_{i}.jpg"), 70.0);
+                        row.folder = syn_folder.clone();
+                        row
+                    })
                     .collect();
                 let extra_species: Vec<SpeciesRow> = (0..30)
                     .map(|i| {
@@ -342,13 +357,12 @@ fn main() {
                 });
                 pump(async_cx, 200).await;
 
-                // ── 6) 清理：清掉写入的全局索引行 ──
+                // ── 6) 清理：清掉写入的全局索引行（两个文件夹都要清）──
                 let _ = async_cx.update(|cx| {
-                    let _ = task_state
-                        .read(cx)
-                        .global_db
-                        .as_ref()
-                        .map(|g| g.delete_folder_rows(&folder_s));
+                    let _ = task_state.read(cx).global_db.as_ref().map(|g| {
+                        let _ = g.delete_folder_rows(&folder_s);
+                        let _ = g.delete_folder_rows(&syn_folder);
+                    });
                 });
 
                 if failures == 0 {

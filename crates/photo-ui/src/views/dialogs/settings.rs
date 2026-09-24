@@ -431,8 +431,10 @@ fn build_general_page(
                                                 cx,
                                                 entity,
                                                 move |entity, cx| {
+                                                    // 用**开关的新值**重扫：以前这里硬编码 true，
+                                                    // 关掉「包含递归子目录」也还是递归扫，开关像失灵
                                                     crate::state::engine_ops::start_scan(
-                                                        entity, dir, true, cx,
+                                                        entity, dir, val, cx,
                                                     );
                                                 },
                                             );

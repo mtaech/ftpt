@@ -2,6 +2,7 @@
 
 pub mod app_state;
 pub mod engine_ops;
+pub mod folder_picker;
 pub mod import;
 
 pub use app_state::{ActiveDialog, AppState, SettingsTab, ViewMode};

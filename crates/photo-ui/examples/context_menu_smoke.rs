@@ -17,6 +17,10 @@
 //!      真正需要滚动时的高度/滚动判据由 model::context_menu 的纯逻辑单测覆盖
 //!   7) 目标已不在目录时诚实报错，不默默作用到别的照片
 //!   8) 菜单开着渲染多帧不 panic
+//!   9) **批量选中后右键：批量动作作用于整批**（用户报过「批量选择后右键菜单还是只对一张
+//!      生效，比如识别、比如移到回收站」）。根因：动作分发无条件 select_single(命中项)，
+//!      把多选塌成了单选。这里钉住：菜单文案说出作用域 / Pick 写进整批 3 张 / 多选不被
+//!      塌掉 / 确认框口径 = 3 张 / 确认后 3 张一起进回收站 / Ctrl+Z 一起恢复
 
 use std::path::Path;
 use std::time::Duration;
@@ -24,9 +28,9 @@ use std::time::Duration;
 use gpui_kit::{AppContext as _, Bounds, Point, WindowBounds, WindowOptions, px, size};
 use photo_domain::Flag;
 
-use photo_ui::actions::Rescan;
+use photo_ui::actions::{Rescan, Undo};
 use photo_ui::model::context_menu::ContextMenuAction;
-use photo_ui::state::{ActiveDialog, AppState};
+use photo_ui::state::{ActiveDialog, AppState, engine_ops};
 use photo_ui::views::run_context_menu_action;
 
 async fn pump(async_cx: &mut gpui_kit::AsyncApp, ms: u64) {
@@ -344,6 +348,133 @@ fn main() {
                     "菜单渲染多帧不 panic 且仍打开",
                     read_state!(|s: &AppState| s.context_menu.is_some())
                 );
+
+                // ── 9) 批量选中后右键：批量动作必须作用于整批（用户报的 bug）──
+                // 此前 apply_context_menu_action 无条件 select_single(命中项)，把「选中 3 张」
+                // 塌成 1 张——识别只识别一张、回收站只删一张。正确语义（资源管理器口径）：
+                // 命中项在选中集里就保留整批多选，只把主选中(anchor)移到命中项。
+                let batch_target = read_state!(|s: &AppState| s.items[1].primary_path.clone());
+                async_cx.update(|cx| {
+                    task_state.update(cx, |state, cx| {
+                        state.active_dialog = None;
+                        state.context_menu = None;
+                        state.select_all();
+                        state.open_photo_context_menu(300.0, 300.0, batch_target.clone(), cx);
+                    });
+                });
+                pump(async_cx, 250).await;
+                let (scope, recognize_label, pick_label) = read_state!(|s: &AppState| {
+                    let m = s.context_menu.as_ref().expect("菜单应已打开");
+                    (
+                        s.context_menu_scope_count(&batch_target),
+                        m.items[8].label.clone(),
+                        m.items[4].label.clone(),
+                    )
+                });
+                check!(
+                    format!("批量选中 3 张 -> 菜单作用域 = 3（实测 {scope}）"),
+                    scope == 3
+                );
+                check!(
+                    format!("菜单文案说出作用域（{recognize_label} / {pick_label}）"),
+                    recognize_label == "识别选中的 3 张" && pick_label == "标识为 Pick（3 张）"
+                );
+
+                // 旗标：整批 3 张都写进摘要，且多选本身不能被塌掉
+                async_cx.update(|cx| {
+                    task_state.update(cx, |state, cx| {
+                        run_context_menu_action(
+                            state,
+                            ContextMenuAction::SetPick,
+                            batch_target.clone(),
+                            cx,
+                        );
+                    });
+                });
+                pump(async_cx, 300).await;
+                let (picked_all, kept_selection) = read_state!(|s: &AppState| {
+                    (
+                        s.items.iter().filter(|m| m.flag == Some(Flag::Pick)).count(),
+                        s.selected_indices.len(),
+                    )
+                });
+                check!(
+                    format!("右键 Pick 写进整批 3 张（实测 {picked_all}）"),
+                    picked_all == 3
+                );
+                check!(
+                    format!("多选没有被塌成单选（实测 {kept_selection} 张）"),
+                    kept_selection == 3
+                );
+
+                // 移至回收站：确认框口径 = 选中张数（弹窗按钮走 delete_selected_to_trash）
+                async_cx.update(|cx| {
+                    task_state.update(cx, |state, cx| {
+                        state.open_photo_context_menu(300.0, 300.0, batch_target.clone(), cx);
+                        run_context_menu_action(
+                            state,
+                            ContextMenuAction::MoveToTrash,
+                            batch_target.clone(),
+                            cx,
+                        );
+                    });
+                });
+                pump(async_cx, 300).await;
+                let all_paths: Vec<String> =
+                    read_state!(|s: &AppState| s.items.iter().map(|m| m.primary_path.clone()).collect());
+                let (dialog, marks, files_before) = read_state!(|s: &AppState| {
+                    (
+                        s.active_dialog.clone(),
+                        s.mark_indices().len(),
+                        s.items
+                            .iter()
+                            .filter(|m| Path::new(&m.primary_path).exists())
+                            .count(),
+                    )
+                });
+                check!(
+                    format!("「移至回收站…（3 张）」只弹确认框（{dialog:?}）"),
+                    dialog == Some(ActiveDialog::DeleteConfirm)
+                );
+                check!(
+                    format!("确认框口径 = 选中 3 张（实测 {marks} 张）"),
+                    marks == 3
+                );
+                check!("确认之前 3 个文件都在盘上", files_before == 3);
+
+                // 确认删除（弹窗「确认删除」按钮走的就是这个函数）→ 3 张一起进回收站
+                async_cx.update(|cx| {
+                    task_state.update(cx, |s, _| s.active_dialog = None);
+                    engine_ops::delete_selected_to_trash(task_state.clone(), cx);
+                });
+                let mut all_gone = false;
+                for _ in 0..40 {
+                    pump(async_cx, 250).await;
+                    all_gone = all_paths.iter().all(|p| !Path::new(p).exists());
+                    if all_gone {
+                        break;
+                    }
+                }
+                check!(
+                    format!("确认后 3 张一起进回收站（{} 个路径）", all_paths.len()),
+                    all_gone && all_paths.len() == 3
+                );
+                check!(
+                    "撤销日志有记录（以前多选删除只记 1 条）",
+                    async_cx.update(|cx| task_state.read(cx).op_journal.has_pending())
+                );
+
+                // Ctrl+Z：3 张一起从回收站恢复
+                fire(async_cx, handle, Box::new(Undo));
+                let mut all_back = false;
+                for _ in 0..40 {
+                    pump(async_cx, 250).await;
+                    all_back = all_paths.iter().all(|p| Path::new(p).exists());
+                    if all_back {
+                        break;
+                    }
+                }
+                check!("Ctrl+Z 把 3 张一起从回收站恢复", all_back);
 
                 if failures == 0 {
                     println!("全部通过");

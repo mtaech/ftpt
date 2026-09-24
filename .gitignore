@@ -12,5 +12,8 @@ models/
 data/
 tmp_smoke/
 
+# 照片目录级缓存（缩略图 + folder_db：被扫描过的目录都会出现，含仓库根）
+.pt/
+
 # 运行时日志（exe 同级 logs/ 目录）
 logs/

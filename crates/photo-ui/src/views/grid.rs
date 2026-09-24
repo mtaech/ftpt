@@ -440,9 +440,8 @@ fn render_grid_cell(
             cx.listener(
                 move |state: &mut AppState, event: &gpui_kit::MouseDownEvent, _window, cx| {
                     let target = active_item_idx;
-                    if !state.selected_indices.contains(&target) {
-                        state.select_single(target);
-                    }
+                    // 命中项已在选中集里 → 保留整批多选，只把主选中移到它身上
+                    state.focus_selection_on(target);
                     let path = state
                         .items
                         .get(target)

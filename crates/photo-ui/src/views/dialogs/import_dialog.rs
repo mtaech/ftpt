@@ -1,7 +1,9 @@
-//! 导入弹窗（对应手册 §9.10 与 §10.3）——LR 式**一屏三列**：
+//! 导入弹窗（对应手册 §9.10 与 §10.3）——**顶部来源条 + 两列**：
 //!
-//! - 左：来源（可移动盘 / 浏览目录 / 重新扫描 / 仅添加不搬运）
-//! - 中：**审阅**（分诊条 + 类别过滤 + 全选/反选 + 缩略图网格，可放大看单张）
+//! - 顶：来源条（可移动盘 / 浏览目录 / 重新扫描 / 仅添加不搬运）横铺在标题下方。
+//!   来源是一次性决定（选完就去审阅），不需要常驻竖栏；原先的左栏竖排三张卡片，
+//!   卡片下面大半是空白，还白占了 240px 把审阅网格挤窄。
+//! - 左（主）：**审阅**（分诊条 + 类别过滤 + 全选/反选 + 缩略图网格，可放大看单张）
 //! - 右：目标根目录 + 目录与命名 + 冲突策略 + 文件处理 + 计划统计/跳过明细 + 执行结果
 //!
 //! 计划**实时重算**：任何选项/勾选变化都排一次 300ms 去抖重算，没有「生成计划」按钮；
@@ -33,9 +35,9 @@ use crate::state::AppState;
 use crate::state::engine_ops::defer_entity_action;
 use crate::state::import;
 
-/// 三列的固定宽度与中列内边距：审阅网格的可用宽度 = 弹窗宽 − 这些。
-/// 与两个栏的 `.w(px(..))`、中列 `.p_3()` 一一对应，改一处必须改两处。
-const LEFT_COL_W: f32 = 240.0;
+/// 右栏固定宽度与主列内边距：审阅网格的可用宽度 = 弹窗宽 − 这些。
+/// 与右栏的 `.w(px(..))`、审阅列的 `.p_3()` 一一对应，改一处必须改两处。
+/// （来源选择已合并到顶部来源条，不再占横向宽度——见 render_source_bar）
 const RIGHT_COL_W: f32 = 320.0;
 /// 中列左右 padding（p_3 = 12 × 2）
 const MIDDLE_PAD: f32 = 24.0;
@@ -46,7 +48,7 @@ const GRID_EDGE_HINT: f32 = 120.0;
 const SKIP_PREVIEW_LIMIT: usize = 40;
 /// 失败/警告清单的展示上限（同理由；计数仍是真实值，「重试失败项」不受影响）
 const ISSUE_PREVIEW_LIMIT: usize = 200;
-/// 弹窗最小尺寸（再小三个栏就挤成一团：左 240 + 右 320 + 中列至少两格）
+/// 弹窗最小尺寸（再小，右栏 + 审阅列 + 顶部来源条三段就挤成一团）
 const MIN_DIALOG_W: f32 = 900.0;
 const MIN_DIALOG_H: f32 = 520.0;
 /// 弹窗与窗口边缘的留白（可拖拽上限 = 窗口尺寸 − 这个值）
@@ -122,12 +124,12 @@ pub fn render_import_dialog(
                 .shadow(crate::theme::overlay_shadow())
                 .overflow_hidden()
                 .child(render_header(state, cx))
+                .child(render_source_bar(state, cx))
                 .child(
                     h_flex()
                         .w_full()
                         .flex_1()
                         .min_h_0()
-                        .child(render_source_column(state, cx))
                         .child(render_review_column(state, review_cols, review_edge, cx))
                         .child(render_options_column(state, cx)),
                 )
@@ -139,7 +141,7 @@ pub fn render_import_dialog(
 /// 审阅网格的列数与格子边长：按中列可用宽度摊平——弹窗拖大就多排几列，
 /// 而不是把格子摊在原地留一大片空白；拖窄也不会把格子挤成一条。
 fn review_grid_metrics(dialog_width: f32) -> (usize, f32) {
-    let avail = (dialog_width - LEFT_COL_W - RIGHT_COL_W - MIDDLE_PAD).max(180.0);
+    let avail = (dialog_width - RIGHT_COL_W - MIDDLE_PAD).max(180.0);
     let inner = (avail - 16.0).max(120.0); // 网格容器左右各 8px padding
     let cols = ((inner / (GRID_EDGE_HINT + 8.0)).floor() as usize).clamp(2, 8);
     let gap_total = cols.saturating_sub(1) as f32 * 8.0;
@@ -236,9 +238,13 @@ fn render_header(state: &AppState, cx: &mut Context<AppState>) -> AnyElement {
         .into_any_element()
 }
 
-// ── 左：来源 ─────────────────────────────────────────────────────────────
+// ── 顶部来源条（原左栏的「来源 / 当前来源 / 不搬运只看」合并成一行）──────────
 
-fn render_source_column(state: &AppState, cx: &mut Context<AppState>) -> AnyElement {
+/// 来源条：标题下方**一整行**（约 40px）——可移动盘 chip / 当前来源 / 三个动作。
+
+/// 为什么这么矮：来源是**一次性决定**（选完就去审阅），不需要常驻竖栏、也不需要三张
+/// 大卡片；说明性文字（「递归、不动文件」这类）收进按钮 tooltip，横向宽度整幅留给审阅。
+fn render_source_bar(state: &AppState, cx: &mut Context<AppState>) -> AnyElement {
     let drives = state.import.drives.clone();
     let source_text = state
         .import
@@ -246,124 +252,110 @@ fn render_source_column(state: &AppState, cx: &mut Context<AppState>) -> AnyElem
         .as_ref()
         .map(|p| p.to_string_lossy().to_string());
     let scanning = state.import.scanning;
-    let candidate_count = state.import.candidates.len();
 
-    v_flex()
-        .w(px(LEFT_COL_W))
-        .h_full()
+    h_flex()
+        .w_full()
         .flex_shrink_0()
-        .gap_3()
-        .p_3()
-        .border_r_1()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .py_2()
+        .border_b_1()
         .border_color(cx.theme().border)
-        .child(card(cx).child(card_title("来源", cx)).child(
-            if drives.is_empty() {
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("未检测到可移动磁盘或 SD 卡，请插入后重试，或手动浏览目录")
-                    .into_any_element()
-            } else {
-                v_flex()
-                    .w_full()
-                    .gap_1()
-                    .children(drives.into_iter().map(|drive| {
-                        let path = drive.path.clone();
-                        let label = drive.label.clone().unwrap_or_else(|| drive.path.clone());
-                        let selected = source_text.as_deref() == Some(path.as_str());
-                        let pick = path.clone();
-                        let row_id = SharedString::from(format!("import-drive-{path}"));
-                        h_flex()
-                            .id(row_id)
-                            .w_full()
-                            .p_2()
-                            .rounded(cx.theme().radius)
-                            .bg(if selected {
-                                cx.theme().selection
-                            } else {
-                                cx.theme().background
-                            })
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .items_center()
-                            .justify_between()
-                            .text_xs()
-                            .child(div().text_color(cx.theme().foreground).truncate().child(label))
-                            .on_click(cx.listener(move |_state, _, _window, cx| {
-                                let entity = cx.entity();
-                                import::set_source_and_scan(entity, PathBuf::from(pick.clone()), cx);
-                                cx.notify();
-                            }))
-                    }))
-                    .into_any_element()
-            },
-        ))
-        .child(
-            card(cx)
-                .child(card_title("当前来源", cx))
-                .child(
-                    div()
-                        .w_full()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(source_text.unwrap_or_else(|| "未选择来源".to_string())),
-                )
-                .child(
+        // 可移动盘：chip；一个都没有就一句灰字（不再占一整张卡片）
+        .child(if drives.is_empty() {
+            div()
+                .flex_shrink_0()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("未检测到可移动盘")
+                .into_any_element()
+        } else {
+            h_flex()
+                .min_w_0()
+                .gap_1()
+                .children(drives.into_iter().map(|drive| {
+                    let path = drive.path.clone();
+                    let label = drive.label.clone().unwrap_or_else(|| drive.path.clone());
+                    let selected = source_text.as_deref() == Some(path.as_str());
+                    let pick = path.clone();
+                    let row_id = SharedString::from(format!("import-drive-{path}"));
                     h_flex()
-                        .w_full()
-                        .gap_2()
+                        .id(row_id)
+                        .max_w(px(160.))
+                        .px_2()
+                        .py_1()
+                        .rounded(cx.theme().radius)
+                        .bg(if selected {
+                            cx.theme().selection
+                        } else {
+                            cx.theme().background
+                        })
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .items_center()
+                        .text_xs()
+                        .cursor_pointer()
                         .child(
-                            Button::new("import-browse-source")
-                                .small()
-                                .secondary()
-                                .label("浏览…")
-                                .disabled(scanning)
-                                .on_click(cx.listener(|_state, _, window, cx| {
-                                    import::pick_source(window, cx);
-                                })),
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(cx.theme().foreground)
+                                .child(label),
                         )
-                        .child(
-                            Button::new("import-rescan-source")
-                                .small()
-                                .ghost()
-                                .label(if scanning { "扫描中…" } else { "重新扫描" })
-                                .disabled(scanning || state.import.source.is_none())
-                                .on_click(cx.listener(|_state, _, _window, cx| {
-                                    let entity = cx.entity();
-                                    import::rescan(entity, cx);
-                                })),
-                        ),
-                )
-                .when(!scanning && candidate_count > 0, |this| {
-                    this.child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().primary)
-                            .child(format!("已扫描 {candidate_count} 个文件")),
-                    )
-                }),
+                        .on_click(cx.listener(move |_state, _, _window, cx| {
+                            let entity = cx.entity();
+                            import::set_source_and_scan(entity, PathBuf::from(pick.clone()), cx);
+                            cx.notify();
+                        }))
+                }))
+                .into_any_element()
+        })
+        // 当前来源：占满中间，太长省略
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .truncate()
+                .child(source_text.unwrap_or_else(|| "未选择来源".to_string())),
         )
         .child(
-            card(cx)
-                .child(card_title("不搬运，只看", cx))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("直接把来源目录打开到网格里浏览（递归），不动任何文件。"),
-                )
-                .child(
-                    Button::new("import-add-dir")
-                        .small()
-                        .ghost()
-                        .icon(IconName::FolderOpen)
-                        .label("仅添加并浏览")
-                        .disabled(scanning || state.import.source.is_none())
-                        .on_click(cx.listener(|_state, _, _window, cx| {
-                            let entity = cx.entity();
-                            import::open_source_in_grid(entity, cx);
-                        })),
-                ),
+            Button::new("import-browse-source")
+                .small()
+                .secondary()
+                .label("浏览")
+                .tooltip("把某个目录设为导入来源")
+                .disabled(scanning)
+                .on_click(cx.listener(|_state, _, window, cx| {
+                    import::pick_source(window, cx);
+                })),
+        )
+        .child(
+            Button::new("import-rescan-source")
+                .small()
+                .ghost()
+                .label(if scanning { "扫描中…" } else { "重新扫描" })
+                .tooltip("重新扫描当前来源")
+                .disabled(scanning || state.import.source.is_none())
+                .on_click(cx.listener(|_state, _, _window, cx| {
+                    let entity = cx.entity();
+                    import::rescan(entity, cx);
+                })),
+        )
+        .child(
+            Button::new("import-add-dir")
+                .small()
+                .ghost()
+                .icon(IconName::FolderOpen)
+                .label("仅添加并浏览")
+                .tooltip("不搬运，直接把来源目录打开到网格里浏览（递归）")
+                .disabled(scanning || state.import.source.is_none())
+                .on_click(cx.listener(|_state, _, _window, cx| {
+                    let entity = cx.entity();
+                    import::open_source_in_grid(entity, cx);
+                })),
         )
         .into_any_element()
 }
@@ -1540,4 +1532,29 @@ fn flip_button(
             let toggle = toggle.clone();
             import::update_import(entity, cx, move |import| toggle(import));
         }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::review_grid_metrics;
+
+    /// 审阅网格必须**正好填满**可用宽度（列数 × 边长 + 间距 == 可用宽 − 容器 padding）。
+    ///
+    /// 钉的是「可用宽度公式」与「列数/边长公式」同步：2026-09-25 把左栏来源合并成顶部
+    /// 来源条时，available 里就得去掉 LEFT_COL_W——两边任一处忘了改，网格要么露一大片白、
+    /// 要么溢出被裁。以后再加/减一列（右栏改宽、来源挪回左栏）同样先撞这条。
+    #[test]
+    fn test_review_grid_fills_available_width() {
+        for dialog_width in [900.0f32, 1000.0, 1120.0, 1240.0, 1352.0, 1600.0] {
+            let (cols, edge) = review_grid_metrics(dialog_width);
+            let inner = dialog_width - super::RIGHT_COL_W - super::MIDDLE_PAD - 16.0;
+            let gaps = cols.saturating_sub(1) as f32 * 8.0;
+            let used = cols as f32 * edge + gaps;
+            assert!(
+                (used - inner).abs() < 0.51,
+                "弹窗宽 {dialog_width}: {cols} 列 × {edge} + {gaps} 间距 = {used}，可用 {inner}"
+            );
+            assert!(cols >= 2, "两列是最小可读密度（宽 {dialog_width}）");
+        }
+    }
 }

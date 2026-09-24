@@ -1298,72 +1298,43 @@ pub fn discard_journal(entity: Entity<AppState>, cx: &mut Context<AppState>) {
 
 /// 浏览源目录（系统目录对话框）→ 设源并立即扫描。
 pub fn pick_source(window: &mut Window, cx: &mut Context<AppState>) {
-    cx.spawn_in(window, async move |weak, async_cx| {
-        let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await else {
-            return;
-        };
-        let path = folder.path().to_path_buf();
-        let _ = async_cx.update(|_window, cx| {
-            let Some(entity) = weak.upgrade() else {
-                return;
-            };
-            entity.update(cx, |state, _cx| {
-                state.import.source = Some(path.clone());
-                state.import.plan = None;
-                state.import.result = None;
-                state.import.review_loupe = None;
-            });
-            scan_source(entity, cx);
+    super::folder_picker::pick_folder_async(window, cx, |entity, _window, cx, path| {
+        entity.update(cx, |state, _cx| {
+            state.import.source = Some(path.clone());
+            state.import.plan = None;
+            state.import.result = None;
+            state.import.review_loupe = None;
         });
-    })
-    .detach();
+        scan_source(entity, cx);
+    });
 }
 
 /// 选择目标根目录（系统目录对话框）→ 回填状态与输入框。
 pub fn pick_dest(window: &mut Window, cx: &mut Context<AppState>) {
-    cx.spawn_in(window, async move |weak, async_cx| {
-        let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await else {
-            return;
-        };
-        let text = folder.path().to_string_lossy().to_string();
-        let _ = async_cx.update(|window, cx| {
-            let Some(entity) = weak.upgrade() else {
-                return;
-            };
-            entity.update(cx, |state, cx| {
-                state.import.dest_root = text.clone();
-                state.import.result = None;
-                if let Some(input) = state.import_dest_input.clone() {
-                    input.update(cx, |input_state, cx| {
-                        input_state.set_value(text.clone(), window, cx);
-                    });
-                }
-                cx.notify();
-            });
-            schedule_plan(entity, cx);
+    super::folder_picker::pick_folder_async(window, cx, |entity, window, cx, path| {
+        let text = path.to_string_lossy().to_string();
+        entity.update(cx, |state, cx| {
+            state.import.dest_root = text.clone();
+            state.import.result = None;
+            if let Some(input) = state.import_dest_input.clone() {
+                input.update(cx, |input_state, cx| {
+                    input_state.set_value(text.clone(), window, cx);
+                });
+            }
+            cx.notify();
         });
-    })
-    .detach();
+        schedule_plan(entity, cx);
+    });
 }
 
 /// 「添加」段：选目录直接打开浏览（递归扫描），不动文件。
 pub fn pick_add_directory(window: &mut Window, cx: &mut Context<AppState>) {
-    cx.spawn_in(window, async move |weak, async_cx| {
-        let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await else {
-            return;
-        };
-        let path = folder.path().to_path_buf();
-        let _ = async_cx.update(|_window, cx| {
-            let Some(entity) = weak.upgrade() else {
-                return;
-            };
-            entity.update(cx, |state, _cx| {
-                state.active_dialog = None;
-            });
-            start_scan(entity, path, true, cx);
+    super::folder_picker::pick_folder_async(window, cx, |entity, _window, cx, path| {
+        entity.update(cx, |state, _cx| {
+            state.active_dialog = None;
         });
-    })
-    .detach();
+        start_scan(entity, path, true, cx);
+    });
 }
 
 /// 视图按钮专用：设源后触发扫描（走 defer，避免 listener 内双重租借）。
