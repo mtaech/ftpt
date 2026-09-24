@@ -16,17 +16,31 @@ use crate::model::filter::has_active_filters;
 use crate::state::engine_ops::{defer_entity_action, pick_batch_target_dir, start_scan};
 use crate::state::{ActiveDialog, AppState};
 
+/// 目录行的类别：决定行尾挂哪些操作。
+/// - `Plain`（子目录）：只有星标（收藏 / 取消收藏）
+/// - `Favorite`：星标 = 取消收藏
+/// - `Recent`：星标 = 收藏 / 取消收藏，另有 × = 从「最近打开」移除（只动列表，不碰磁盘）
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DirRowKind {
+    Plain,
+    Favorite,
+    Recent,
+}
+
 /// 目录列表里的一行（子目录 / 收藏 / 最近打开共用）。
 ///
 /// 刻意不用 Button 铺满整行：gpui-component 的 Button 内容默认**居中**，
 /// 名字长短不一（"鸟" vs "2026-09-06"）时看起来就像缩进错乱的树。
-/// 这里左对齐 + 统一图标槽 + hover 底色 + 当前目录高亮。
+/// 这里左对齐 + 统一图标槽 + hover 底色 + 当前目录高亮；行尾的操作是**子元素**，
+/// GPUI 命中取最上面的元素，所以点星标 / × 不会同时触发整行的「打开这个目录」。
 fn render_dir_row(
     id: String,
     dir: PathBuf,
     icon: SharedIconName,
     show_parent: bool,
     current: bool,
+    kind: DirRowKind,
+    favorited: bool,
     cx: &mut Context<AppState>,
 ) -> impl IntoElement + use<> {
     let name = dir
@@ -55,7 +69,14 @@ fn render_dir_row(
         .py_1p5()
         .rounded(px(8.))
         .cursor_pointer()
-        .aria_label(SharedString::from(full_path))
+        .aria_label(SharedString::from(full_path.clone()))
+        // 行会被截断（窄面板 + 父目录名 + 星标/×），悬停给完整路径
+        .tooltip({
+            let full = full_path.clone();
+            move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(window, cx)
+            }
+        })
         .when(current, |this| {
             this.bg(highlight)
                 .border_1()
@@ -81,16 +102,67 @@ fn render_dir_row(
                 .when(!current, |this| this.text_color(foreground))
                 .child(name),
         )
-        // 右侧弱化的上级目录名：同名文件夹（多个"图片"）靠它区分
+        // 右侧弱化的上级目录名：同名文件夹（多个"图片"）靠它区分。
+        // 上限从 76 收到 48：行尾现在还有星标 / ×，父目录名不该把主名字挤没
+        // （窄面板里主名字曾被压到 ~36px，只剩「2026-...」）。
         .when(show_parent && !parent_name.is_empty(), |this| {
             this.child(
                 div()
                     .flex_shrink_0()
-                    .max_w(px(76.))
+                    .max_w(px(48.))
                     .truncate()
                     .text_size(px(10.))
                     .text_color(muted)
                     .child(parent_name),
+            )
+        })
+        // 收藏星标（所有目录行都有）：点一下切换收藏状态并落盘
+        .child({
+            let dir_for_star = dir.clone();
+            let star_label = if favorited { "取消收藏" } else { "加入收藏" };
+            div()
+                .id(SharedString::from(format!("star-{full_path}")))
+                .flex_shrink_0()
+                .p_0p5()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .aria_label(SharedString::from(star_label))
+                .hover(move |s| s.bg(hover_bg))
+                .child(
+                    Icon::new(if favorited {
+                        SharedIconName::StarFill
+                    } else {
+                        SharedIconName::StarOff
+                    })
+                    .size(px(13.))
+                    .text_color(if favorited { accent } else { muted }),
+                )
+                .on_click(cx.listener(move |state, _, _, cx| {
+                    state.toggle_favorite_dir(&dir_for_star);
+                    cx.notify();
+                }))
+        })
+        // 「最近打开」才有：从列表移除（不动磁盘）
+        .when(kind == DirRowKind::Recent, |this| {
+            let dir_for_remove = dir.clone();
+            this.child(
+                div()
+                    .id(SharedString::from(format!("recent-remove-{full_path}")))
+                    .flex_shrink_0()
+                    .p_0p5()
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .aria_label("从「最近打开」移除")
+                    .hover(move |s| s.bg(hover_bg))
+                    .child(
+                        Icon::new(SharedIconName::Close)
+                            .size(px(12.))
+                            .text_color(muted),
+                    )
+                    .on_click(cx.listener(move |state, _, _, cx| {
+                        state.remove_recent_dir(&dir_for_remove);
+                        cx.notify();
+                    })),
             )
         })
         .on_click(cx.listener(move |_state, _event, _window, cx| {
@@ -210,12 +282,15 @@ pub fn render_file_tree_tab(
                     )
                     .children(subdirs.into_iter().map(|dir| {
                         let current = state.current_dir.as_deref() == Some(dir.as_path());
+                        let favorited = state.favorite_dirs.contains(&dir);
                         render_dir_row(
                             format!("subdir-{}", dir.to_string_lossy()),
                             dir,
                             SharedIconName::Folder,
                             false,
                             current,
+                            DirRowKind::Plain,
+                            favorited,
                             cx,
                         )
                     })),
@@ -244,6 +319,8 @@ pub fn render_file_tree_tab(
                             SharedIconName::Star,
                             true,
                             current,
+                            DirRowKind::Favorite,
+                            true,
                             cx,
                         )
                     })),
@@ -266,12 +343,15 @@ pub fn render_file_tree_tab(
                     )
                     .children(recents.into_iter().map(|dir| {
                         let current = state.current_dir.as_deref() == Some(dir.as_path());
+                        let favorited = state.favorite_dirs.contains(&dir);
                         render_dir_row(
                             format!("recent-{}", dir.to_string_lossy()),
                             dir,
                             SharedIconName::Clock,
                             true,
                             current,
+                            DirRowKind::Recent,
+                            favorited,
                             cx,
                         )
                     })),

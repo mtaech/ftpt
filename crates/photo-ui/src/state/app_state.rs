@@ -1876,6 +1876,53 @@ impl AppState {
         }
     }
 
+    // ── 收藏 / 最近打开（左栏目录行）──
+
+    /// 切换某目录的收藏状态（左栏目录行的星标）。返回切换**之后**是否已收藏。
+    ///
+    /// 收藏与最近打开以前只有「读」：`favorite_dirs` 只拿来渲染、`recent_dirs` 没有移除
+    /// 入口（用户报「最近打开不能移除和收藏」）。两个动作都要**写回配置并落盘**，
+    /// 否则重启又是一场空。
+    pub fn toggle_favorite_dir(&mut self, dir: &std::path::Path) -> bool {
+        let now_favorited = match self.favorite_dirs.iter().position(|d| d == dir) {
+            Some(pos) => {
+                self.favorite_dirs.remove(pos);
+                false
+            }
+            None => {
+                self.favorite_dirs.insert(0, dir.to_path_buf());
+                true
+            }
+        };
+        self.app_config.favorite_dirs = self
+            .favorite_dirs
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        self.save_config();
+        now_favorited
+    }
+
+    /// 从「最近打开」里移除一个目录（只动列表，不碰磁盘）。
+    ///
+    /// 如果移除的正是「上次打开的目录」，`last_directory` 一起退到新的第一条：
+    /// 否则下次启动又会把它打开、重新加回列表——用户刚说不要它。
+    pub fn remove_recent_dir(&mut self, dir: &std::path::Path) {
+        self.recent_dirs.retain(|d| d != dir);
+        self.app_config.recent_directories = self
+            .recent_dirs
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        if self.app_config.last_directory.as_deref() == Some(&*dir.to_string_lossy()) {
+            self.app_config.last_directory = self
+                .recent_dirs
+                .first()
+                .map(|p| p.to_string_lossy().to_string());
+        }
+        self.save_config();
+    }
+
     /// 主选中项（§5.1）：anchor_index ?? 选中集末尾
     pub fn primary_selected_index(&self) -> Option<usize> {
         self.anchor_index

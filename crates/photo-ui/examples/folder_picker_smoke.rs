@@ -198,6 +198,66 @@ fn main() {
                     });
                 check!("配置真的落盘（重读配置文件仍在）", disk_ok);
 
+                // ── 6) 收藏星标 / 从「最近打开」移除（用户报「最近打开不能移除和收藏」）──
+                let fav_on = async_cx.update(|cx| {
+                    task_state.update(cx, |s, _| s.toggle_favorite_dir(&expect_photos))
+                });
+                let (fav_state, fav_cfg) = async_cx.update(|cx| {
+                    let s = task_state.read(cx);
+                    (
+                        s.favorite_dirs.first().cloned(),
+                        s.app_config.favorite_dirs.first().cloned(),
+                    )
+                });
+                check!(
+                    format!("星标加入收藏（运行时 {fav_state:?} / 配置 {fav_cfg:?}）"),
+                    fav_on
+                        && fav_state.as_deref() == Some(expect_photos.as_path())
+                        && fav_cfg.as_deref() == Some(picked_text.as_str())
+                );
+                let fav_off = async_cx.update(|cx| {
+                    task_state.update(cx, |s, _| s.toggle_favorite_dir(&expect_photos))
+                });
+                check!(
+                    "再点一次取消收藏（星标是开关，不是只增不减）",
+                    !fav_off && async_cx.update(|cx| task_state.read(cx).favorite_dirs.is_empty())
+                );
+
+                // 移除最近：运行时 / AppConfig / 磁盘三处都要掉，且不动收藏
+                async_cx.update(|cx| {
+                    task_state.update(cx, |s, _| {
+                        s.toggle_favorite_dir(&expect_photos);
+                    })
+                });
+                async_cx.update(|cx| {
+                    task_state.update(cx, |s, _| s.remove_recent_dir(&expect_photos))
+                });
+                let (recent_len, cfg_recent_len, last_after, fav_left) = async_cx.update(|cx| {
+                    let s = task_state.read(cx);
+                    (
+                        s.recent_dirs.len(),
+                        s.app_config.recent_directories.len(),
+                        s.app_config.last_directory.clone(),
+                        s.favorite_dirs.len(),
+                    )
+                });
+                check!(
+                    format!("× 从「最近打开」移除（剩 {recent_len} 条 / 配置 {cfg_recent_len} 条 / 上次目录 {last_after:?}）"),
+                    recent_len == 0 && cfg_recent_len == 0 && last_after.is_none()
+                );
+                check!(format!("移除最近不影响收藏（favorite_dirs = {fav_left}）"), fav_left == 1);
+                let disk_after = photo_config::determine_config_path()
+                    .ok()
+                    .and_then(|path| photo_config::load_config(&path).ok());
+                check!(
+                    "收藏与移除都落盘（重读配置：1 个收藏 / 0 条最近 / 无上次目录）",
+                    disk_after.is_some_and(|cfg| {
+                        cfg.favorite_dirs.len() == 1
+                            && cfg.recent_directories.is_empty()
+                            && cfg.last_directory.is_none()
+                    })
+                );
+
                 if failures == 0 {
                     println!("全部通过");
                     std::process::exit(0);
