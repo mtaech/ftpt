@@ -17,6 +17,12 @@
 > **2026-09-23 Batch 5 落地（commit `9a70423`，家犬跟进另见 #7）**：#7 补「家养/外来」名单并进同一包（93,480 → 93,484 类，拍猫实测 云猫 67.6% → 家猫 69.5%，家犬/家猪口径见 #7 · `cdf82e1`）、
 > #8 拍板不随包世界包、#10 / #11 维持 ⏸ 并消掉「建议顺序」里要求做 Batch 3 的矛盾。
 >
+> **2026-09-24 Batch 8 落地：最后两条也补完了**：#13.4 后半的**无障碍语义**（网格 Grid/Row/GridCell +
+> 胶片条 List/ListItem + 右键菜单 Menu/MenuItem，新增 `a11y_smoke` 21 项读原生 a11y 属性断言）
+> 与 #15 的**发布包校验通道**（`package.ps1 -VerifyOnly` 跨平台跑通 + fail-closed 矩阵）。
+> **现在 todo 里没有「能做而未做」的工作项了**：只剩需要 Windows 才能验的打包产物，与两处有意留痕的
+> 未验证点（a11y 行列下标属性、真实误检场景）。
+
 > **2026-09-24 Batch 7 落地**：**#13.3 / #13.4 / #17 / #16 全部做完**——
 > 镜头/物种多选筛选器（用 gpui-component 的 Combobox，自带方向键导航与搜索）、
 > 自绘右键菜单（Up/Down/Enter/Esc + 240px 最大高滚动，`context_menu_smoke` 20 项）、
@@ -332,7 +338,30 @@
    - 网格 cell、胶片条缩略图、预览三处都接上右键
    验证：新增 `context_menu_smoke` **20 项**全过（含「10 项超过最大高**真的产生滚动范围**
    max_offset 50px」「上下移动跳过置灰项且不环绕」「回收站只弹确认框且文件未动」）。
-   **同条的「网格无表格语义」仍未做**（uniform_list 的行列语义，属无障碍/读屏范畴）。
+   **同条的「网格无表格语义」也已做完**（2026-09-24，见下方「无障碍语义」段）。
+   **无障碍语义（#13.4 后半，2026-09-24 补完）**：先更正我之前的判断——GPUI（gpui-pre 0.3.4）
+   **有完整的 AccessKit API**（`role` / `aria_label` / `aria_selected` /
+   `aria_row_index` / `aria_column_index` / `aria_row_count` /
+   `aria_column_count`），X11 与 Wayland 后端都接了 `accesskit_unix::Adapter`，
+   所以这条不是「写了也拿不到效果」。做法：
+   - 网格：容器 `Role::Grid`（名称「照片网格：N 张照片，M 列，已选 K 张」+ 行列数）、
+     行 `Role::Row`（+ 行下标）、格子 `Role::GridCell`（+ 行列下标 + 名称 +
+     `aria_selected`）；名称随状态（选中 / N 星 / Pick）实时更新
+   - 胶片条：`Role::List` + 项 `Role::ListItem`（当前照片报 selected）
+   - 右键菜单：`Role::Menu` + 项 `Role::MenuItem`（置灰项名称明说「（不可用）」
+     ——a11y 没有 aria-disabled 通道；键盘高亮项报 `aria_selected`）
+   - 文案组合收在 `model/a11y.rs`（纯函数 + 4 个单测，缺项不补占位词）
+   **怎么验证的**：无头环境里 AccessKit 树不会真正下发（要 AT-SPI 客户端接入才激活），但 gpui-base 的
+   `ElementSnapshot` 在元素 prepaint 时**直接读原生 a11y 属性**（与有没有读屏无关）——新增
+   `a11y_smoke` **21 项**用 `gpui_kit::test::TestWindowExt::find` 读回 role / label /
+   selected 断言，含「选中态迁移」「名称随 3 星 + Pick 更新」「键盘高亮项报 selected」。
+   代价是 `[dev-dependencies]` 给 gpui-kit 开了 `test-support`（连带打开 gpui 的
+   `leak-detection`），于是 examples 里冒烟必须 `std::process::exit(0)`——
+   `lease_smoke` / `clipboard_smoke` 本轮因此暴露并修好（它们此前只 `cx.quit()`，
+   检查全过却以 101 退出）。单元侧 photo-ui 92→**96**。
+   **仍未做到的**：行列下标属性已挂上，但 snapshot 不暴露它们、a11y 树又要 AT 才下发，所以冒烟只能断言
+   role/label/selected；索引属性靠代码评审与 GPUI 自身覆盖。另：染色/徽标等纯视觉信息未逐一进 a11y 名称
+   （只进了「评分 / 旗标 / 物种」这些有语义的）。
 5. ✅ **手册 §9.7 的「失败阶段中文 + 最接近候选」已接线**（2026-09-24）：
    `CaptureMeta` 新增 `failure_stage` / `candidates`（domain，最多 3 个候选，
    复用 `SubjectSummary`），由 `enrich_with_recognition` 从 `Recognition` 回填
@@ -373,7 +402,16 @@
   zip 从 `Compress-Archive` 换成系统自带 bsdtar（`tar -a -c -f`，带 **bsdtar 身份校验**——
   PATH 前面若是 Git/MSYS 的 GNU tar，`-a` 不认 zip 会静默产出 tar 文件；另避开 `C:\` 参数差异），
   理由：2GB+ 上限 + 包里的 .onnx/.npy 接近随机字节，deflate 基本压不动只浪费时间。
-- **未验证部分**：`package.ps1` 是 PowerShell 脚本，Linux 开发机跑不了端到端（无 pwsh）；
+- **校验通道（2026-09-24 补完）**：脚本加了 **`-VerifyOnly`**（只做必需资产 + `data/taxon/VERSION`
+  字段校验 + 打印将要打进去的清单，不构建/不拷贝/不打包），exe 名改成平台感知（Windows `ftpt.exe` /
+  其它 `ftpt`），于是**校验逻辑跨平台可跑**。本轮用镜像下的 PowerShell 7.6.6 便携版在真实仓库上跑通
+  `pwsh scripts/package.ps1 -VerifyOnly`：schema 1 / dim 768 / labels **93484**，清单含
+  `models/*.onnx + data/bird_catalog.db + data/taxon/{4 文件} + NOTICE/LICENSE/AGPL + exiftool/`。
+  另做了 fail-closed 矩阵（假仓库注入 4 种缺口，全部 exit=1 且报错精确）：整个 `data/taxon` 缺失 /
+  缺 `zh_names.json` / `VERSION` 缺 `dim` / `Cargo.toml` 无 version 且未指定 `-Version`。
+- **仍未验证部分（真需要 Windows）**：`cargo build` 出的 Windows 产物 + `DirectML.dll` 收集 +
+  bsdtar 打的 zip 本体（脚本里那条 bsdtar 身份校验在 Linux 上本就该失败——GNU tar 的 `-a` 不认 zip，
+  这是有意设计）；要在 Windows 上确认的是「产物能启动 + 包内资产齐全」。
   bsdtar 的 `-a -c -f out.zip` 命令形状已在本地用 tar 核过，但 BSD/GNU 差异靠运行时身份校验兜住。
 - 参考：`docs/open-questions.md` §8。
 
@@ -453,9 +491,10 @@
    「显式确认全量」逃生门，新冒烟 `batch_ops_smoke` 25 项）、#13.5（信息栏失败阶段 + 最接近候选）、
    #14.6（核实为已解决）、#14.7（导入目标目录记忆）、#1 遗留（导出预设新建/保存/删除）、
    #17 释放识别器按钮。
-   **仍开着的**：只剩 #13.4 的「网格无表格语义」（uniform_list 的行列语义，属无障碍范畴）
-   与 #15 的 `package.ps1` 端到端未验证（需 Windows+pwsh）。
-   #16 / #13.3 / #13.4（右键菜单）/ #17 空闲自动卸载均已落地，见各自条目。
+   **仍开着的**：**没有可做而未做的工作项了**。剩下两类：
+   ① 需要 Windows 才能验的（`package.ps1` 的 Windows 产物 + DirectML.dll + bsdtar zip 本体）；
+   ② 有意留痕的未验证点（a11y 的行列下标属性无法在无头环境断言；#16 的「误检框被丢」在真机上没有可复现素材）。
+   #16 / #13.3 / #13.4（含无障碍语义）/ #17 均已落地，见各自条目。
 
 11. **P3（#13–#18）**——✅ #15（NOTICE / 打包校验）已于 2026-09-23 做掉；核定中查出的
    `org_det.onnx`（Ultralytics YOLOE）**AGPL-3.0** 已按「开源不收费」定妥：

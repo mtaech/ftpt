@@ -92,7 +92,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 |运行核心测试|`cargo test -p photo-engine -p photo-recognize -p photo-domain -p photo-config`|
 |前端单测|`cargo test -p photo-ui`（`src/model/` 纯逻辑 + `theme/` 色彩用例）|
 |开发运行（GPUI 桌面窗口）|`cargo run -p photo-ui`|
-|无头冒烟|`XDG_CONFIG_HOME=/tmp/ptlease-config xvfb-run -a cargo run -p photo-ui --example lease_smoke`（另有 `preview_full_smoke`、`clipboard_smoke`、`adjust_smoke`、`grid_scroll_smoke`、`filter_bar_smoke`、`export_smoke`、`duplicates_smoke`、`batch_ops_smoke`、`context_menu_smoke`、`recognize_smoke`、`region_smoke`、`stats_smoke`、`master_bench`）|
+|无头冒烟|`XDG_CONFIG_HOME=/tmp/ptlease-config xvfb-run -a cargo run -p photo-ui --example lease_smoke`（另有 `preview_full_smoke`、`clipboard_smoke`、`adjust_smoke`、`grid_scroll_smoke`、`filter_bar_smoke`、`export_smoke`、`duplicates_smoke`、`batch_ops_smoke`、`context_menu_smoke`、`a11y_smoke`、`recognize_smoke`、`region_smoke`、`stats_smoke`、`master_bench`）|
 |EXIF 提取验证|`cargo run -p photo-engine --example focus_check -- <图片>`（打印 ExifMetadata + 对焦点；exiftool 不可用或残留进程时先 `taskkill //F //IM perl.exe`）|
 
 ---
@@ -158,15 +158,23 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
   存下它的 `bounds`（`(x, y, w, h)`，窗口坐标），按 `(鼠标窗口坐标 - bounds.origin) / bounds.size`
   归一化——布局怎么嵌套/滚动/平移都不用管。**别用**「视口原点 + 图片偏移」两层相减去凑：能凑对，
   但多一个会写错的假设（第一版就这么修的）。相对量（拖拽平移的 dx/dy）不受影响，只有绝对定位需要换算。
+- **examples/tests 会带上 dev-dependencies 的特性，于是 gpui 的 leak-detection 是开的**（2026-09-24）：
+  `crates/photo-ui/Cargo.toml` 的 `[dev-dependencies]` 为了读 a11y 语义给 `gpui-kit` 开了 `test-support`，
+  而它会把 gpui 的 `leak-detection` 一并打开。于是**冒烟必须在断言完成后 `std::process::exit(0)`**：
+  冒烟的 detached 任务里握着 `task_state`（`Entity<AppState>`），让 App 正常析构就会被
+  `entity_map.rs` 的断言判成「Exited with leaked handles」并以 101 退出（检查全过、退出码却是失败，
+  很有迷惑性）。`lease_smoke` / `clipboard_smoke` 就是这么被漏掉的（它们只 `cx.quit()` 就返回）。
+  **这是冒烟自身的产物，不是产品泄漏**（正常构建不开 leak-detection，真实退出路径不受影响）。
 - **GPUI 的溢出滚动容器只滚不画，且内容必须防压缩**：`overflow_y_scroll()` 不产生滚动条——要把容器 `track_scroll` 到跨帧持有的 `ScrollHandle` 上，再把 `Scrollbar` 当兄弟节点叠在 relative 容器里（规格统一在 `views/scroll_area.rs`）。**更坑的是第二个条件**：滚动容器里的内容若是 flex 子项，会被压缩到容器高（横向会被拉伸到容器宽）→ `max_offset = 0`，表现是「滚动条有、thumb 满格、滚不动」。所以纵向内容要 `flex_shrink_0`、横向内容要显式给宽度（胶片条 = n × 96 + (n−1) × 6 + padding）。`stats_smoke` 会断言两处列表的 `max_offset > 0`，这条就是它的回归网。
 
 ---
 
 ## 测试与 QA
 
-- Rust：`#[test]` 分布在 5 个 crate 的源文件内联 `#[cfg(test)] mod tests`（domain 38 / config 20 / engine 199 / recognize 33 / photo-ui 92），另有 1 个 `#[ignore]` 真机冒烟
+- Rust：`#[test]` 分布在 5 个 crate 的源文件内联 `#[cfg(test)] mod tests`（domain 38 / config 20 / engine 199 / recognize 33 / photo-ui 96），另有 1 个 `#[ignore]` 真机冒烟
+- 发布包校验（跨平台，不需要 Windows）：`pwsh scripts/package.ps1 -VerifyOnly`——只做「必需资产 + `data/taxon/VERSION` 字段」校验并打印将要打进去的清单，不构建/不拷贝/不打包。Linux 上没装 pwsh 时可下便携版（GitHub 直连不通就用镜像，如 `https://ghfast.top/https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/powershell-7.6.6-linux-x64.tar.gz`，解压即用）
 - 真机识别冒烟：`cargo test -p photo-recognize -- --ignored`（需 worktree/发布根有 `models/` 与 `data/bird_catalog.db`）；单文件手动识别工具：`cargo run -p photo-recognize --example recognize_file -- <图片路径> [models_dir] [catalog_db]`
-- 无头冒烟：`lease_smoke` 15 项 / `preview_full_smoke` 5 项 / `clipboard_smoke`（派发 CopyImage 动作 → 解码 → arboard 写剪贴板 → 读回校验尺寸）/ `adjust_smoke` 16 项（自建 1200×800 JPEG：预览装载参数 / 三条滑杆实体 / 面板可渲染 / 滑杆 Change 事件量化 0.37→0.35 / +1 EV 后预览更亮 149.0→202.9 / 350ms 去抖落库 / 原文件字节不变 / 重置回原图并复位）/ `grid_scroll_smoke` 4 项（自建 48 张 JPEG：网格滚动句柄拿到真实视口 / 内容高于视口 / 写句柄偏移跨帧保留；另支持 `PHOTO_SMOKE_HOLD_MS` 保持窗口供 Xvfb 外部截图目检、`PHOTO_SMOKE_HIDE_PANELS=1` 收起左右侧栏、`PHOTO_SMOKE_COLS=N` 指定列数、`PHOTO_SMOKE_WINDOW=WxH` 指定窗口尺寸、`PHOTO_SMOKE_HOLD_STILL=1` 保持画面静止（注入鼠标做交互验证时要逐像素对比，默认会轻推偏移让滚动条 thumb 停在可见态），并打印 `[diag] 窗口宽/列数/实测容器/列表视口宽`）/ `filter_bar_smoke` **17 项**（筛选栏四个下拉；不需素材：排序/列数两个下拉的创建与选中一致 / emit `SelectEvent::Confirm` 走真实订阅改状态 / 列数写回配置 / 设置页改列数后下拉同步；**镜头 / 物种多选（#13.3）**：注入 3 张 items 后**渲染期自动同步候选**（defer_in）/ 单值 Change 生效 2/3 张 / 与物种取交集 1/3 / 多值 = 命中任一即保留（2 值 → 3 张）/ 清空归位 / 计入 `has_active_filters`）/ `export_smoke` 27 项（**不需模型**：顶栏 / Ctrl+E 的 action 真的打开弹窗 / 输入框文本→草稿 / 已选口径只导出 1 张 vs 取消选择导出筛选结果全部 5 张 / `{seq}` 补零渲染 / 同 stem 不同扩展自动 `_1` 去重 / 长边 600 真的生效 / 质量 95 体积大于 85 / 原文件字节不变 / 目标目录写回配置 / 目标目录不可创建时给真实错误 / **eBird CSV（#9）**：造识别记录 → 门控放行 → 落盘 + BOM 表头 + 物种聚合行；配置目录由冒烟自己钉 `PHOTO_CONFIG_DIR` 隔离）/ `recognize_smoke` 5 项（需 models/：扫描素材 / 识别途中能观察到中间进度 / 跑完 done==total 且每张有状态 / 取消 5s 内生效）/ `region_smoke` **19 项**（需 models/：扫描素材 / 框选模式开关 / **识别器懒装配与常驻**（冷装配→热复用两段计时）/ 首次框选建结论 / 二次框选**追加**为主体 / `folder_db` 持久化同步 / 全局索引落行 / 批量识别复用同一实例 / **回归**：旧 Unrecognized 记录框选后内存摘要显示物种 + 落库顶层同步为 subjects[0] + 存量坏数据（顶层 NULL + subjects 有结论）重扫后仍显示 + 清临时行）/ `stats_smoke` 15 项（**不需模型**：扫描+缩略图管线 / 全局索引写行 / 选中物种取记录 / 缩略图按各自目录解析 / 统计视图渲染 / 点击跳转选中 / **滚动条（#4/#3）**：物种榜 max_offset 850 / 照片网格 1531 / 偏移跨帧保留 / 胶片条横向 862 / 导入弹窗视口 502 / 清临时行）/ `duplicates_smoke` **25 项**（**不需模型**、自建位模式素材：入口开窗 / 作用域 8 张 / 2 组各 2 张 / 无关照片不误报 / keeper = 路径首张 / 落库阈值 + keeper + 时间 / 标 Rejected 不动文件且同步 xmp / 重开弹窗读回落库结果 / 同 stem 多格式被排除 / **空文件健壮性**（0 字节文件进扫描结果但不卡管线、收尾汇总一次、检测仍能收尾）/ 渲染多帧不 panic；支持 `PHOTO_SMOKE_HOLD_MS` 保持窗口截图目检）/ `batch_ops_smoke` **25 项**（**不需模型**、自建 4 张 JPEG：无筛选时批量操作默认锁住 / 「显式确认」解锁 / 筛选一变自动收回 / Delete 键只弹确认不动文件 / 确认后进回收站且记撤销日志 / **Ctrl+Z 真从回收站恢复** / 批量移动落地 4 个文件并撤销回原位 / 批量复制落地 4 个副本并撤销删副本 / 批量重命名生效并撤销改回 / 空模板被拒有提示 / 确认框与重命名弹窗渲染多帧不 panic；支持 `PHOTO_SMOKE_HOLD_MS`）/ `context_menu_smoke` **20 项**（**不需模型**、自建 3 张 JPEG：右键打开菜单 / 10 项 / 目标正确 / **10 项超过 240px 最大高真的产生滚动范围**（max_offset 50px）/ 上下移动跳过置灰项且到边界不环绕 / 预览态首项置灰 / Esc 关闭 / Pick 写进摘要 / 切预览 / 移至回收站只弹确认框且文件未动 / 目标失效诚实报错不误伤别的照片 / 渲染多帧不 panic）/ `master_bench` 计时；14 个 GPUI 冒烟都先调 `app::prepare_headless_smoke()` 把后端钉在 Xvfb 的 X11 上（否则 Wayland 会话下窗口落到真实桌面、渲染帧不可控），`xvfb-run` 下无需真实显示器（见开发命令）
+- 无头冒烟：`lease_smoke` 15 项 / `preview_full_smoke` 5 项 / `clipboard_smoke`（派发 CopyImage 动作 → 解码 → arboard 写剪贴板 → 读回校验尺寸）/ `adjust_smoke` 16 项（自建 1200×800 JPEG：预览装载参数 / 三条滑杆实体 / 面板可渲染 / 滑杆 Change 事件量化 0.37→0.35 / +1 EV 后预览更亮 149.0→202.9 / 350ms 去抖落库 / 原文件字节不变 / 重置回原图并复位）/ `grid_scroll_smoke` 4 项（自建 48 张 JPEG：网格滚动句柄拿到真实视口 / 内容高于视口 / 写句柄偏移跨帧保留；另支持 `PHOTO_SMOKE_HOLD_MS` 保持窗口供 Xvfb 外部截图目检、`PHOTO_SMOKE_HIDE_PANELS=1` 收起左右侧栏、`PHOTO_SMOKE_COLS=N` 指定列数、`PHOTO_SMOKE_WINDOW=WxH` 指定窗口尺寸、`PHOTO_SMOKE_HOLD_STILL=1` 保持画面静止（注入鼠标做交互验证时要逐像素对比，默认会轻推偏移让滚动条 thumb 停在可见态），并打印 `[diag] 窗口宽/列数/实测容器/列表视口宽`）/ `filter_bar_smoke` **17 项**（筛选栏四个下拉；不需素材：排序/列数两个下拉的创建与选中一致 / emit `SelectEvent::Confirm` 走真实订阅改状态 / 列数写回配置 / 设置页改列数后下拉同步；**镜头 / 物种多选（#13.3）**：注入 3 张 items 后**渲染期自动同步候选**（defer_in）/ 单值 Change 生效 2/3 张 / 与物种取交集 1/3 / 多值 = 命中任一即保留（2 值 → 3 张）/ 清空归位 / 计入 `has_active_filters`）/ `export_smoke` 27 项（**不需模型**：顶栏 / Ctrl+E 的 action 真的打开弹窗 / 输入框文本→草稿 / 已选口径只导出 1 张 vs 取消选择导出筛选结果全部 5 张 / `{seq}` 补零渲染 / 同 stem 不同扩展自动 `_1` 去重 / 长边 600 真的生效 / 质量 95 体积大于 85 / 原文件字节不变 / 目标目录写回配置 / 目标目录不可创建时给真实错误 / **eBird CSV（#9）**：造识别记录 → 门控放行 → 落盘 + BOM 表头 + 物种聚合行；配置目录由冒烟自己钉 `PHOTO_CONFIG_DIR` 隔离）/ `recognize_smoke` 5 项（需 models/：扫描素材 / 识别途中能观察到中间进度 / 跑完 done==total 且每张有状态 / 取消 5s 内生效）/ `region_smoke` **19 项**（需 models/：扫描素材 / 框选模式开关 / **识别器懒装配与常驻**（冷装配→热复用两段计时）/ 首次框选建结论 / 二次框选**追加**为主体 / `folder_db` 持久化同步 / 全局索引落行 / 批量识别复用同一实例 / **回归**：旧 Unrecognized 记录框选后内存摘要显示物种 + 落库顶层同步为 subjects[0] + 存量坏数据（顶层 NULL + subjects 有结论）重扫后仍显示 + 清临时行）/ `stats_smoke` 15 项（**不需模型**：扫描+缩略图管线 / 全局索引写行 / 选中物种取记录 / 缩略图按各自目录解析 / 统计视图渲染 / 点击跳转选中 / **滚动条（#4/#3）**：物种榜 max_offset 850 / 照片网格 1531 / 偏移跨帧保留 / 胶片条横向 862 / 导入弹窗视口 502 / 清临时行）/ `duplicates_smoke` **25 项**（**不需模型**、自建位模式素材：入口开窗 / 作用域 8 张 / 2 组各 2 张 / 无关照片不误报 / keeper = 路径首张 / 落库阈值 + keeper + 时间 / 标 Rejected 不动文件且同步 xmp / 重开弹窗读回落库结果 / 同 stem 多格式被排除 / **空文件健壮性**（0 字节文件进扫描结果但不卡管线、收尾汇总一次、检测仍能收尾）/ 渲染多帧不 panic；支持 `PHOTO_SMOKE_HOLD_MS` 保持窗口截图目检）/ `batch_ops_smoke` **25 项**（**不需模型**、自建 4 张 JPEG：无筛选时批量操作默认锁住 / 「显式确认」解锁 / 筛选一变自动收回 / Delete 键只弹确认不动文件 / 确认后进回收站且记撤销日志 / **Ctrl+Z 真从回收站恢复** / 批量移动落地 4 个文件并撤销回原位 / 批量复制落地 4 个副本并撤销删副本 / 批量重命名生效并撤销改回 / 空模板被拒有提示 / 确认框与重命名弹窗渲染多帧不 panic；支持 `PHOTO_SMOKE_HOLD_MS`）/ `context_menu_smoke` **20 项**（**不需模型**、自建 3 张 JPEG：右键打开菜单 / 10 项 / 目标正确 / **10 项超过 240px 最大高真的产生滚动范围**（max_offset 50px）/ 上下移动跳过置灰项且到边界不环绕 / 预览态首项置灰 / Esc 关闭 / Pick 写进摘要 / 切预览 / 移至回收站只弹确认框且文件未动 / 目标失效诚实报错不误伤别的照片 / 渲染多帧不 panic）/ `a11y_smoke` **21 项**（**不需模型**、自建 3 张 JPEG：网格容器 role=Grid + 名称报「N 张 / M 列 / 已选 K 张」/ 行 role=Row / 格子 role=GridCell + 名称随状态（选中·N 星·Pick）实时更新 + selected 迁移 / 胶片条 role=List + 项 role=ListItem / 右键菜单 role=Menu + 项 role=MenuItem + 置灰项名称带「（不可用）」+ 键盘高亮项报 selected）/ `master_bench` 计时；15 个 GPUI 冒烟都先调 `app::prepare_headless_smoke()` 把后端钉在 Xvfb 的 X11 上（否则 Wayland 会话下窗口落到真实桌面、渲染帧不可控），`xvfb-run` 下无需真实显示器（见开发命令）
 
 ### 测试分布
 
@@ -176,7 +184,7 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 |`photo-config::lib.rs`|20|默认值、TOML 保存/加载往返、配置路径、AppConfig 字段钳制（含 include_subdirectories、export_presets、import_dir/export_dir 记忆）|
 |`photo-engine`|199 + 1 ignore|scanner 单层/递归、ops 移动/复制/重命名/删除（含 sidecar）、识别行同步、thumbnail 缓存键 + **空文件早判**、exif 摘要、convert、folder_db 建表/迁移/upsert/rename 同步/多表清理、adjustments、global_db 索引、histogram 直方图/剪切、**phash dHash/汉明距离/聚类/取消语义与 duplicates 表读写**、import 分组/去重/复制移动、template 占位符渲染、undo 三类逆操作、keywords 表|
 |`photo-recognize`|33 + 1 ignore|阶段→状态映射、输入源解析（JPEG/RAW）、org_det 输出解码（布局/近满幅让位/越界夹紧）、BioCLIP 后端（npy 解析/species_of/中文名三级回落/top-k 检索）、按学名查名录、进度回调|
-|`photo-ui`|92|筛选/排序/堆叠/连拍/预览数学/调整参数（量化、chip 文案、相对路径、字段操作）/导出草稿（钳制、预设套用、**预设新建/删除**、目标集口径、输出名去重）/eBird 门控纯逻辑/**近重复检测纯逻辑**（作用域剔除同 stem 多格式、keeper 分组、相对/完整路径互转，`src/model/`）、Material You 色彩（`theme/`）、剪贴板解码、全局索引日期回写（`rewrite_folder_index_dates`）|
+|`photo-ui`|96|筛选/排序/堆叠/连拍/预览数学/调整参数（量化、chip 文案、相对路径、字段操作）/导出草稿（钳制、预设套用、**预设新建/删除**、目标集口径、输出名去重）/eBird 门控纯逻辑/**近重复检测纯逻辑**（作用域剔除同 stem 多格式、keeper 分组、相对/完整路径互转，`src/model/`）、Material You 色彩（`theme/`）、剪贴板解码、全局索引日期回写（`rewrite_folder_index_dates`）|
 
 ---
 
@@ -204,6 +212,40 @@ Photo Tool 是一个**照片管理与筛选（culling）**应用，用于浏览�
 ---
 
 ## 近期修复记录
+
+- **2026-09-24 feat(photo-ui/scripts)：补上最后两条 —— 网格/胶片条/右键菜单的无障碍语义（#13.4 后半）+ 发布包校验通道（#15）**：
+  用户说「把剩下的两条补全」。两条的共同难点都是**怎么在 Linux 上验证**，本轮把「无法验证」变成了「有回归网」。
+  **① a11y 语义（#13.4 后半「网格无表格语义」）**：先纠正我上次的悲观判断——GPUI（gpui-pre 0.3.4）
+  **有完整的 AccessKit 语义 API**（`role` / `aria_label` / `aria_selected` /
+  `aria_row_index` / `aria_column_index` / `aria_row_count` / `aria_column_count` …），
+  X11 与 Wayland 后端都接了 `accesskit_unix::Adapter`；所以这条不是「写了也拿不到效果」。
+  做法：网格容器 `Role::Grid`（名称 = 「照片网格：N 张照片，M 列，已选 K 张」+ 行列数）、
+  行 `Role::Row`（+ 行下标）、格子 `Role::GridCell`（+ 行列下标 + 名称 + `aria_selected`）；
+  胶片条 `Role::List` / 项 `Role::ListItem`；右键菜单 `Role::Menu` /
+  项 `Role::MenuItem`（置灰项名称里明说「（不可用）」——a11y 没有 aria-disabled 通道，
+  键盘高亮项报 `aria_selected`）。文案组合收在 `model/a11y.rs`（纯函数 + 4 个单测，
+  缺项不补占位词）。
+  **怎么验的（这条的关键）**：无头环境里 AccessKit 树不会真正下发（要 AT-SPI 客户端接入才激活），
+  但 gpui-base 的 `ElementSnapshot` 在元素 prepaint 时**直接读原生 a11y 属性**，与有没有读屏无关——
+  于是新增 `a11y_smoke` **21 项**用 `gpui_kit::test::TestWindowExt::find` 把
+  role / label / selected 读回来断言，包括「选中态迁移」「名称随 3 星 + Pick 实时更新」「键盘高亮项报 selected」。
+  代价：`[dev-dependencies]` 给 gpui-kit 开了 `test-support`，它连带打开 gpui 的
+  `leak-detection`，于是 examples 里**冒烟必须 `std::process::exit(0)`**（见「已知陷阱」，
+  `lease_smoke` / `clipboard_smoke` 本轮因此暴露并修好）。单元侧 photo-ui 92→**96**。
+  **仍未做的**：行列下标属性（`aria_row_index` 等）已挂上，但 snapshot 不暴露它们、a11y 树又要 AT 才下发，
+  所以冒烟只能断言 role/label/selected——索引属性靠代码评审与 GPUI 自身覆盖，这里如实标注。
+  **② 发布包校验（#15）**：原缺口是「`package.ps1` 没法在 Linux 端到端跑」。本轮给脚本加了
+  **`-VerifyOnly`** 开关（只做必需资产 + `data/taxon/VERSION` 字段校验、打印将要打进去的清单，
+  不构建/不拷贝/不打包），并把 exe 名改成**平台感知**（Windows `ftpt.exe` / 其它 `ftpt`），
+  于是校验逻辑跨平台可跑。为了真跑一次，用镜像下了 PowerShell 7.6.6 便携版
+  （`https://ghfast.top/https://github.com/PowerShell/.../powershell-7.6.6-linux-x64.tar.gz`，直连 GitHub 不通），
+  `pwsh scripts/package.ps1 -VerifyOnly` 在**真实仓库**上跑通：schema 1 / dim 768 / labels **93484**，
+  清单里 `models/*.onnx + data/bird_catalog.db + data/taxon/{4 文件} + NOTICE/LICENSE/AGPL + exiftool/` 齐。
+  **还做了 fail-closed 矩阵**（假仓库注入 4 种缺口，全部 exit=1 且报错精确）：整个 `data/taxon` 缺失 /
+  缺 `zh_names.json` / `VERSION` 缺 `dim` 字段 / `Cargo.toml` 无 version 且未指定 `-Version`。
+  **仍未验证的（真需要 Windows）**：`cargo build` 出来的 Windows 产物 + `DirectML.dll` 收集 +
+  bsdtar 打的 zip 本体——脚本里那条 bsdtar 身份校验在 Linux 上就该失败（GNU tar 的 `-a` 不认 zip），
+  这是有意设计；要在 Windows 上确认的是「产物能启动 + 包内资产齐全」。
 
 - **2026-09-24 feat(photo-ui/photo-recognize)：把 todo 剩下的四项做完（#13.3 / #13.4 / #17 / #16）**：
   用户说「剩下的工作按优先度实施」。本轮按 价值/风险 排序：先做不依赖模型的两件 UI 能力，
