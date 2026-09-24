@@ -43,7 +43,8 @@ pub fn defer_entity_action(
 
 /// 启动目录扫描任务
 pub fn start_scan(state_entity: Entity<AppState>, dir: PathBuf, recursive: bool, cx: &mut App) {
-    let (generation, cancel_token, global_db) = state_entity.update(cx, |state, cx| {
+    let (generation, cancel_token, global_db, previous_dir) =
+        state_entity.update(cx, |state, cx| {
         // 换目录前先把上一张未落盘的调整参数写回：flush 用的是旧的 current_dir + folder_db，
         // 一旦 current_dir 先改了，相对路径就会算到新目录上（写错库或干脆写不进去）。
         state.flush_adjustments();
@@ -71,9 +72,16 @@ pub fn start_scan(state_entity: Entity<AppState>, dir: PathBuf, recursive: bool,
         state.scan_stage = Some("正在扫描文件...".to_string());
         state.scan_done = 0;
         state.scan_total = 0;
+        // 「打开的是不是另一个目录」用于下面那条自愈判据（重扫当前视图不算）
+        let previous_dir = state.current_dir.clone();
         state.current_dir = Some(dir.clone());
         cx.notify();
-        (state.scan_generation, new_cancel, state.global_db.clone())
+        (
+            state.scan_generation,
+            new_cancel,
+            state.global_db.clone(),
+            previous_dir,
+        )
     });
 
     let entity_clone = state_entity.clone();
@@ -87,6 +95,9 @@ pub fn start_scan(state_entity: Entity<AppState>, dir: PathBuf, recursive: bool,
             })
             .await;
 
+        // 「打开了一个顶层没有照片的目录」→ 自愈标志（下面 update 之后再重扫一次，
+        // 不能在 update 里再调 start_scan：那会重入 update 直接 panic）
+        let mut escalate = false;
         let _ = async_cx.update(|cx| {
             state_entity.update(cx, |state, cx| {
                 if state.scan_generation != generation {
@@ -167,6 +178,17 @@ pub fn start_scan(state_entity: Entity<AppState>, dir: PathBuf, recursive: bool,
                         } else if let Some(&first) = state.display_order.first() {
                             state.select_single(first);
                         }
+
+                        // 顶层一张照片都没有 + 这次是**打开另一个目录**（不是重扫当前视图）
+                        // → 自动改成包含子目录再扫一次。用户报「点击最近打开后没有自动加载
+                        // 数据，空的」：卡上的源目录根下只有 DCIM/，照片都在子目录里，当初用
+                        // 「仅添加并浏览」（递归）打开过；之后点「最近打开」那一行重开时按配置
+                        // 默认（单层）扫 → 顶层 0 张 → 界面全空（文件其实都在）。
+                        // 只在换目录时自愈：F5 / 删除 / 撤销这类重扫不动当前视图，否则删掉顶层
+                        // 最后一张后会悄悄把视图改宽。
+                        escalate = !recursive
+                            && state.items.is_empty()
+                            && previous_dir.as_deref() != Some(dir.as_path());
                     }
                     Err(e) => {
                         // 扫描失败别留悬挂的跳转目标，否则下次扫描完成后会莫名选中
@@ -177,6 +199,18 @@ pub fn start_scan(state_entity: Entity<AppState>, dir: PathBuf, recursive: bool,
                 cx.notify();
             });
         });
+
+        // 顶层没有照片的目录：改成包含子目录再扫一次（不能在上一段 update 里调
+        // start_scan——那会重入 update 直接 panic）
+        if escalate {
+            let _ = async_cx.update(|cx| {
+                state_entity.update(cx, |state, cx| {
+                    state.set_status_message("顶层没有照片，已改为包含子目录重新扫描…");
+                    cx.notify();
+                });
+                start_scan(state_entity.clone(), dir.clone(), true, cx);
+            });
+        }
 
         // 启动后台缩略图生成管线（§7.1）：先补图，再提 EXIF
         let _ = async_cx.update(|cx| {

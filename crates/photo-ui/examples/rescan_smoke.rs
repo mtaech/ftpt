@@ -247,6 +247,40 @@ fn main() {
                 check!(format!("失踪文件被剔除（剩 {left} 项）"), left == 0);
                 check!("焦点图失踪后预览槽位被清掉", !has_preview);
 
+                // ── 9) 打开一个「顶层没有照片」的目录：不能是空的 ──
+                // 用户报「点击最近打开后没有自动加载数据，空的」：卡上的源目录根下只有 DCIM/，
+                // 照片都在子目录里；当初是用「仅添加并浏览」（递归）打开的，之后点「最近打开」
+                // 那一行重开时按配置默认（单层）扫 → 顶层 0 张 → 界面看起来全空（文件都在）。
+                // 这里打开**另一个**目录（自愈判据只看「换了目录」），断言能自愈看到卡里的照片。
+                let card_dir = smoke_dir.join("card");
+                write_jpeg(&card_dir.join("DCIM").join("100_CANON").join("card.jpg"));
+                let _ = async_cx.update(|cx| {
+                    engine_ops::start_scan(task_state.clone(), card_dir.clone(), false, cx);
+                });
+                let mut card_items: Vec<String> = Vec::new();
+                for _ in 0..60 {
+                    pump(async_cx, 250).await;
+                    card_items = items(async_cx);
+                    if !card_items.is_empty() {
+                        break;
+                    }
+                }
+                check!(
+                    format!("打开顶层无照片的目录后自动包含子目录（{card_items:?}）"),
+                    card_items.iter().any(|n| n == "card.jpg")
+                );
+                check!(
+                    "自愈后的视图模式是递归（后续重扫不会再变空）",
+                    async_cx.update(|cx| task_state.read(cx).scan_recursive)
+                );
+                fire(async_cx, handle, Box::new(Rescan));
+                pump(async_cx, 2500).await;
+                let card_after_f5 = items(async_cx);
+                check!(
+                    format!("F5 之后卡里的照片还在（{card_after_f5:?}）"),
+                    card_after_f5.iter().any(|n| n == "card.jpg")
+                );
+
                 let _ = std::fs::remove_dir_all(&smoke_dir);
                 if failures == 0 {
                     println!("全部通过");
