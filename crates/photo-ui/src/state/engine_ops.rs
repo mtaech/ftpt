@@ -1684,10 +1684,11 @@ fn ensure_recognizer(
     slot: &SharedRecognizer,
     models_dir: &Path,
     catalog_db: &Path,
+    region: &str,
 ) -> Result<(), String> {
     let mut guard = slot.lock();
     if guard.is_none() {
-        match photo_recognize::Recognizer::new(models_dir, catalog_db) {
+        match photo_recognize::Recognizer::with_region(models_dir, catalog_db, region) {
             Ok(recognizer) => {
                 tracing::info!(
                     "识别器装配完成（常驻缓存）：后端 {}（{}），资产版本 {:?}",
@@ -1833,6 +1834,8 @@ pub fn start_region_recognition(
     };
     let models_dir = data_root.join("models");
     let catalog_db = data_root.join("data/bird_catalog.db");
+    // 识别地区：装配常驻识别器时按当前配置裁剪候选（改动后设置页会释放重装）
+    let region = state_entity.read(cx).app_config.recognition_region.clone();
 
     cx.spawn(async move |async_cx: &mut gpui_kit::AsyncApp| {
         // 后台：模型装配 + 区域识别（CPU 密集，绝不放前台执行器）
@@ -1841,7 +1844,7 @@ pub fn start_region_recognition(
             .background_executor()
             .spawn(async move {
                 // 常驻识别器：首次调用装配（~1-2s），之后复用（批量/框选共用）
-                ensure_recognizer(&shared, &models_dir, &catalog_db)?;
+                ensure_recognizer(&shared, &models_dir, &catalog_db, &region)?;
                 let format = photo_domain::ImageFormat::from_extension(
                     path_bg
                         .extension()
@@ -2094,6 +2097,8 @@ pub fn start_recognition(
     let catalog_db = data_root.join("data/bird_catalog.db");
     // 常驻识别器槽位：克隆进后台线程（批量与框选共用同一实例，装配一次）
     let shared_recognizer = state_entity.read(cx).recognizer.clone();
+    // 识别地区：装配常驻识别器时按当前配置裁剪候选（改动后设置页会释放重装）
+    let region = state_entity.read(cx).app_config.recognition_region.clone();
 
     // 后台 worker -> 前台的结果队列（前台 try_recv 非阻塞，节拍到了就收）
     let (tx, rx) = std::sync::mpsc::channel::<RecognizeOutcome>();
@@ -2104,7 +2109,9 @@ pub fn start_recognition(
             .background_executor()
             .spawn(async move {
                 // 常驻识别器：首次调用装配（~1-2s），之后复用（批量/框选共用）
-                if let Err(msg) = ensure_recognizer(&shared_recognizer, &models_dir, &catalog_db) {
+                if let Err(msg) =
+                    ensure_recognizer(&shared_recognizer, &models_dir, &catalog_db, &region)
+                {
                     let _ = tx.send(RecognizeOutcome::Fatal(msg));
                     let _ = tx.send(RecognizeOutcome::Finished);
                     return;

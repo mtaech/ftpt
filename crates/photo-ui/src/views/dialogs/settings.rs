@@ -729,6 +729,30 @@ fn build_recognition_page(app: &Entity<AppState>) -> SettingPage {
                     .description("Focus 模式优先从 EXIF 提取相机硬件对焦区域直接送入分类器，无对焦点时回退全图 YOLO")
                     .keywords(["识别", "YOLO", "对焦点", "AI", "定位", "模型", "detection", "focus"]),
 
+                    SettingItem::new(
+                        "识别地区（鸟类分布过滤）",
+                        SettingField::render({
+                            let app = app.clone();
+                            move |_options: &RenderOptions, _window: &mut Window, cx: &mut App| {
+                                div()
+                                    .w_full()
+                                    .max_w(px(420.))
+                                    .when_some(app.read(cx).recognition_region_select.clone(), |this, select| {
+                                        this.child(
+                                            Select::new(&select)
+                                                .w_full()
+                                                .search_placeholder("搜索省份...")
+                                                .placeholder("全国（不过滤）")
+                                                .menu_max_h(px(320.)),
+                                        )
+                                    })
+                            }
+                        }),
+                    )
+                    .layout(Axis::Vertical)
+                    .description("设置后识别候选只保留「该省有出现记录」的鸟种：本地没有的鸟不会再被推荐。非鸟标签与分布数据缺失的鸟种恒不过滤；拍摄地不在该省（出差/旅行）时请切回全国。地区在下次识别时生效（会释放常驻识别器重装，约 1-2 秒）")
+                    .keywords(["识别", "地区", "省份", "分布", "地理", "region", "province", "鸟"]),
+
                 ]),
         )
         .group(

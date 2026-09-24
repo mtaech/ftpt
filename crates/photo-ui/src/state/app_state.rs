@@ -440,6 +440,10 @@ pub struct AppState {
     /// 两个下拉的确认事件订阅（持有保证持续接收）
     pub _sort_select_sub: Option<Subscription>,
     pub _grid_cols_select_sub: Option<Subscription>,
+    /// 设置页「识别地区」可搜索选择器（全国 + 省级行政区；创建需要 Window）
+    pub recognition_region_select: Option<Entity<ChoiceSelectState>>,
+    /// 地区选择器确认事件订阅
+    pub _recognition_region_select_sub: Option<Subscription>,
 
     // ── 导入弹窗（SD 卡 / 目录）──
     pub import: ImportState,
@@ -1255,6 +1259,8 @@ impl AppState {
             grid_cols_select: None,
             _sort_select_sub: None,
             _grid_cols_select_sub: None,
+            recognition_region_select: None,
+            _recognition_region_select_sub: None,
             import: ImportState::default(),
             import_dest_input: None,
             import_rename_input: None,

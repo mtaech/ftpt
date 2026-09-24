@@ -145,6 +145,16 @@ fn main() {
                     std::process::exit(1);
                 }
 
+                // ── 0) 地区过滤接线：识别前设一个省，装配后的常驻识别器应启用过滤 ──
+                // （bird_regions.json 是可选资产；缺失时按设计关闭过滤，断言跳过）
+                let region_asset_present = std::env::var("PHOTO_DATA_DIR").is_ok()
+                    || repo_root.join("data/taxon/bird_regions.json").exists();
+                let _ = async_cx.update(|cx| {
+                    task_state.update(cx, |s, _cx| {
+                        s.app_config.recognition_region = "浙江省".to_string();
+                    });
+                });
+
                 // ── 1) 全部识别：采样看能不能在途中抓到中间进度 ──
                 fire(async_cx, handle, Box::new(RecognizeAllUnrecognized));
                 let mut saw_partial = false;
@@ -184,6 +194,20 @@ fn main() {
                         .count()
                 });
                 check!("每张都拿到了识别状态", unresolved == 0);
+
+                // ── 1.5) 地区过滤在装配后的常驻识别器上真的启用了 ──
+                let region_active = read_state!(|s: &AppState| {
+                    s.recognizer
+                        .lock()
+                        .as_ref()
+                        .map(|r| r.region_filter_active())
+                        .unwrap_or(false)
+                });
+                if region_asset_present {
+                    check!("地区过滤装配后启用（候选按浙江省裁剪）", region_active);
+                } else {
+                    println!("SKIP: 无 data/taxon/bird_regions.json，地区过滤断言跳过");
+                }
 
                 // ── 2) 取消：强制重跑一批，250ms 后置标志，必须很快停下 ──
                 fire(async_cx, handle, Box::new(ReRecognizeAll));

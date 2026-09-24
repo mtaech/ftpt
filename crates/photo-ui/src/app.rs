@@ -120,6 +120,43 @@ impl AppState {
         state.grid_cols_select = Some(cols_select);
         state._sort_select_sub = Some(sort_select_sub);
         state._grid_cols_select_sub = Some(cols_select_sub);
+        // 设置页「识别地区」下拉：全国 + 省级行政区（识别候选按地区裁剪鸟种）。
+        // 值空串 = 全国（不过滤）；地区在识别器装配时生效 → 变更即释放常驻识别器，
+        // 下次识别/框选自动按新地区重装（约 1-2s）。
+        let mut region_items: Vec<(&str, &str)> = vec![("", "全国")];
+        region_items.extend(photo_recognize::CHINA_PROVINCES.iter().map(|p| (*p, *p)));
+        let region_options = crate::state::app_state::choice_options(&region_items);
+        let region_value: SharedString = state.app_config.recognition_region.clone().into();
+        let region_ix = region_options.position(&region_value);
+        let region_select = cx.new(|cx| {
+            SelectState::new(region_options, region_ix, window, cx).searchable(true)
+        });
+        let region_select_sub = cx.subscribe(
+            &region_select,
+            move |this,
+                  _entity,
+                  event: &SelectEvent<SearchableVec<crate::state::app_state::ChoiceOption>>,
+                  cx| {
+                if let SelectEvent::Confirm(Some(value)) = event {
+                    let region = value.as_ref().to_string();
+                    this.app_config.recognition_region = region.clone();
+                    this.save_config();
+                    // 地区过滤在识别器装配时生效：释放常驻识别器，下次识别按新地区重装
+                    let taken = this.recognizer.lock().take();
+                    this.set_status_message(if region.is_empty() {
+                        "识别地区已设为全国（不过滤）".to_string()
+                    } else if taken.is_some() {
+                        format!("识别地区已设为{region}，识别器将按新地区重新装配")
+                    } else {
+                        format!("识别地区已设为{region}（下次识别生效）")
+                    });
+                    drop(taken);
+                    cx.notify();
+                }
+            },
+        );
+        state.recognition_region_select = Some(region_select);
+        state._recognition_region_select_sub = Some(region_select_sub);
         // 多选筛选器（§13.3）：镜头 / 物种。候选项在扫描完成后由
         // sync_filter_option_selects 重建；选中集由 criteria 驱动，这里订阅写回。
         let lens_filter_select = cx.new(|cx| {

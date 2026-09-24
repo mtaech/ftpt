@@ -90,6 +90,12 @@ pub struct AppConfig {
     /// 常驻约 600MB；释放后下次识别/框选自动重新装配（约 1-2 秒）。手改配置越界时钳到 0..=240。
     #[serde(default)]
     pub recognizer_idle_unload_minutes: u32,
+    /// 识别地区过滤：空串 = 全国（不过滤，默认）；否则为省级行政区名称
+    /// （如「浙江省」，取值见 photo-recognize 的 CHINA_PROVINCES）。
+    /// 装配识别器时按此值裁剪候选：只保留「该省有 GBIF 出现记录」的鸟种，
+    /// 非鸟标签与「无地区数据」的鸟种恒不过滤（保守策略）。改动后下次识别生效。
+    #[serde(default)]
+    pub recognition_region: String,
     /// 上次使用的导入目标根目录（导入弹窗预填；None = 未设置，回退当前浏览目录）。
     /// 旧配置无此字段时为 None（serde 静默忽略）。
     #[serde(default)]
@@ -238,6 +244,7 @@ impl Default for AppConfig {
             export_dir: None,
             import_dir: None,
             recognizer_idle_unload_minutes: 0,
+            recognition_region: String::new(),
             stack_mode: StackMode::default(),
             grid_columns: default_grid_columns(),
             ui_scale: default_ui_scale(),
@@ -256,6 +263,9 @@ impl AppConfig {
         self.ui_scale = self.ui_scale.clamp(70, 200);
         // 空闲自动卸载：0 = 关闭；上限 240 分钟（再长就没有「空闲回收」的意义了）
         self.recognizer_idle_unload_minutes = self.recognizer_idle_unload_minutes.min(240);
+        // 识别地区：只做规范化（去首尾空白），不校验取值——未知地区在识别器侧
+        // 按「无地区数据」保守放行，不阻断识别。
+        self.recognition_region = self.recognition_region.trim().to_string();
         self.accent_color = self.accent_color.as_deref().and_then(normalize_accent_hex);
         self.export_presets = self
             .export_presets
@@ -528,6 +538,29 @@ mod tests {
         let loaded = load_config(&path).unwrap();
         assert_eq!(loaded.font_family, "Microsoft YaHei UI");
         assert!(!loaded.include_subdirectories);
+    }
+
+    #[test]
+    fn test_recognition_region_default_and_roundtrip() {
+        // 默认空串 = 全国（不过滤，不改变现状）
+        assert_eq!(AppConfig::default().recognition_region, "");
+
+        // 缺键的旧配置 -> 回退默认空串
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "uiScale = 100\n").unwrap();
+        assert_eq!(load_config(&path).unwrap().recognition_region, "");
+
+        // 写入后能原样读回（设置面板下拉用）
+        let mut cfg = AppConfig::default();
+        cfg.recognition_region = "浙江省".to_string();
+        save_config(&path, &cfg).unwrap();
+        let back = load_config(&path).unwrap();
+        assert_eq!(back.recognition_region.as_str(), "浙江省");
+
+        // 手改配置带首尾空白 -> 读入即 trim
+        std::fs::write(&path, "recognitionRegion = \"  浙江省  \"\n").unwrap();
+        assert_eq!(load_config(&path).unwrap().recognition_region.as_str(), "浙江省");
     }
 
     #[test]

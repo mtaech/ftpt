@@ -243,11 +243,23 @@ fn render_status_right(state: &AppState, cx: &mut Context<AppState>) -> impl Int
         }
     }
 
-    // 默认: 就绪
+    // 默认: 就绪（识别地区过滤开启时带上地区标记——提醒拍摄地变化时切回全国）
     h_flex()
         .items_center()
-        .gap_1()
+        .gap_1p5()
         .text_color(cx.theme().muted_foreground)
+        .when(!state.app_config.recognition_region.is_empty(), |this| {
+            this.child(
+                div()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_full()
+                    .bg(cx.theme().muted.opacity(0.4))
+                    .text_xs()
+                    .text_color(cx.theme().warning)
+                    .child(format!("地区: {}", state.app_config.recognition_region)),
+            )
+        })
         .child("就绪")
         .into_any_element()
 }

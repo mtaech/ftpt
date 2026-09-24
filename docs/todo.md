@@ -464,6 +464,58 @@
   `quick-xml 0.41` 只是 `wayland-scanner` / `xcb` 的传递依赖（GPUI 平台层），与本仓库源码无关。
   条目按实测关闭，无需改动。
 
+### 19. 🟡 地区设置 —— 识别候选按「省级鸟种分布」裁剪（2026-09-24 实施中）
+
+- **起因**：用户报「有些识别结果不是很准确，我本地没有这个鸟也给我推荐了这个结果」——中国包
+  已经按 CoL China 把标签空间裁到中国（境外种在源头消失），但中国内部「别省的鸟」仍会被全国
+  用户都推荐（云南的鸟推给浙江用户）。
+- **做法（运行时过滤，不是第二个包）**：
+  - `photo-recognize`：新增 `AppConfig.recognition_region`（空串 = 全国，否则省级行政区名）；
+    `Recognizer::with_region(models, db, region)` 在装配时按地区把 top-k 检索的候选裁剪到
+    「该省有 GBIF 出现记录」的鸟种（`build_region_filter` 纯逻辑，`bioclip.rs`）。规则：非鸟
+    标签恒不过滤；鸟种**无任何中国记录**（数据盲区）放行；有数据但目标省 0 条才排除。
+    裁剪实现为「子矩阵 sgemm」：把允许列搬运成连续矩阵再检索，下标再映射回中国包原始列
+    （`class_index` 语义不变）。检索从 93484 列降到地区子集，速度不降反升。
+  - `photo-ui`：设置页「识别与性能」新增「识别地区」可搜索下拉（全国 + 34 省级行政区，
+    `CHINA_PROVINCES`），变更即 `save_config` + 释放常驻识别器（下次识别按新地区重装）。
+  - `recognize_smoke` 新增地区断言：设「浙江省」后装配的识别器 `region_filter_active()`
+    必须为 true（无 `bird_regions.json` 时按设计跳过）。
+- **数据（bioclip_demo/data/build_bird_regions.py，2026-09-24 重写）**：对每个鸟种用
+  `/occurrence/search?country=CN&hasCoordinate=true&limit=0&facet=stateProvince&facetLimit=200`
+  **单查询**拿省级分布（实测 ~1s/种），`stateProvince` 串归一化到省级名（`GBIF_PROVINCE_MAP`，
+  未映射串集中收集补表）。产物 `data/taxon/bird_regions.json`（随包分发，**可选资产**：缺失时
+  地区过滤关闭，识别不受影响）。
+  **为什么不是逐条下载坐标 + 点在多边形内判定（build_geo 路线）**：实测 GBIF 记录接口单页
+  6~60s、分页采样有偏（喜鹊 900 条样本只覆盖 12 省，全量 1451 条才到 28 个 stateProvince 串），
+  全量抓 1514 种要数小时；facet 单查询 ~1s 且 `facetLimit=100` 就能返回全部省（README 里
+  「facetLimit 调大无效」的旧结论已过时）。
+- **产物实测**：1514 个鸟种标签里 **1356 种**有省级记录，共 **14678 条（种,省）**映射；
+  常见鸟覆盖良好（麻雀 32 省、乌鸫 28 省、喜鹊 21 省）。产物 302KB，随包。
+- **验证**：`cargo check --workspace --all-targets` 0 warning；`cargo test` 全绿
+  （recognize 33→**35**：`test_build_region_filter_semantics` / `test_build_region_filter_species_of_alignment`；
+  config 20→**23**：`test_recognition_region_default_and_roundtrip` 等）；`recognize_smoke`
+  6/6 全过（含「地区过滤装配后启用」断言；无 `bird_regions.json` 时该断言 SKIP）、`region_smoke` 全过（无回归）。
+- **真照片端到端对照**（`crates/rawlib/img.jpg`，同一张图、同一识别器代码，只换地区）：
+  - 全国 → 东方白鹳 **76.4%**（候选 白鹳/钳嘴鹳/白鹤/彩鹳）；
+  - 浙江省（该鹳有 255 条记录）→ 东方白鹳仍 **76.4%**，候选换成 白鹤/黑鹳/丹顶鹤；
+  - 陕西省（该鹳 0 条记录）→ 东方白鹳**被排除**，top-1 变成钳嘴鹳 71.8%（本地候选）。
+  这条验证抓出了一个真 bug（见下），单元测试没抓到。
+- **踩坑（重要，留给以后）**：子矩阵第一版按「列连续」搬运 embedding——但 `emb` 是
+  **`[dim, full_cols]` 行优先**（npy shape 就是 `(768, K)`），第 c 列的 768 个分量是
+  `emb[d * full_cols + c]`（**跨步 full_cols，不连续**）。错版把矩阵转置着抄，检索分数全废：
+  真照片下东方白鹳 76.4% 被抄成 24% 的兰花。**纯逻辑单测当时也用了错的布局假设，所以是绿的**——
+  启发：凡是「搬运/转置」内存块的代码，单测里的假数据必须用**每个 (维度,列) 取值唯一**的矩阵，
+  并逐元素断言映射关系（现在的 `test_build_region_filter_semantics` 就是这么写的）。
+- **局限（如实记录）**：
+  - 地区数据来自 GBIF 的 `stateProvince` facet，**记录缺 stateProvince 时不计入**——个别常见鸟
+    在某省只有个位数记录（喜鹊在浙江仅 1 条），靠「≥1 条即放行」兜住；真正 0 条而实际有的
+    稀有本地鸟会被误排除（v1 接受，默认全国 + 可切回）。
+  - `stateProvince` 串是各数据集自填，`GBIF_PROVINCE_MAP` 是实测补出来的表（含 `Chihli`/`Kirin`/
+    `Shantung` 等旧拼写）；**仍未映射**的只有 11 个歧义/境外串（`Kachin`/`North`/`Arunachal Pradesh` 等）。
+  - **只对鸟（Aves）生效**：植物/昆虫/真菌恒不过滤（GBIF 中国坐标覆盖更差，硬过滤误杀风险高）。
+  - 用户设了地区但去外省拍摄 → 会误过滤，设置页说明 + 状态栏「地区: X」常驻标记提醒切回全国。
+- **待办**：把非鸟类群也做上（先要更好的中国分布数据）；或做「多省多选」。
+
 ---
 
 ## 建议顺序

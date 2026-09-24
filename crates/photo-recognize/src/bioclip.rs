@@ -48,6 +48,8 @@ const EMB_NPY: &str = "txt_emb_bioclip-2.npy";
 const EMB_JSON: &str = "txt_emb_bioclip-2.json";
 const ZH_JSON: &str = "zh_names.json";
 const VERSION_FILE: &str = "VERSION";
+/// 省级分布（可选资产：缺省 = 地区过滤关闭）
+const REGION_JSON: &str = "bird_regions.json";
 
 /// 名录子集资产（embedding 矩阵 + 标签 + 中文名）。
 pub struct BioClipAssets {
@@ -60,6 +62,8 @@ pub struct BioClipAssets {
     /// 拉丁名（种/属/科）→ 中文名
     zh: HashMap<String, String>,
     version: Option<String>,
+    /// 鸟种 → {省份: 出现记录数}（GBIF 中国坐标记录聚合；缺省 = 空，地区过滤关闭）
+    bird_regions: HashMap<String, HashMap<String, u32>>,
 }
 
 impl BioClipAssets {
@@ -97,13 +101,120 @@ impl BioClipAssets {
             }
         };
         let version = parse_version(&taxon_dir.join(VERSION_FILE));
-        Ok(Self { dim, cols, emb, labels, zh, version })
+        // 省级分布是可选资产：缺失或解析失败都只关掉地区过滤，不影响识别
+        let bird_regions = match std::fs::read(taxon_dir.join(REGION_JSON)) {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(map) => map,
+                Err(e) => {
+                    tracing::warn!(
+                        "{} 解析失败，地区过滤关闭: {e}",
+                        taxon_dir.join(REGION_JSON).display()
+                    );
+                    HashMap::new()
+                }
+            },
+            Err(_) => {
+                tracing::info!(
+                    "没有 {}，地区过滤关闭（识别候选为中国包全量）",
+                    taxon_dir.join(REGION_JSON).display()
+                );
+                HashMap::new()
+            }
+        };
+        Ok(Self { dim, cols, emb, labels, zh, version, bird_regions })
     }
 
     /// 标签总数（枚举类数，诊断用）
     pub fn label_count(&self) -> usize {
         self.cols
     }
+}
+
+/// 省级行政区名称（与 `build_bird_regions.py` 用的 Aliyun DataV 区划一致），
+/// 设置面板下拉与地区过滤取值共用。空串 = 全国（不过滤）。
+pub const CHINA_PROVINCES: &[&str] = &[
+    "北京市", "天津市", "河北省", "山西省", "内蒙古自治区", "辽宁省", "吉林省",
+    "黑龙江省", "上海市", "江苏省", "浙江省", "安徽省", "福建省", "江西省",
+    "山东省", "河南省", "湖北省", "湖南省", "广东省", "广西壮族自治区", "海南省",
+    "重庆市", "四川省", "贵州省", "云南省", "西藏自治区", "陕西省", "甘肃省",
+    "青海省", "宁夏回族自治区", "新疆维吾尔自治区", "台湾省", "香港特别行政区",
+    "澳门特别行政区",
+];
+
+/// 地区过滤：把 embedding 矩阵裁剪到「该地区允许的列」，top-k 检索只在这些列里做。
+///
+/// 允许规则（对每个标签列）：
+/// - 空地区（全国）→ 无过滤（`None`）
+/// - 非鸟标签（`path[2] != "Aves"`）→ 恒允许
+/// - 鸟种在 `bird_regions` 里**没有任何中国记录** → 放行（数据盲区不当证据）
+/// - 鸟种有数据且目标省记录数 ≥ 1 → 允许
+/// - 其余（有数据但目标省无记录）→ 排除
+pub struct RegionFilter {
+    /// 允许列在原始矩阵里的下标（升序）
+    pub col_indices: Vec<u32>,
+    /// 裁剪后的子矩阵 [dim, col_indices.len()]（列已按 col_indices 顺序搬运）
+    pub emb_sub: Vec<f32>,
+    pub dim: usize,
+    pub cols: usize,
+}
+
+impl RegionFilter {
+    pub fn active_cols(&self) -> usize {
+        self.cols
+    }
+}
+
+/// 纯逻辑：地区 → 允许列集合（可单测，不需模型）。
+///
+/// 无列被排除（含「地区数据缺失/全盲区」）时返回 `None` —— 回落无过滤路径，
+/// 不给空候选也不做无意义的搬运。
+pub fn build_region_filter(
+    region: &str,
+    labels: &[(Vec<String>, String)],
+    bird_regions: &HashMap<String, HashMap<String, u32>>,
+    emb: &[f32],
+    dim: usize,
+    full_cols: usize,
+) -> Option<RegionFilter> {
+    let region = region.trim();
+    if region.is_empty() {
+        return None;
+    }
+    let mut col_indices: Vec<u32> = Vec::new();
+    for i in 0..full_cols {
+        let (path, _common) = &labels[i];
+        let is_bird = path.get(2).is_some_and(|c| c == "Aves");
+        let allowed = if !is_bird {
+            true
+        } else {
+            let sci = species_of(path);
+            match bird_regions.get(&sci) {
+                None => true, // 无中国记录 = 数据盲区，放行
+                Some(provinces) => provinces.get(region).copied().unwrap_or(0) >= 1,
+            }
+        };
+        if allowed {
+            col_indices.push(i as u32);
+        }
+    }
+    // 全允许 → 过滤无意义；全排除 → 宁可不过滤也不给空候选
+    if col_indices.len() == full_cols || col_indices.is_empty() {
+        return None;
+    }
+    // emb 是 [dim, full_cols] 行优先（npy 的 shape 就是 (768, K)），所以
+    // 第 c 列的 768 个分量是 emb[d * full_cols + c]（**跨步 full_cols，不连续**）。
+    // 子矩阵按 [dim, cols] 行优先排：emb_sub[d * cols + sub_c] = emb[d * full_cols + orig_c]。
+    // （第一版按「列连续」搬运，等于把矩阵转置着抄，检索分数全错——真照片验证抓到：
+    //   东方白鹳 76.4% 被抄坏成 24% 的兰花。）
+    let cols = col_indices.len();
+    let mut emb_sub = vec![0f32; dim * cols];
+    for (sub_c, &ci) in col_indices.iter().enumerate() {
+        let orig_c = ci as usize;
+        for d in 0..dim {
+            emb_sub[d * cols + sub_c] = emb[d * full_cols + orig_c];
+        }
+    }
+    Some(RegionFilter { col_indices, emb_sub, dim, cols })
 }
 
 /// 从 VERSION（build_taxon_pack.py 写出的 JSON）里抠一个短版本串。
@@ -120,11 +231,44 @@ fn parse_version(path: &Path) -> Option<String> {
 pub struct BioClipClassifier {
     session: Session,
     assets: BioClipAssets,
+    /// 地区过滤（None = 全国/无过滤）。装配时按配置地区裁剪候选。
+    region: Option<RegionFilter>,
 }
 
 impl BioClipClassifier {
     pub fn new(session: Session, assets: BioClipAssets) -> Self {
-        Self { session, assets }
+        Self { session, assets, region: None }
+    }
+
+    /// 带地区过滤的装配。`region_name` 为空串 = 全国（不过滤）。
+    pub fn with_region(session: Session, assets: BioClipAssets, region_name: &str) -> Self {
+        let region = build_region_filter(
+            region_name,
+            &assets.labels,
+            &assets.bird_regions,
+            &assets.emb,
+            assets.dim,
+            assets.cols,
+        );
+        match &region {
+            Some(f) => tracing::info!(
+                "地区过滤生效：{}，允许 {}/{} 列",
+                region_name,
+                f.active_cols(),
+                assets.cols
+            ),
+            None if !region_name.trim().is_empty() => tracing::info!(
+                "地区 {} 无过滤数据（缺 bird_regions.json 或全为数据盲区），识别候选为中国包全量",
+                region_name
+            ),
+            None => {}
+        }
+        Self { session, assets, region }
+    }
+
+    /// 当前是否启用了地区过滤（诊断/冒烟用）
+    pub fn region_filter_active(&self) -> bool {
+        self.region.is_some()
     }
 }
 
@@ -136,7 +280,19 @@ impl Classifier for BioClipClassifier {
         bbox: BBox,
     ) -> Result<Classified, RecognizeError> {
         let feats = self.embed(img, bbox)?;
-        let ranked = rank(&feats, &self.assets.emb, self.assets.dim, self.assets.cols, TOPK);
+        let ranked = match &self.region {
+            // 地区过滤：对裁剪后的子矩阵检索，再把子下标映射回原始列号
+            // （class_index / candidates 仍引用中国包的原始列，与资产版本一致）
+            Some(f) => rank(&feats, &f.emb_sub, f.dim, f.cols, TOPK)
+                .into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|(score, sub)| (score, f.col_indices[sub as usize]))
+                        .collect::<Vec<_>>()
+                })
+                .collect(),
+            None => rank(&feats, &self.assets.emb, self.assets.dim, self.assets.cols, TOPK),
+        };
         let scores = &ranked[0];
         let (top_score, top_idx) = *scores.last().ok_or(RecognizeError::ClassificationOutputEmpty)?;
         let taxon = self.build_taxon(catalog, top_idx as usize);
@@ -171,6 +327,10 @@ impl Classifier for BioClipClassifier {
 
     fn whole_image_on_no_detection(&self) -> bool {
         true
+    }
+
+    fn region_filter_active(&self) -> bool {
+        self.region.is_some()
     }
 }
 
@@ -490,5 +650,85 @@ mod tests {
         let path = dir.path().join("bad.npy");
         std::fs::write(&path, b"not an npy at all").unwrap();
         assert!(load_npy(&path).is_err());
+    }
+
+    #[test]
+    fn test_build_region_filter_semantics() {
+        let dim = 4;
+        let mk = |path: Vec<String>| (path, String::new());
+        // 0: 鸟A 有数据且在本省 → 允许；1: 鸟B 有数据但不在本省 → 排除；
+        // 2: 鸟C 无数据（盲区）→ 允许；3: 非鸟（植物）→ 恒允许
+        let labels = vec![
+            mk(p(&["Animalia", "Chordata", "Aves", "Order", "Family", "GenusA", "spA"])),
+            mk(p(&["Animalia", "Chordata", "Aves", "Order", "Family", "GenusB", "spB"])),
+            mk(p(&["Animalia", "Chordata", "Aves", "Order", "Family", "GenusC", "spC"])),
+            mk(p(&["Plantae", "Tracheophyta", "Magnoliopsida", "Order", "Family", "GenusD", "spD"])),
+        ];
+        let mut regions: HashMap<String, HashMap<String, u32>> = HashMap::new();
+        regions.insert(
+            "GenusA spA".into(),
+            HashMap::from([("浙江省".to_string(), 3u32)]),
+        );
+        regions.insert(
+            "GenusB spB".into(),
+            HashMap::from([("云南省".to_string(), 2u32)]),
+        );
+        // emb 是 [dim, cols] 行优先：emb[d * 4 + c] = (d+1)*10 + c，
+        // 每个 (维度,列) 取值唯一，能精确验证列搬运的布局（第一版转置着抄的病根）。
+        let mut emb = vec![0f32; dim * 4];
+        for d in 0..dim {
+            for c in 0..4 {
+                emb[d * 4 + c] = ((d + 1) * 10 + c) as f32;
+            }
+        }
+
+        // 浙江省：允许 0（A 在本省）/ 2（C 无数据）/ 3（非鸟），排除 1（B 不在本省）
+        let f = build_region_filter("浙江省", &labels, &regions, &emb, dim, 4).unwrap();
+        assert_eq!(f.col_indices, vec![0, 2, 3]);
+        assert_eq!(f.active_cols(), 3);
+        // 子矩阵是 [dim, 3] 行优先：emb_sub[d * 3 + sub_c] == emb[d * 4 + col_indices[sub_c]]
+        assert_eq!(f.emb_sub.len(), dim * 3);
+        for (sub_c, &orig_c) in f.col_indices.iter().enumerate() {
+            for d in 0..dim {
+                assert_eq!(
+                    f.emb_sub[d * 3 + sub_c],
+                    emb[d * 4 + orig_c as usize],
+                    "子矩阵布局错：d={d} sub_c={sub_c} orig_c={orig_c}"
+                );
+            }
+        }
+
+        // 空地区（全国）→ 无过滤
+        assert!(build_region_filter("", &labels, &regions, &emb, dim, 4).is_none());
+        assert!(build_region_filter("   ", &labels, &regions, &emb, dim, 4).is_none());
+
+        // 地区数据全空（盲区）→ 全部允许 → None（回落无过滤，不给空候选）
+        assert!(build_region_filter("浙江省", &labels, &HashMap::new(), &emb, dim, 4).is_none());
+
+        // 有数据但目标省一个都不中，且还有非鸟列 → 仍产生过滤（只留非鸟）
+        let f2 = build_region_filter("西藏自治区", &labels, &regions, &emb, dim, 4).unwrap();
+        assert_eq!(f2.col_indices, vec![2, 3]); // C（盲区）+ 非鸟
+    }
+
+    #[test]
+    fn test_build_region_filter_species_of_alignment() {
+        // 学名口径必须与 species_of 一致：鸟种键是「属名 种加词」
+        let path = p(&["Animalia", "Chordata", "Aves", "Passeriformes", "Corvidae", "Pica", "pica"]);
+        let labels = vec![(path, String::new())];
+        let mut regions = HashMap::new();
+        regions.insert(
+            "Pica pica".to_string(),
+            HashMap::from([("浙江省".to_string(), 1u32)]),
+        );
+        let emb = vec![0f32; 768 * 1];
+        // 非鸟列不存在，只此一列是鸟且在本省 → 全部允许 → None
+        assert!(build_region_filter("浙江省", &labels, &regions, &emb, 768, 1).is_none());
+        // 同名键在别省 → 排除唯一一列 → 全排除 → None（保守回退）
+        let mut regions2 = HashMap::new();
+        regions2.insert(
+            "Pica pica".to_string(),
+            HashMap::from([("云南省".to_string(), 5u32)]),
+        );
+        assert!(build_region_filter("浙江省", &labels, &regions2, &emb, 768, 1).is_none());
     }
 }

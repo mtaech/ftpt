@@ -101,6 +101,13 @@ foreach ($key in @("schema", "dim", "labels")) {
     if ($null -eq $taxonVersion.$key) { throw "data/taxon/VERSION 缺少字段：$key" }
 }
 Write-Host "==> 名录子集包：schema $($taxonVersion.schema) / dim $($taxonVersion.dim) / labels $($taxonVersion.labels)"
+# bird_regions.json 是**可选**的地区过滤资产（省级鸟种分布，build_bird_regions.py 生成）：
+# 缺失时识别退化为「不过滤」，识别不受影响；存在则随 data/taxon/ 整体打进包。
+if (Test-Path (Join-Path $taxonDir "bird_regions.json")) {
+    Write-Host "==> 地区过滤资产：data/taxon/bird_regions.json 已就绪（随包分发）"
+} else {
+    Write-Host "==> 地区过滤资产：无 bird_regions.json（可选，缺失 = 识别不做地区过滤）"
+}
 
 # -VerifyOnly 到这里就够了：不构建、不拷贝、不打包，只把「将要打进去的内容」打出来。
 # 这样在 Linux/macOS 上也能验证资产齐不齐、VERSION 字段对不对（打 Windows 包本身仍需 Windows）。

@@ -36,7 +36,10 @@ use ort::session::Session;
 
 use photo_domain::{BBox, Capture, FocusPoint, Recognition};
 
-pub use bioclip::{BioClipAssets, BioClipClassifier, MODEL_FILE as BIOCLIP_MODEL_FILE};
+pub use bioclip::{
+    BioClipAssets, BioClipClassifier, CHINA_PROVINCES, RegionFilter, build_region_filter,
+    MODEL_FILE as BIOCLIP_MODEL_FILE,
+};
 pub use catalog::CatalogDb;
 pub use classifier::{Classified, Classifier};
 pub use detect::DetectionResult;
@@ -139,6 +142,21 @@ impl Recognizer {
     /// - Windows: DirectML → 失败回退 CPU 并 `tracing::warn` 记录原因
     /// - 非 Windows: CPU
     pub fn new(models_dir: &Path, catalog_db: &Path) -> Result<Self, RecognizeError> {
+        Self::with_region(models_dir, catalog_db, "")
+    }
+
+    /// 创建识别器并启用地区过滤。
+    ///
+    /// `region` 为空串 = 全国（不过滤，与 [`Recognizer::new`] 一致）；否则为省级
+    /// 行政区名称（见 [`crate::CHINA_PROVINCES`]）。地区过滤在装配时把 top-k 候选
+    /// 裁剪到「该省有 GBIF 出现记录」的鸟种（非鸟标签与无地区数据的鸟种恒不过滤），
+    /// 只影响检索，不改变资产版本（class_index 仍引用中国包原始列）。
+    /// 改动地区后需重新装配识别器（photo-ui 侧在设置变更时释放常驻识别器）。
+    pub fn with_region(
+        models_dir: &Path,
+        catalog_db: &Path,
+        region: &str,
+    ) -> Result<Self, RecognizeError> {
         let detector_path = models_dir.join(detect::MODEL_FILE);
 
         if !detector_path.exists() {
@@ -170,7 +188,8 @@ impl Recognizer {
                 model.display()
             ))
         })?;
-        let classifier: Box<dyn Classifier> = Box::new(BioClipClassifier::new(session, assets));
+        let classifier: Box<dyn Classifier> =
+            Box::new(BioClipClassifier::with_region(session, assets, region));
 
         tracing::info!(
             "识别器初始化完成，识别后端: {}，推理后端: {}",
@@ -189,6 +208,11 @@ impl Recognizer {
     /// 当前识别后端标识（恒为 `"bioclip"`），诊断与状态栏用。
     pub fn classifier_backend(&self) -> &'static str {
         self.classifier.backend()
+    }
+
+    /// 当前识别是否启用了地区过滤（诊断/状态栏/冒烟用）。
+    pub fn region_filter_active(&self) -> bool {
+        self.classifier.region_filter_active()
     }
 
     /// 当前识别后端的资产版本（class_index 的语义依赖它），无版本信息时为 None。

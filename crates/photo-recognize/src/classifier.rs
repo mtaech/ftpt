@@ -55,5 +55,10 @@ pub trait Classifier: Send {
     fn whole_image_on_no_detection(&self) -> bool {
         false
     }
+
+    /// 当前识别是否启用了地区过滤（诊断/冒烟用；默认无）。
+    fn region_filter_active(&self) -> bool {
+        false
+    }
 }
 

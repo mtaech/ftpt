@@ -40,6 +40,11 @@ BioCLIP 是**余弦相似度 ×100**——实测 top-1 落在 65~79 这个窄带
   但列落在全零填充区 → 已用文本塔补上（`data/computed_taxa.json`）；`Sansevieria trifasciata` 旧名
   没收录 → 用现行名 `Dracaena trifasciata`（中文名仍给「虎尾兰」）。
   **仍存的地理先验**：境外物种、动物园动物仍会被归到相近的中国物种。
+  **省级粒度（2026-09-24）**：中国包是「全国」硬先验，别省的鸟仍会被全国推荐。
+  新增**地区设置**（`AppConfig.recognition_region`，设置页「识别地区」下拉）：装配识别器时按
+  省级鸟种分布裁剪候选（`data/taxon/bird_regions.json`，GBIF facet 生成，可选资产），
+  本地没有的鸟不再进 top-k。默认全国（不过滤）；非鸟标签与无分布数据的鸟种恒不过滤。
+  实施见 `docs/todo.md` #19。
   实施见 `docs/todo.md` #7 / #8。
 
 ### 3. 一张图多个主体 —— **已于 2026-09-22 支持，见 ADR 0011**

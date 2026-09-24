@@ -21,7 +21,7 @@ use gpui_kit::{AppContext as _, Bounds, Point, WindowBounds, WindowOptions, px, 
 use photo_engine::import::ImportSubfolder;
 use photo_ui::actions::{Escape, OpenSettings, Rescan, Stats, ToggleLeftPanel, ToggleRightPanel};
 use photo_ui::state::import;
-use photo_ui::state::{ActiveDialog, AppState, ViewMode};
+use photo_ui::state::{ActiveDialog, AppState, SettingsTab, ViewMode};
 
 /// 在窗口上派发一个动作（与视图里 `window.dispatch_action(...)` 同一条路径）。
 fn fire(
@@ -200,11 +200,20 @@ fn main() {
                 });
                 pump(async_cx, 120).await;
 
-                // 设置弹窗（用户报 "window not found" 的那个按钮）
+                // 设置弹窗（用户报 "window not found" 的那个按钮）；钉到「识别与性能」页，
+                // 连「识别地区」下拉的渲染一起过一遍（该页有 SettingField::render 闭包）
+                let region_select_ready = async_cx.update(|cx| {
+                    task_state.update(cx, |state, cx| {
+                        state.settings_tab = SettingsTab::Recognition;
+                        cx.notify();
+                    });
+                    task_state.read(cx).recognition_region_select.is_some()
+                });
+                check!("识别地区下拉已在 AppState::build 创建", region_select_ready);
                 fire(async_cx, handle, Box::new(OpenSettings));
                 pump(async_cx, 250).await;
                 check!(
-                    "打开设置",
+                    "打开设置（识别与性能页，含识别地区下拉渲染）",
                     async_cx.update(|cx| matches!(
                         task_state.read(cx).active_dialog,
                         Some(ActiveDialog::Settings)
