@@ -740,30 +740,81 @@ fn build_recognition_page(app: &Entity<AppState>) -> SettingPage {
                         "常驻识别器内存",
                         SettingField::render({
                             let app = app.clone();
-                            move |_options, _window, cx| {
+                            move |options, _window, cx| {
                                 // 识别器是懒装配 + 常驻（避免每张重装 1-2 秒）；这里给显式释放入口
                                 let resident = app.read(cx).recognizer.lock().is_some();
-                                let app = app.clone();
-                                Button::new("release-recognizer")
-                                    .small()
-                                    .secondary()
-                                    .disabled(!resident)
-                                    .label(if resident {
-                                        "释放识别器（约 600MB）"
-                                    } else {
-                                        "识别器未装配"
-                                    })
-                                    .on_click(move |_, _, cx| {
-                                        crate::state::engine_ops::release_recognizer(
-                                            app.clone(),
-                                            cx,
-                                        );
-                                    })
+                                let idle_minutes =
+                                    app.read(cx).app_config.recognizer_idle_unload_minutes;
+                                let release_app = app.clone();
+                                v_flex()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("release-recognizer")
+                                            .small()
+                                            .secondary()
+                                            .with_size(options.size())
+                                            .disabled(!resident)
+                                            .label(if resident {
+                                                "释放识别器（约 600MB）"
+                                            } else {
+                                                "识别器未装配"
+                                            })
+                                            .on_click(move |_, _, cx| {
+                                                crate::state::engine_ops::release_recognizer(
+                                                    release_app.clone(),
+                                                    cx,
+                                                );
+                                            }),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child("空闲自动释放"),
+                                            )
+                                            .children([0u32, 5, 15, 30].map(|minutes| {
+                                                let app = app.clone();
+                                                let active = idle_minutes == minutes;
+                                                Button::new(format!("idle-unload-{minutes}"))
+                                                    .small()
+                                                    .with_size(options.size())
+                                                    .when(active, |b| b.secondary())
+                                                    .when(!active, |b| b.ghost())
+                                                    .label(if minutes == 0 {
+                                                        "关闭".to_string()
+                                                    } else {
+                                                        format!("{minutes} 分钟")
+                                                    })
+                                                    .on_click(move |_, _, cx| {
+                                                        app.update(cx, |state, cx| {
+                                                            state.app_config
+                                                                .recognizer_idle_unload_minutes =
+                                                                minutes;
+                                                            state.save_config();
+                                                            state.set_status_message(
+                                                                if minutes == 0 {
+                                                                    "已关闭识别器空闲自动释放"
+                                                                        .to_string()
+                                                                } else {
+                                                                    format!(
+                                                                        "识别器空闲 {minutes} 分钟后自动释放"
+                                                                    )
+                                                                },
+                                                            );
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                            })),
+                                    )
                             }
                         }),
                     )
                     .layout(Axis::Vertical)
-                    .description("org_det + BioCLIP + 名录 embedding 常驻约 600MB；释放后下次识别/框选自动重新装配（约 1-2 秒），适合一批拍完不再识别时回收内存")
+                    .description("org_det + BioCLIP + 名录 embedding 常驻约 600MB；释放后下次识别/框选自动重新装配（约 1-2 秒）。空闲自动释放默认关闭——开了之后下一次识别会多等 1-2 秒，是否划算按你的使用节奏定")
                     .keywords(["识别", "内存", "释放", "模型", "BioCLIP", "memory", "release"]),
 
                     SettingItem::new(

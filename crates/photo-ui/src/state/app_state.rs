@@ -242,6 +242,9 @@ pub struct AppState {
     pub _species_filter_sub: Option<Subscription>,
     /// 已经同步过候选项的扫描世代：与 scan_generation 不同才重建（避免每帧重设）
     pub filter_options_generation: u64,
+    /// 常驻识别器最近一次「在用」的时刻：空闲自动卸载（#17）据此计时。
+    /// 识别进行中每个检查 tick 都会刷新，所以长批量跑完还有完整的一段空闲窗口。
+    pub recognizer_last_used: Instant,
 
     // ── 派生管线 ──
     pub criteria: FilterCriteria,
@@ -740,6 +743,7 @@ impl AppState {
             _lens_filter_sub: None,
             _species_filter_sub: None,
             filter_options_generation: 0,
+            recognizer_last_used: Instant::now(),
 
             criteria: default_filter_criteria(),
             sort_by: SortBy::FileName,

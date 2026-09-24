@@ -83,6 +83,10 @@ pub struct AppConfig {
     /// 旧配置无此字段时为 None（serde 静默忽略）；导入目标目录仍不记忆（#14 另一半）。
     #[serde(default)]
     pub export_dir: Option<String>,
+    /// 常驻识别器空闲 N 分钟后自动释放（0 = 关闭，默认关闭）。
+    /// 常驻约 600MB；释放后下次识别/框选自动重新装配（约 1-2 秒）。手改配置越界时钳到 0..=240。
+    #[serde(default)]
+    pub recognizer_idle_unload_minutes: u32,
     /// 上次使用的导入目标根目录（导入弹窗预填；None = 未设置，回退当前浏览目录）。
     /// 旧配置无此字段时为 None（serde 静默忽略）。
     #[serde(default)]
@@ -175,6 +179,7 @@ impl Default for AppConfig {
             export_presets: vec![ExportPreset::default()],
             export_dir: None,
             import_dir: None,
+            recognizer_idle_unload_minutes: 0,
             stack_mode: StackMode::default(),
             grid_columns: default_grid_columns(),
             ui_scale: default_ui_scale(),
@@ -191,6 +196,8 @@ impl AppConfig {
         self.right_panel_width = self.right_panel_width.clamp(200, 480);
         self.grid_columns = self.grid_columns.clamp(2, 5);
         self.ui_scale = self.ui_scale.clamp(70, 200);
+        // 空闲自动卸载：0 = 关闭；上限 240 分钟（再长就没有「空闲回收」的意义了）
+        self.recognizer_idle_unload_minutes = self.recognizer_idle_unload_minutes.min(240);
         self.accent_color = self.accent_color.as_deref().and_then(normalize_accent_hex);
         self.export_presets = self
             .export_presets
@@ -340,6 +347,28 @@ mod tests {
         assert_eq!(c.ui_scale, 70);
         assert_eq!(c.export_presets[0].quality, 1);
         assert_eq!(c.export_presets[0].long_edge, None);
+    }
+
+    #[test]
+    fn test_recognizer_idle_unload_default_and_clamp() {
+        // 默认关闭（不改变现状：不会莫名让下一次识别慢 1-2 秒）
+        assert_eq!(AppConfig::default().recognizer_idle_unload_minutes, 0);
+
+        // 手改配置文件越界 → 钳到 240；负值不可能（u32）
+        let cfg = AppConfig {
+            recognizer_idle_unload_minutes: 99_999,
+            ..AppConfig::default()
+        };
+        assert_eq!(cfg.clamped().recognizer_idle_unload_minutes, 240);
+
+        // 缺键的旧配置 → 回退默认 0
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "uiScale = 100\n").unwrap();
+        assert_eq!(
+            load_config(&path).unwrap().recognizer_idle_unload_minutes,
+            0
+        );
     }
 
     #[test]

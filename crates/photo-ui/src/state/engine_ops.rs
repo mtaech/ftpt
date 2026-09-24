@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::{App, Context, Entity, Window};
 use photo_domain::{
@@ -1092,6 +1092,55 @@ pub fn release_recognizer(state_entity: Entity<AppState>, cx: &mut App) {
     drop(taken);
 }
 
+/// 识别器空闲自动卸载（docs/todo.md #17）：每 30s 检查一次是否该释放。
+///
+/// 判据在 model::recognizer::should_unload_recognizer（纯逻辑 + 单测）：配置 0 = 关闭、
+/// 未装配不释放、识别进行中绝不释放、空闲满阈值才释放。识别进行中会把
+/// recognizer_last_used 刷到当前时刻，所以长批量结束后仍有完整的空闲窗口。
+pub fn start_recognizer_idle_watch(state_entity: Entity<AppState>, cx: &mut App) {
+    // 检查节拍：太密没意义（阈值是分钟级），太疏会让「空闲计时」粒度变粗。
+    // 环境变量 PHOTO_RECOGNIZER_IDLE_TICK_MS 只给冒烟用（把 30s 压到秒级才能端到端验证，
+    // 否则一个用例要等半分钟）；正常运行不要设它。
+    let tick_ms = std::env::var("PHOTO_RECOGNIZER_IDLE_TICK_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(30_000);
+    let tick = Duration::from_millis(tick_ms);
+
+    cx.spawn(async move |async_cx: &mut gpui_kit::AsyncApp| loop {
+        async_cx.background_executor().timer(tick).await;
+
+        let taken = async_cx.update(|cx| {
+            state_entity
+                .update(cx, |state, cx| {
+                    let busy = state.is_recognizing || state.region_recognizing;
+                    if busy {
+                        // 正在用 = 有活动，重置空闲计时
+                        state.recognizer_last_used = Instant::now();
+                    }
+                    let minutes = state.app_config.recognizer_idle_unload_minutes;
+                    let assembled = state.recognizer.lock().is_some();
+                    let idle = state.recognizer_last_used.elapsed();
+                    if !crate::model::recognizer::should_unload_recognizer(
+                        minutes, assembled, busy, idle,
+                    ) {
+                        return None;
+                    }
+                    let taken = state.recognizer.lock().take();
+                    state.set_status_message(format!(
+                        "识别器已空闲 {minutes} 分钟，自动释放约 600MB（下次识别会自动重新装配）"
+                    ));
+                    cx.notify();
+                    taken
+                })
+        });
+        // 在实体 update 之外真正析构（约 600MB，别压在持有 AppState 租借的闭包里）
+        drop(taken);
+    })
+    .detach();
+}
+
 /// 选批量移动/复制的目标目录（系统目录对话框；取消则维持原状）。
 /// 选定后才弹确认框——确认框里显示的必须是真正要写进去的目录。
 pub fn pick_batch_target_dir(
@@ -1418,6 +1467,7 @@ pub fn start_region_recognition(
             return None;
         }
         state.region_recognizing = true;
+        state.recognizer_last_used = Instant::now();
         state.set_status_message("框选识别中…".to_string());
         cx.notify();
         Some(state.recognizer.clone())
@@ -1638,6 +1688,9 @@ pub fn start_recognition(
             return Vec::new();
         }
         state.is_recognizing = true;
+        // 空闲自动卸载（#17）计时起点：否则「空闲很久 → 跑一个 5 秒的批量」会被下一次
+        // tick 立刻判成空闲超时，刚装配好就被释放
+        state.recognizer_last_used = Instant::now();
         state.recognize_cancel = cancel.clone();
         state.recognize_done = 0;
         // 进度条上别残留上一批的文件名

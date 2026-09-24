@@ -175,6 +175,8 @@ impl AppState {
         }));
         // Dock 工作区：左右停靠区 + 中央主视图（建面板实体需要 window）
         state.init_dock(window, cx);
+        // 识别器空闲自动卸载（#17）：常驻约 600MB，按配置的空闲阈值自动释放
+        crate::state::engine_ops::start_recognizer_idle_watch(cx.entity(), cx);
         state
     }
 

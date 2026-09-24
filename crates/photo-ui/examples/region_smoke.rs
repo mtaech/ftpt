@@ -64,6 +64,11 @@ fn write_jpeg(path: &Path, rgb: (u8, u8, u8)) {
 fn main() {
     // 无头冒烟固定走 Xvfb 的 X11 后端：Wayland 会话下窗口会落到真实桌面，渲染帧不可控
     photo_ui::app::prepare_headless_smoke();
+    // 空闲自动卸载（#17）的检查节拍压到 500ms：默认 30s，端到端验证一个用例要等半分钟。
+    // SAFETY: 在 GPUI 启动前、进程单线程时设置环境变量
+    unsafe {
+        std::env::set_var("PHOTO_RECOGNIZER_IDLE_TICK_MS", "500");
+    }
     // 模型/名录库定位：与 data_root() 同一条约定，缺模型就跳过
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let has_models = std::env::var("PHOTO_DATA_DIR").is_ok()
@@ -377,6 +382,46 @@ fn main() {
                 check!(
                     format!("存量坏数据重扫后仍显示物种（{reload_name:?} / {reload_conf:?}）"),
                     reload_name.as_deref() == Some("Padda oryzivora")
+                );
+
+                // ── 6) 识别器空闲自动卸载（#17）──
+                // a) 识别进行中绝不释放（busy 保护）：置 busy + 把空闲时间推过阈值
+                async_cx.update(|cx| {
+                    task_state.update(cx, |state, _| {
+                        state.app_config.recognizer_idle_unload_minutes = 1;
+                        state.region_recognizing = true;
+                        state.recognizer_last_used =
+                            std::time::Instant::now() - Duration::from_secs(600);
+                    });
+                });
+                pump(async_cx, 1200).await;
+                check!(
+                    "识别进行中不释放识别器（busy 保护）",
+                    read_state!(|s: &AppState| s.recognizer.lock().is_some())
+                );
+
+                // b) 空闲满阈值 → 自动释放 + 状态栏如实说明
+                async_cx.update(|cx| {
+                    task_state.update(cx, |state, _| {
+                        state.region_recognizing = false;
+                        state.recognizer_last_used =
+                            std::time::Instant::now() - Duration::from_secs(600);
+                    });
+                });
+                pump(async_cx, 1500).await;
+                let (still_assembled, idle_msg) = read_state!(|s: &AppState| {
+                    (
+                        s.recognizer.lock().is_some(),
+                        s.status_message
+                            .clone()
+                            .map(|(m, _)| m)
+                            .unwrap_or_default(),
+                    )
+                });
+                check!("空闲超阈值后自动释放识别器", !still_assembled);
+                check!(
+                    format!("状态栏说明自动释放（{idle_msg:?}）"),
+                    idle_msg.contains("自动释放")
                 );
 
                 // 清理：本冒烟在临时目录产生的全局索引行不留在开发库
