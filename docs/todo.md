@@ -17,6 +17,13 @@
 > **2026-09-23 Batch 5 落地（commit `9a70423`，家犬跟进另见 #7）**：#7 补「家养/外来」名单并进同一包（93,480 → 93,484 类，拍猫实测 云猫 67.6% → 家猫 69.5%，家犬/家猪口径见 #7 · `cdf82e1`）、
 > #8 拍板不随包世界包、#10 / #11 维持 ⏸ 并消掉「建议顺序」里要求做 Batch 3 的矛盾。
 >
+> **2026-09-24 Batch 7 落地**：**#13.3 / #13.4 / #17 / #16 全部做完**——
+> 镜头/物种多选筛选器（用 gpui-component 的 Combobox，自带方向键导航与搜索）、
+> 自绘右键菜单（Up/Down/Enter/Esc + 240px 最大高滚动，`context_menu_smoke` 20 项）、
+> 识别器空闲自动卸载（默认关闭，`region_smoke` 用真实模型验证 busy 保护与自动释放）、
+> org_det 多框交叉验证（`class_is_consistent` + 全丢时退回整图）。
+> 仍开着的只剩「网格无表格语义」与 `package.ps1` 端到端未验证。
+
 > **2026-09-24 Batch 6 落地**：**#13 的第 1/2 条其实是「整条链路从没接线」**——GPUI 版左栏
 > 「复制到目录 / 移动到目录」弹完确认框什么都不做、批量重命名连入口都没有，而 `op_journal`
 > 全仓从未 `record`（Ctrl+Z 永远回答「没有可撤销的批量操作」，手册承诺的撤销从没生效过）。
@@ -293,14 +300,36 @@
      随后的「扫描完成…」顶掉，用户看不到「Ctrl+Z 可撤销」）。
    验证：`ops`/`undo` 新增 8 个单测（engine 191→**199**）；新冒烟 `batch_ops_smoke`
    **25 项全过**（含「确认后进回收站 → Ctrl+Z 真恢复」「移动/复制/重命名各自撤销」）。
-3. ⏸ **不适用（GPUI 版没有这个控件）**：左栏「镜头 / 物种多选下拉」是 Tauri 版手册的条目，
-   GPUI 的筛选栏（`views/filter_bar.rs`）只有 格式 / 评分 / 旗标 / 色标 / 识别状态 五组
-   chip，`FilterCriteria.lens_filter` / `taxon_names` 至今**没有任何 UI 入口**。
-   要做等于新建两个筛选器（含候选项来源、多选交互），不是「补方向键」。
-4. ⏸ **不适用（GPUI 版没有右键菜单）**：全仓 grep 无 `on_secondary` / 自建 context menu，
-   胶片条注释里的「右键上下文操作」在 GPUI 重写时丢了。gpui-component 有
-   `menu/context_menu.rs` 可复用，但那是**新建**（含键盘导航与最大高度滚动）——按新功能排期。
-   同条的「网格无表格语义」同样未做。
+3. ✅ **镜头 / 物种多选筛选器已建出来**（2026-09-24）。原条目写「无方向键导航」，
+   实际 GPUI 版**连这两个控件都没有**（`FilterCriteria.lens_filter` / `taxon_names`
+   一直没有任何 UI 入口）。本轮直接用了 gpui-component 的 **Combobox**（多选 + 可搜索 +
+   自带方向键导航），所以老问题不会重现：
+   - 纯逻辑 `model/filter.rs::lens_options` / `taxon_options`（去重排序；物种候选 =
+     顶层展示名 + **各主体展示名**——筛选语义是「任一主体命中即保留」，只列顶层会让
+     多主体照片的次要物种选不到；占位名「未识别」不进候选）
+   - AppState 持有两个 `ComboboxState`，Change/Confirm 写回 criteria 并重算管线；
+     候选随扫描世代在**渲染期经 defer_in 重建**（set_items 需要 Window）
+   - 筛选栏展开面板加「镜头 / 物种」两行；折叠行加可清除 chip（清除时**同时**清 criteria
+     与下拉选中集，否则下拉还勾着、再点一下就把筛选加回来了）；「重置全部筛选」一并清
+   验证：`filter_bar_smoke` 8→**17 项**全过（候选已在渲染期同步 / 单值生效 2/3 张 /
+   与镜头取交集 1/3 / 多值 = 命中任一即保留 / 清空归位 / 计入 `has_active_filters`）；
+   photo-ui 85→**87**（2 个候选收集单测）。
+4. ✅ **照片右键菜单已建出来（含键盘导航 + 最大高度滚动）**（2026-09-24）。原条目说的
+   「无键盘导航」在 GPUI 版无从谈起——**连菜单都没有**；而 gpui-component 的
+   ContextMenu/PopupMenu 只处理点击（整个 menu 模块 grep 无 `on_key_down`/`ArrowUp`），
+   直接套用只会把缺口原样搬过来，所以自绘：
+   - `model/context_menu.rs`：菜单项表 + 初始高亮 + 上下移动（**跳过置灰项、到边界不环绕**）
+   - `views/context_menu.rs`：背景层（点空白关）+ 卡片（240px 最大高，超出走 `scroll_area_v`
+     的 track_scroll + Scrollbar，贴边时往回收）；点击与悬停同步高亮
+   - app.rs：根视图 `on_key_down` 处理 Up/Down/Enter（根视图持有焦点，菜单不抢焦点）；
+     Esc 走 `handle_escape` 第 0 优先级
+   - `engine_ops::apply_context_menu_action`：点击与回车共用一条分发——先选中命中照片，
+     再 打开预览 / 复制图片 / 复制路径 / 打开所在文件夹 / Pick / Reject / 清旗标 / 评 5 星 /
+     识别这一张 / 移至回收站（只弹确认框）；目标已不在目录时诚实报错、不误伤别的照片
+   - 网格 cell、胶片条缩略图、预览三处都接上右键
+   验证：新增 `context_menu_smoke` **20 项**全过（含「10 项超过最大高**真的产生滚动范围**
+   max_offset 50px」「上下移动跳过置灰项且不环绕」「回收站只弹确认框且文件未动」）。
+   **同条的「网格无表格语义」仍未做**（uniform_list 的行列语义，属无障碍/读屏范畴）。
 5. ✅ **手册 §9.7 的「失败阶段中文 + 最接近候选」已接线**（2026-09-24）：
    `CaptureMeta` 新增 `failure_stage` / `candidates`（domain，最多 3 个候选，
    复用 `SubjectSummary`），由 `enrich_with_recognition` 从 `Recognition` 回填
@@ -345,10 +374,24 @@
   bsdtar 的 `-a -c -f out.zip` 命令形状已在本地用 tar 核过，但 BSD/GNU 差异靠运行时身份校验兜住。
 - 参考：`docs/open-questions.md` §8。
 
-### 16. 识别管线可选增强
+### 16. ✅ 识别管线可选增强 —— 多框交叉验证（2026-09-24）
 
-- org_det 多框的**交叉验证**没做——bioclip_demo 的 prune 三步只搬了「去背景 + IoU 去重 + 上限 8」。
-- 代码在 `bioclip_demo/src/detect.rs` 与 `bioclip_demo/src/main.rs::prune`，约 250 行，可直接搬。
+- **原状**：org_det 多框只搬了 prune 三步里的「去背景 + IoU 去重 + 上限 8」，
+  **交叉验证没搬**——于是「花被误检成鸟」这类假框仍可能把本来正确的整图结论挤掉。
+- **已完成**：`detect::class_is_consistent`（19 个粗类 → 界/门/纲 规则，规则逐条对齐
+  `bioclip_demo/src/detect.rs:186`）+ `pipeline::cross_validate_subjects`
+  （分类完成后、整理结果之前过滤；全部被判为误检时**退回整图识别**，与「检测无框」同一条
+  兜底；丢框后 index 重排成连续，0 恒 = 主主体；每个被丢的框打一条 debug 日志）。
+- **与 demo 的有意差别**（写进代码注释）：本仓名录兜底路径的 `TaxonMatch.ranks` 是空 vec
+  （`catalog.rs:54`），demo 那边路径永远来自标签空间。**没有分类证据时一律放行**，
+  否则走名录兜底的主体（置信度不低的那批）会被整批误判成误检丢掉。
+- 参考位置更正：`bioclip_demo` **不在本仓库**，是兄弟目录 `../bioclip_demo`（`prune` 在
+  `src/main.rs:314`，一致性规则在 `src/detect.rs:186`）——原条目写成仓内路径，已按实际改。
+- **验证**：`cargo test -p photo-recognize` 全绿（27→**33**：一致性 3 + 过滤 3）；
+  真实模型 `crates/rawlib/img.jpg` → 东方白鹳 `Ciconia boyciana` 76.4%（单框、自洽，无回归）；
+  `recognize_smoke` 5/5、`region_smoke` 19/19（多主体持久化未受影响）。
+- **未验证到的部分（如实记录）**：没能在真机素材上复现「误检框被丢」的场景——org_det 是
+  通用检测器，不再出现旧单类鸟检测器那种把花判成鸟的假框；该路径由 3 个单测精确覆盖。
 
 ### 17. 已知取舍（近期引入，暂时接受）
 
@@ -358,8 +401,18 @@
 - 识别器常驻：**约 600MB 内存长期占用**（org_det 40MB + BioCLIP int8 293MB + 名录 embedding 287MB）。
   ✅ **设置页「释放识别器」按钮已做**（2026-09-24）：设置 → 识别与性能 → 「常驻识别器内存」，
   显示当前是否装配 + 一键释放（`engine_ops::release_recognizer`，在实体 update 之外析构，
-  释放完给状态栏反馈）；下次识别/框选照旧懒装配。**「空闲 N 分钟自动卸载」没做**——
-  需要引入空闲计时与「正在识别中不卸载」的互斥判断，暂按显式按钮处理。
+  释放完给状态栏反馈）；下次识别/框选照旧懒装配。
+  ✅ **「空闲 N 分钟自动卸载」也做了**（2026-09-24）：`model/recognizer.rs::should_unload_recognizer`
+  纯判据（配置 0=关闭 / 未装配 / **识别进行中绝不释放** / 空闲未满阈值，四条缺一不释放）+
+  `AppConfig.recognizer_idle_unload_minutes`（默认 **0 = 关闭**，手改越界钳到 240）+
+  `engine_ops::start_recognizer_idle_watch`（30s 一次检查；`PHOTO_RECOGNIZER_IDLE_TICK_MS`
+  仅供冒烟压到秒级）+ 设置页 关闭/5/15/30 分钟 档位。
+  `recognizer_last_used` 在识别起点与「识别进行中」的每个 tick 都刷新，避免
+  「空闲很久 → 跑一个 5 秒的批量」在批量刚结束时被判成空闲超时。
+  **默认关闭是有意的**：开了之后下一次识别要多等 1-2 秒装配，划不划算由使用节奏定。
+  验证：photo-config 19→**20**、photo-ui 87→**89**（判据 2 个单测）；
+  `region_smoke` 16→**19 项**——用真实模型装配后验证「识别进行中不释放（busy 保护）」与
+  「空闲超阈值自动释放 + 状态栏如实说明」。
 - 调整：有调整时 1:1 是**放大母版**（偏软）；RAW 调整走 8-bit 2560 母版，大范围拉曝光仍会条带
   （ADR 0007 设想的 half_size + 16-bit 母版未做）。
 
@@ -397,8 +450,9 @@
    「显式确认全量」逃生门，新冒烟 `batch_ops_smoke` 25 项）、#13.5（信息栏失败阶段 + 最接近候选）、
    #14.6（核实为已解决）、#14.7（导入目标目录记忆）、#1 遗留（导出预设新建/保存/删除）、
    #17 释放识别器按钮。
-   **仍开着的**：#16（org_det 多框交叉验证，需模型实测，没动）、#13.3 / #13.4（GPUI 版没有对应控件，
-   要做等于新建筛选器 / 右键菜单，按新功能排期）、#17 的空闲自动卸载。
+   **仍开着的**：只剩 #13.4 的「网格无表格语义」（uniform_list 的行列语义，属无障碍范畴）
+   与 #15 的 `package.ps1` 端到端未验证（需 Windows+pwsh）。
+   #16 / #13.3 / #13.4（右键菜单）/ #17 空闲自动卸载均已落地，见各自条目。
 
 11. **P3（#13–#18）**——✅ #15（NOTICE / 打包校验）已于 2026-09-23 做掉；核定中查出的
    `org_det.onnx`（Ultralytics YOLOE）**AGPL-3.0** 已按「开源不收费」定妥：
