@@ -5485,6 +5485,8 @@ dependencies = [
  "tracing-log",
  "tracing-subscriber",
  "trash",
+ "wl-clipboard-rs",
+ "x11rb",
 ]
 
 [[package]]

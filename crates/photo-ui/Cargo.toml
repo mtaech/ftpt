@@ -34,6 +34,13 @@ open = "5"
 # wayland-data-control：Wayland 会话下用 wl-clipboard-rs 的 data-control 协议。
 arboard = { version = "3", features = ["wayland-data-control"] }
 
+# 「把源文件原字节挂上剪贴板」用的两个底层库（都在 arboard 的依赖树里，等于零新增版本）：
+# - wl-clipboard-rs：Wayland 的 data-control，一次挂多个 MIME（arboard 不暴露这个能力）
+# - x11rb：X11 那边自己写最小 selection 服务器（arboard 的同一套 API 但没公开）
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))))'.dependencies]
+wl-clipboard-rs = "0.9"
+x11rb = "0.13"
+
 [dev-dependencies]
 # 无头冒烟读 a11y 语义要用 gpui-base 的观察点（ElementSnapshot 能读 role /
 # aria_label / selected），它由 gpui-kit 的 test-support 特性开启。

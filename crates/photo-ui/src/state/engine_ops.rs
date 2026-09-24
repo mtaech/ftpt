@@ -2276,8 +2276,17 @@ pub fn start_recognition(
 /// - 原文件解不开（DNG/TIFF/HEIF 等）同样回退到 full 母版。
 ///
 /// 用 `arboard` 而不是 GPUI 自带的剪贴板：gpui-pre 的 Linux 后端（X11/Wayland）
-/// 只写文本，图片项会被静默丢弃。解码放后台 executor（39MP RGBA ≈157MB，不能冻 UI），
-/// 写剪贴板回主线程。
+/// 只写文本，图片项会被静默丢弃。
+///
+/// **两条路径**：
+/// 1. 常规格式（JPEG/PNG/WebP/GIF/TIFF/BMP/HEIF）走 `clipboard_file`：直接把**源文件原字节**
+///    按它自己的 MIME 挂上剪贴板，再挂一份 `text/uri-list`（文件路径）——不解码、不重编码，
+///    瞬时且画质无损（用户要求「直接把源图片复制进剪贴板」）。
+/// 2. 回退：RAW（没有可直接粘贴的 MIME）或原字节路径失败时，解码全尺寸 RGBA 交给 arboard
+///    的 `set_image`（内部同步 PNG 编码）。
+///
+/// 两条路径**都在后台 executor**：arboard 的 `set_image` 会把 RGBA 编码成 PNG（39MP 秒级 CPU），
+/// 以前这一步在主线程做，于是「复制图片」把界面冻住（用户报「复制图片会导致卡死」）。
 pub fn copy_image_to_clipboard(
     state_entity: Entity<AppState>,
     manager: ImageManager,
@@ -2293,23 +2302,49 @@ pub fn copy_image_to_clipboard(
         .unwrap_or_else(|| source.path.to_string_lossy().to_string());
 
     cx.spawn(async move |async_cx| {
-        let decoded = async_cx
+        // 先给个「正在复制」的即时反馈：大图（39MP ≈ 157MB RGBA）要好几秒才写完剪贴板
+        let _ = async_cx.update(|cx| {
+            let _ = state_entity.update(cx, |state, cx| {
+                state.set_status_message(format!("正在复制图片到剪贴板：{name}…"));
+                cx.notify();
+            });
+        });
+
+        // 解码 **和写剪贴板** 都放后台线程：arboard 的 set_image 在 Linux（X11 与
+        // Wayland 两条路径）会同步把 RGBA 编码成 PNG——39MP 是秒级纯 CPU 重活。
+        // 以前写剪贴板是回主线程（async_cx.update）里做的，于是「复制图片」把界面
+        // 冻住（用户报「复制图片会导致卡死」）。
+        let copied = async_cx
             .background_executor()
-            .spawn(async move { decode_full_rgba(&manager, &source) })
+            .spawn(async move {
+                // 快路径：源文件原字节 + 文件路径（零解码零重编码）
+                if !crate::state::clipboard_file::legacy_png_forced()
+                    && let Some(mime) = crate::state::clipboard_file::image_mime_for(&source.format)
+                {
+                    match crate::state::clipboard_file::copy_file_as_image(&source.path, mime) {
+                        Ok(()) => return Ok::<CopyOutcome, String>(CopyOutcome::RawFile(mime)),
+                        Err(err) => {
+                            tracing::warn!("原字节挂剪贴板失败，回退解码 PNG：{err}");
+                        }
+                    }
+                }
+                // 回退：RAW / 平台不支持 / 原字节失败 → 全尺寸解码，arboard 编码 PNG
+                let (w, h, rgba) = decode_full_rgba(&manager, &source)?;
+                let mb = rgba.len() as f64 / (1024.0 * 1024.0);
+                write_image_to_system_clipboard(w, h, rgba)?;
+                Ok(CopyOutcome::Png { w, h, mb })
+            })
             .await;
 
         let _ = async_cx.update(|cx| {
             let _ = state_entity.update(cx, |state, cx| {
-                match decoded {
-                    Ok((w, h, rgba)) => {
-                        let mb = rgba.len() as f64 / (1024.0 * 1024.0);
-                        match write_image_to_system_clipboard(w, h, rgba) {
-                            Ok(()) => state.set_status_message(format!(
-                                "已复制图片到剪贴板：{name}（{w}×{h}，RGBA {mb:.1} MB）"
-                            )),
-                            Err(e) => state.set_status_message(format!("复制图片失败：{e}")),
-                        }
-                    }
+                match copied {
+                    Ok(CopyOutcome::RawFile(mime)) => state.set_status_message(format!(
+                        "已复制 {name}（{mime} 原文件 + 文件路径，未重编码）"
+                    )),
+                    Ok(CopyOutcome::Png { w, h, mb }) => state.set_status_message(format!(
+                        "已复制图片到剪贴板：{name}（{w}×{h}，RGBA {mb:.1} MB）"
+                    )),
                     Err(e) => state.set_status_message(format!("复制图片失败：{e}")),
                 }
                 cx.notify();
@@ -2317,6 +2352,14 @@ pub fn copy_image_to_clipboard(
         });
     })
     .detach();
+}
+
+/// 复制结果（只用于状态栏文案）。
+enum CopyOutcome {
+    /// 源文件原字节 + 文件路径（快路径），MIME 是它自己的
+    RawFile(&'static str),
+    /// 回退路径：解码成 RGBA 后由 arboard 编码 PNG
+    Png { w: u32, h: u32, mb: f64 },
 }
 
 /// 常驻的剪贴板持有者。

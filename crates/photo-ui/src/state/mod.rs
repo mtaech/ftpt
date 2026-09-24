@@ -2,6 +2,7 @@
 
 pub mod app_state;
 pub mod engine_ops;
+pub mod clipboard_file;
 pub mod folder_picker;
 pub mod import;
 
